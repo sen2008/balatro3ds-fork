@@ -1356,7 +1356,7 @@ function Game:sync_shop_offer_nodes()
         local node = self.shop_offer_nodes[i]
         local existing = node
         local need_joker = (offer.kind == nil or offer.kind == "joker")
-        local need_cons = (offer.kind == "tarot" or offer.kind == "planet" or offer.kind == "spectral")
+        local need_cons = self:is_consumable_kind(offer.kind)
         local need_pc = (offer.kind == "playing_card")
 
         if node then
@@ -1599,6 +1599,15 @@ function Game:sync_shop_voucher_nodes()
     end
 end
 
+--- Whether `kind` names a consumable set an offer or a card can belong to: the three
+--- vanilla sets, or a kind a mod registered with `SMODS.ConsumableType`. With no
+--- custom kinds registered this is exactly the vanilla three, so every check that
+--- routes through here asks the question it always asked.
+function Game:is_consumable_kind(kind)
+    if kind == "tarot" or kind == "planet" or kind == "spectral" then return true end
+    return SMODS and SMODS.is_consumable_kind and SMODS.is_consumable_kind(kind) or false
+end
+
 function Game:can_buy_shop_offer(slot_index)
     local offer = self.shop_offers and self.shop_offers[slot_index]
     if not offer then return false end
@@ -1616,7 +1625,7 @@ function Game:can_buy_shop_offer(slot_index)
         local new_neg = Joker and Joker.normalize_edition(offer.edition) == "negative"
         local cap_after = self:joker_base_capacity() + neg_owned + (new_neg and 1 or 0)
         return #self.jokers < cap_after
-    elseif k == "tarot" or k == "planet" or k == "spectral" then
+    elseif self:is_consumable_kind(k) then
         local params = nil
         if offer.edition then
             params = { edition = offer.edition }
@@ -1670,7 +1679,7 @@ function Game:get_drag_zones_for_context(ctx)
         local offer = self.shop_offers and self.shop_offers[ctx.slot_index]
         local can_buy = self:can_buy_shop_offer(ctx.slot_index)
         zones.top = DragZonesUI.make_zone(I18N.text("action.buy", nil, "BUY"), can_buy, can_buy and C.MONEY or C.GREY, "buy", true)
-        if offer and (offer.kind == "tarot" or offer.kind == "planet" or offer.kind == "spectral") then
+        if offer and self:is_consumable_kind(offer.kind) then
             -- Instant-use does not need an inventory slot (planets, Hermit, Temperance, etc.).
             local can_afford = self:can_afford_price(self:get_shop_offer_price(offer))
             local can_buy_use = can_afford and self:shop_offer_consumable_use_enabled(offer)
@@ -2280,11 +2289,8 @@ function Game:is_trackable_discovery_id(id)
     if type(id) ~= "string" or id == "" then return false end
     if JOKER_DEFS and JOKER_DEFS[id] then return true end
     local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[id]
-    if def then
-        local kind = def.kind
-        if kind == "tarot" or kind == "planet" or kind == "spectral" then
-            return true
-        end
+    if def and self:is_consumable_kind(def.kind) then
+        return true
     end
     return self:is_collection_discovery_id(id)
 end
@@ -6661,13 +6667,16 @@ end
 function Game:shop_offer_consumable_use_enabled(offer)
     if type(offer) ~= "table" then return false end
     local kind = offer.kind
-    if kind ~= "tarot" and kind ~= "planet" and kind ~= "spectral" then return false end
+    if not self:is_consumable_kind(kind) then return false end
     local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[offer.id]
     if type(def) ~= "table" then return false end
     if self:consumable_requires_selection(def) then return false end
     local c = copy_table and copy_table(def) or nil
     if type(c) ~= "table" then return false end
     c.id = offer.id
+    -- As in `buy_and_use_shop_consumable`: a mod card's `can_use` reads
+    -- `card.ability`, which a held copy carries and a def copy does not.
+    if def.mod_id and c.ability == nil then c.ability = copy_table(def.config or {}) end
     return self:pack_consumable_can_apply(c)
 end
 
@@ -6820,11 +6829,13 @@ local REFERENCE_CONSUMABLE_POOL_ORDERS = {
 local consumable_order_cache = {}
 local function consumable_pool_order(kind)
     local base = REFERENCE_CONSUMABLE_POOL_ORDERS[kind]
-    if not base then return nil end
     local mods = {}
     for id, def in pairs(CONSUMABLE_DEFS or {}) do
         if type(def) == "table" and def.mod_id and def.kind == kind then mods[#mods + 1] = id end
     end
+    -- A kind with no reference order is a mod's own (`SMODS.ConsumableType`): its pool
+    -- is its cards alone, and a kind with no cards at all has no pool.
+    if not base and #mods == 0 then return nil end
     if #mods == 0 then return base end
     local cached = consumable_order_cache[kind]
     if cached and cached.n == #mods then return cached.list end
@@ -6832,7 +6843,7 @@ local function consumable_pool_order(kind)
         return (tonumber(CONSUMABLE_DEFS[a].index) or 0) < (tonumber(CONSUMABLE_DEFS[b].index) or 0)
     end)
     local list = {}
-    for _, id in ipairs(base) do list[#list + 1] = id end
+    for _, id in ipairs(base or {}) do list[#list + 1] = id end
     for _, id in ipairs(mods) do list[#list + 1] = id end
     consumable_order_cache[kind] = { n = #mods, list = list }
     return list
@@ -12617,7 +12628,15 @@ function Game:_generate_next_shop_queue_offer()
     -- Magic Trick adds four playing-card weights (reference game.lua:604).
     local cw = self:has_voucher("v_magic_trick") and 4 or 0
     local joker_weight = (self.challenge_modifiers and self.challenge_modifiers.no_shop_jokers == true) and 0 or 20
-    local total = joker_weight + tw + pw + sw + cw
+    -- Custom consumable kinds (`SMODS.ConsumableType`) add their `shop_rate` past the
+    -- spectral slice, in registration order. With none registered the total and every
+    -- slice boundary are the vanilla ones, and the roll spends the same single draw.
+    local custom_kinds = SMODS and SMODS.shop_consumable_kinds and SMODS.shop_consumable_kinds() or nil
+    local custom_total = 0
+    if custom_kinds then
+        for _, entry in ipairs(custom_kinds) do custom_total = custom_total + entry.shop_rate end
+    end
+    local total = joker_weight + tw + pw + sw + custom_total + cw
     local max_attempts = 32
 
     for _ = 1, max_attempts do
@@ -12631,6 +12650,13 @@ function Game:_generate_next_shop_queue_offer()
             kind = "planet"
         elseif roll <= joker_weight + tw + pw + sw then
             kind = "spectral"
+        elseif custom_total > 0 and roll <= joker_weight + tw + pw + sw + custom_total then
+            local x = roll - (joker_weight + tw + pw + sw)
+            kind = custom_kinds[#custom_kinds].kind
+            for _, entry in ipairs(custom_kinds) do
+                x = x - entry.shop_rate
+                if x <= 0 then kind = entry.kind break end
+            end
         else
             kind = "playing_card"
         end
@@ -12646,6 +12672,9 @@ function Game:_generate_next_shop_queue_offer()
             if c then return c end
         elseif kind == "spectral" then
             local c = self:_roll_shop_queue_consumable_offer("spectral")
+            if c then return c end
+        elseif kind ~= "playing_card" then
+            local c = self:_roll_shop_queue_consumable_offer(kind)
             if c then return c end
         else
             local pc = self:_roll_shop_playing_card_offer()
@@ -12874,7 +12903,7 @@ function Game:get_shop_offer_price(offer)
     if k == nil or k == "joker" then
         local def = JOKER_DEFS and JOKER_DEFS[offer.id]
         return self:shop_price_for_joker_offer(def, offer.edition, offer.stickers)
-    elseif k == "tarot" or k == "planet" or k == "spectral" then
+    elseif self:is_consumable_kind(k) then
         if self:hasJoker("j_astronomer") and k == "planet" then
             return 0
         end
@@ -15706,7 +15735,7 @@ function Game:buy_shop_joker(slot_index)
             end
         end
         ok = self:add_joker_by_def(offer.id, create_params, shelf) and true or false
-    elseif k == "tarot" or k == "planet" or k == "spectral" then
+    elseif self:is_consumable_kind(k) then
         local params = offer.edition and { edition = offer.edition } or nil
         if not self:can_add_consumable(params) then return false end
         ok = self:add_consumable(offer.id, params, shelf)
@@ -15760,7 +15789,7 @@ function Game:buy_and_use_shop_consumable(slot_index)
     local offer = self.shop_offers and self.shop_offers[slot_index]
     if type(offer) ~= "table" then return false end
     local kind = offer.kind
-    if kind ~= "tarot" and kind ~= "planet" and kind ~= "spectral" then return false end
+    if not self:is_consumable_kind(kind) then return false end
     local price = self:get_shop_offer_price(offer)
     if not self:can_afford_price(price) then return false end
     if not self:shop_offer_consumable_use_enabled(offer) then return false end
@@ -15769,6 +15798,9 @@ function Game:buy_and_use_shop_consumable(slot_index)
     local c = copy_table and copy_table(def) or nil
     if type(c) ~= "table" then return false end
     c.id = offer.id
+    -- A mod consumable's code reads `card.ability`; a held copy carries it (see
+    -- `add_consumable`), so the def copy this path applies gets one too.
+    if def.mod_id and c.ability == nil then c.ability = copy_table(def.config or {}) end
 
     self.money = (tonumber(self.money) or 0) - price
     self:add_career_stat("c_shop_dollars_spent", math.max(0, price))

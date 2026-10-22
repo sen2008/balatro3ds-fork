@@ -1627,4 +1627,209 @@ suite.test("suit in_pool gates the random playing-card fronts", function()
     end
 end)
 
+--------------------------------------------------------------------------------
+-- Custom consumable types (SMODS.ConsumableType)
+--------------------------------------------------------------------------------
+
+local CTYPES = [[
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    shop_rate = 6,
+}
+SMODS.Consumable {
+    set = "Minor", key = "coin",
+    loc_txt = { name = "Coin", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 5 } },
+    cost = 3, sprite = "coin.png",
+    can_use = function(self, card) return G.money < 100 end,
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Consumable {
+    set = "minor", key = "mark",
+    loc_txt = { name = "Mark", text = { "Enhances {C:attention}1{} card", "into a {C:mult}Mult Card{}" } },
+    config = { max_highlighted = 1, mod_conv = "m_mult" },
+    sprite = "mark.png",
+}
+SMODS.Consumable {
+    set = "ct_Minor", key = "sigil",
+    loc_txt = { name = "Sigil", text = { "Gain {C:money}$2{}" } },
+    sprite = "sigil.png",
+    use = function(self, card) ease_dollars(2) end,
+}
+]]
+
+local function install_ct()
+    wipe_mods()
+    write_mod("CTypes", { id = "CTypes", prefix = "ct", main_file = "main.lua", version = "1" }, CTYPES)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.CTypes.status, "loaded", tostring(ModLoader.by_id.CTypes.error))
+    local game = bootstrap.new_game(4460)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 10
+    return game
+end
+
+suite.test("custom consumable types: registration, pool, add_card and the shop roll", function()
+    local game = install_ct()
+    local entry = SMODS.ConsumableTypes["ct_Minor"]
+    T.assert_true(entry ~= nil, "the type registers under its full id")
+    T.assert_eq(entry.kind, "Minor")
+    T.assert_eq(entry.shop_rate, 6)
+    T.assert_eq(CONSUMABLE_DEFS.c_ct_coin.kind, "Minor", "declared by bare key")
+    T.assert_eq(CONSUMABLE_DEFS.c_ct_mark.kind, "Minor", "declared lowercase")
+    T.assert_eq(CONSUMABLE_DEFS.c_ct_sigil.kind, "Minor", "declared by full id")
+    T.assert_true(game:is_consumable_kind("Minor"))
+    T.assert_true(SMODS.is_consumable_kind("Minor"))
+
+    -- The pool is the kind's own cards.
+    local pool = game:_consumable_pool_ids("Minor", true)
+    T.assert_eq(#pool, 3)
+    local rolled = game:random_consumable_id_of_kind("Minor", nil, "ct")
+    T.assert_true(rolled == "c_ct_coin" or rolled == "c_ct_mark" or rolled == "c_ct_sigil",
+        "kind rolls draw from the kind's pool")
+
+    -- SMODS.add_card resolves the custom kind by name.
+    game.consumables, game.consumable_nodes = {}, {}
+    local made = SMODS.add_card { set = "Minor", key = "c_ct_coin" }
+    T.assert_true(made ~= nil and made.id == "c_ct_coin" and made.kind == "Minor",
+        "add_card with the custom set name")
+    local made2 = SMODS.add_card { set = "Consumable", key = "c_ct_sigil" }
+    T.assert_true(made2 ~= nil and made2.kind == "Minor", "the generic set name still works")
+
+    -- The shop roll: weights are joker 20, tarot 4, planet 4, spectral 0 (standard
+    -- deck), Minor 6 -- so Minor should land near 6/34 of the offers, alongside the
+    -- vanilla kinds.
+    game.consumables, game.shop_offers = {}, {}
+    local counts, total = {}, 0
+    for ante = 1, 800 do
+        game.ante = ante
+        local offer = game:_generate_next_shop_queue_offer()
+        if offer then
+            counts[offer.kind] = (counts[offer.kind] or 0) + 1
+            total = total + 1
+        end
+    end
+    T.assert_true(total > 700, "the shop generated its offers")
+    local share = (counts["Minor"] or 0) / total
+    T.assert_true(share > 0.08 and share < 0.28,
+        ("Minor shop share %.3f, expected near %.3f"):format(share, 6 / 34))
+    T.assert_true((counts.tarot or 0) > 0 and (counts.planet or 0) > 0 and (counts.joker or 0) > 0,
+        "the vanilla kinds still roll")
+
+    -- Unloading the mod restores the vanilla kinds.
+    wipe_mods()
+    T.assert_eq(next(SMODS.ConsumableTypes), nil, "types unregister on rollback")
+    T.assert_eq(next(SMODS.ConsumableKinds), nil)
+    T.assert_eq(CONSUMABLE_DEFS.c_ct_coin, nil)
+    local plain = bootstrap.new_game(4461)
+    G = plain
+    T.assert_false(plain:is_consumable_kind("Minor"))
+    T.assert_eq(SMODS.shop_consumable_kinds(), nil, "no custom kinds in the shop roll")
+end)
+
+suite.test("custom consumable types: use and can_use run through the real flow", function()
+    local game = install_ct()
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.consumable_nodes = {}, {}
+    T.assert_true(game:add_consumable("c_ct_coin"))
+    game.money = 150
+    T.assert_false(game:consumable_use_enabled(1), "can_use blocks at $100+")
+    game.money = 10
+    T.assert_true(game:consumable_use_enabled(1))
+    T.assert_true(game:use_consumable(1))
+    T.assert_eq(game.money, 15, "the custom kind's use ran")
+    T.assert_eq(#game.consumables, 0, "and the card is spent")
+
+    -- A targeted card of the kind follows the tarot selection rules.
+    game.STATE = game.STATES.SELECTING_HAND
+    local a = Card(0, 0, 1, 1, { rank = 7, suit = "Hearts" })
+    local selected = { a }
+    game.hand = {
+        ordered_selected_nodes = function() return selected end,
+        clear_selection = function() end, layout = function() end,
+        is_scoring_active = function() return false end,
+    }
+    T.assert_true(game:add_consumable("c_ct_mark"))
+    selected = {}
+    T.assert_false(game:consumable_use_enabled(1), "nothing selected: not usable")
+    selected = { a }
+    T.assert_true(game:consumable_use_enabled(1), "one selected: usable")
+    T.assert_true(game:use_consumable(1))
+    T.assert_eq(a.card_data.enhancement, "mult", "mod_conv applies to the selection")
+    wipe_mods()
+end)
+
+suite.test("custom consumable types: shop offers buy and buy-and-use", function()
+    local game = install_ct()
+    game.STATE = game.STATES.SHOP
+    game.money = 10
+    game.consumables, game.consumable_nodes = {}, {}
+    game.shop_offers = { { kind = "Minor", id = "c_ct_coin", price = 3 } }
+    T.assert_eq(game:shop_price_for_consumable_offer(CONSUMABLE_DEFS.c_ct_coin), 3,
+        "the kind prices from the def's cost")
+    T.assert_eq(game:get_shop_offer_price(game.shop_offers[1]), 3)
+    T.assert_true(game:can_buy_shop_offer(1))
+    T.assert_true(game:buy_shop_joker(1), "buying the custom offer works")
+    T.assert_eq(#game.consumables, 1)
+    T.assert_eq(game.consumables[1].kind, "Minor")
+    T.assert_eq(game.money, 7, "price paid")
+
+    game.shop_offers = { { kind = "Minor", id = "c_ct_coin", price = 3 } }
+    T.assert_true(game:shop_offer_consumable_use_enabled(game.shop_offers[1]), "buy-and-use is offered")
+    T.assert_true(game:buy_and_use_shop_consumable(1), "buy-and-use works")
+    T.assert_eq(#game.consumables, 1, "the bought copy was used, not held")
+    T.assert_eq(game.money, 9, "paid $3, and the card's use paid $5")
+    wipe_mods()
+end)
+
+suite.test("a consumable in an unregistered set is a load error naming the set", function()
+    wipe_mods()
+    write_mod("NoType", { id = "NoType", prefix = "nt", main_file = "main.lua", version = "1" }, [[
+SMODS.Consumable {
+    set = "Minor", key = "orphan",
+    loc_txt = { name = "Orphan" },
+    sprite = "orphan.png",
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.NoType.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.NoType.error):find("Minor", 1, true) ~= nil,
+        "the error names the set: " .. tostring(ModLoader.by_id.NoType.error))
+    T.assert_true(tostring(ModLoader.by_id.NoType.error):find("unknown set", 1, true) ~= nil,
+        tostring(ModLoader.by_id.NoType.error))
+    T.assert_eq(CONSUMABLE_DEFS.c_nt_orphan, nil, "nothing registered")
+    wipe_mods()
+end)
+
+suite.test("with no custom types, consumable kinds and a tarot use stay vanilla", function()
+    wipe_mods()
+    local game = bootstrap.new_game(4462)
+    G = game
+    T.assert_eq(SMODS.shop_consumable_kinds(), nil)
+    T.assert_true(game:is_consumable_kind("tarot") and game:is_consumable_kind("planet")
+        and game:is_consumable_kind("spectral"))
+    T.assert_false(game:is_consumable_kind("Minor"))
+    T.assert_eq(game:random_consumable_id_of_kind("Minor", nil, "van"), nil,
+        "an unregistered kind has no pool")
+
+    game.consumables, game.shop_offers = {}, {}
+    local allowed = { joker = true, tarot = true, planet = true, spectral = true, playing_card = true }
+    for ante = 1, 200 do
+        game.ante = ante
+        local offer = game:_generate_next_shop_queue_offer()
+        T.assert_true(offer == nil or allowed[offer.kind] == true,
+            "only vanilla kinds roll: " .. tostring(offer and offer.kind))
+    end
+
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.consumable_nodes = {}, {}
+    game.money = 10
+    T.assert_true(game:add_consumable("tarot_hermit"))
+    T.assert_true(game:use_consumable(1))
+    T.assert_eq(game.money, 20, "The Hermit still doubles the money (capped at $20)")
+end)
+
 return suite

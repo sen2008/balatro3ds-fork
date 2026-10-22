@@ -1217,6 +1217,119 @@ SMODS.sync_highlighted = sync_highlighted
 
 local CONSUMABLE_SET = { tarot = "tarot", planet = "planet", spectral = "spectral" }
 
+--- Custom consumable types by full id (`<prefix>_<key>`) and by the kind string their
+--- cards carry (`def.kind`, the bare key as the mod wrote it, e.g. "Minor"). Kinds are
+--- global, the way Steamodded's sets are: two mods cannot register the same kind, and
+--- a kind may not reuse a vanilla set's name.
+SMODS.ConsumableTypes = SMODS.ConsumableTypes or {}
+SMODS.ConsumableKinds = SMODS.ConsumableKinds or {}
+local next_consumable_type_order = 1
+
+--- `SMODS.ConsumableType { key, loc_txt, shop_rate }`: a consumable set of this mod's
+--- own. A consumable then declares it with `set = "<key>"` (or the type's full id) in
+--- `SMODS.Consumable`, and its cards are held, pooled, sold and used exactly like the
+--- vanilla sets' -- but as their own kind wherever the game asks which set a card
+--- belongs to. Planet hand-levelling and the Tarot/Spectral-only effects stay with
+--- their own kinds; a custom kind's cards do what their own `use` says.
+---
+--- `shop_rate` is the kind's weight in the shop's consumable roll, in the units of
+--- the vanilla weights (Tarot and Planet are 4 each before their merchant vouchers
+--- raise them): the default 4 makes the kind as present as a vanilla one. The kind
+--- joins the roll only while it has cards and a positive rate; rate 0 keeps it out
+--- of the shop (its cards can still be created directly).
+function SMODS.ConsumableType(t)
+    local mod = need_mod("SMODS.ConsumableType")
+    check(type(t) == "table", "SMODS.ConsumableType expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$") ~= nil,
+        "SMODS.ConsumableType needs a 'key' of letters, digits and underscores")
+    check(CONSUMABLE_SET[t.key:lower()] == nil,
+        "ConsumableType '" .. t.key .. "' reuses one of the three vanilla sets")
+    local id = mod.prefix .. "_" .. t.key
+    check(SMODS.ConsumableTypes[id] == nil,
+        "ConsumableType '" .. t.key .. "' is defined twice (id " .. id .. ")")
+    for _, entry in pairs(SMODS.ConsumableKinds) do
+        check(entry.kind:lower() ~= t.key:lower(),
+            "ConsumableType '" .. t.key .. "': the set '" .. entry.kind
+            .. "' is already registered by " .. entry.mod.id)
+    end
+    local rate = t.shop_rate == nil and 4 or tonumber(t.shop_rate)
+    check(rate ~= nil and rate >= 0,
+        "ConsumableType '" .. t.key .. "': shop_rate must be a number >= 0")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, kind = t.key, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        shop_rate = rate,
+        order = next_consumable_type_order,
+    }
+    next_consumable_type_order = next_consumable_type_order + 1
+    SMODS.ConsumableTypes[id] = entry
+    SMODS.ConsumableKinds[entry.kind] = entry
+    mod.registered.consumable_types = mod.registered.consumable_types or {}
+    mod.registered.consumable_types[#mod.registered.consumable_types + 1] = id
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    return t
+end
+
+--- Whether `kind` names a consumable set: a vanilla one, or a kind a mod registered
+--- with `SMODS.ConsumableType`.
+function SMODS.is_consumable_kind(kind)
+    if type(kind) ~= "string" then return false end
+    if CONSUMABLE_SET[kind:lower()] then return true end
+    return SMODS.ConsumableKinds[kind] ~= nil
+end
+
+--- The registered type a set name means, or nil: the bare kind ("Minor"), a full type
+--- id ("ct_Minor"), or -- from the registering mod -- its own bare key. Apart from
+--- the exact full id, matching is case-insensitive, the way the vanilla set names are
+--- read.
+local function consumable_type_for_set(set, mod)
+    if type(set) ~= "string" or set == "" then return nil end
+    local entry = SMODS.ConsumableTypes[set]
+    if entry then return entry end
+    if mod then
+        entry = SMODS.ConsumableTypes[mod.prefix .. "_" .. set]
+        if entry then return entry end
+    end
+    local lower = set:lower()
+    for _, e in pairs(SMODS.ConsumableKinds) do
+        if e.kind:lower() == lower then return e end
+    end
+    return nil
+end
+
+--- What `set` means in `SMODS.Consumable` / `SMODS.add_card`: the kind string the
+--- card carries, or nil when the name is none of the vanilla sets and no registered
+--- type.
+local function resolve_consumable_kind(set, mod)
+    local vanilla = CONSUMABLE_SET[tostring(set or ""):lower()]
+    if vanilla then return vanilla end
+    local entry = consumable_type_for_set(set, mod)
+    return entry and entry.kind or nil
+end
+
+--- Custom kinds that belong in the shop roll right now: a positive `shop_rate` and
+--- at least one def of the kind, in registration order. Nil when there are none, so
+--- the shop's vanilla roll is untouched.
+function SMODS.shop_consumable_kinds()
+    local out = {}
+    for _, entry in pairs(SMODS.ConsumableKinds) do
+        if entry.shop_rate > 0 then
+            for _, def in pairs(CONSUMABLE_DEFS or {}) do
+                if type(def) == "table" and def.kind == entry.kind then
+                    out[#out + 1] = entry
+                    break
+                end
+            end
+        end
+    end
+    if #out == 0 then return nil end
+    table.sort(out, function(a, b) return a.order < b.order end)
+    return out
+end
+
 --- Steamodded's enhancement keys onto the port's.
 local ENHANCEMENT = {
     m_bonus = "bonus", m_mult = "mult", m_wild = "wild", m_glass = "glass",
@@ -1225,8 +1338,10 @@ local ENHANCEMENT = {
 
 local consumable_order = 1000
 
---- `SMODS.Consumable { set = "Tarot"|"Planet"|"Spectral", key, loc_txt, config, cost, sprite,
+--- `SMODS.Consumable { set, key, loc_txt, config, cost, sprite,
 --- negative_sprite, loc_vars, can_use, use }`. The id is `c_<prefix>_<key>`.
+--- `set` is "Tarot", "Planet" or "Spectral", or a type this mod registered with
+--- `SMODS.ConsumableType` (its bare key or its full id).
 ---
 --- Like Steamodded, a consumable that only declares data needs no code:
 ---   * `config.max_highlighted` (and `min_highlighted`) is how many cards it targets;
@@ -1238,8 +1353,9 @@ function SMODS.Consumable(t)
     check(type(t) == "table", "SMODS.Consumable expects a table")
     check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
         "SMODS.Consumable needs a 'key' of letters, digits and underscores")
-    local kind = CONSUMABLE_SET[tostring(t.set or ""):lower()]
-    check(kind ~= nil, "Consumable '" .. t.key .. "': set must be \"Tarot\", \"Planet\" or \"Spectral\"")
+    local kind = resolve_consumable_kind(t.set, mod)
+    check(kind ~= nil, "Consumable '" .. t.key .. "': unknown set '" .. tostring(t.set)
+        .. "' (register it with SMODS.ConsumableType first, or use \"Tarot\", \"Planet\" or \"Spectral\")")
     local id = "c_" .. mod.prefix .. "_" .. t.key
     check(CONSUMABLE_DEFS[id] == nil, "Consumable '" .. t.key .. "' is defined twice (id " .. id .. ")")
     check_functions(t, "Consumable", { "loc_vars", "can_use", "use" })
@@ -1586,7 +1702,8 @@ end
 ---   * `"Joker"`: `t.key` is a Joker def id (`"j_joker"`, `"j_<prefix>_<key>"`). Returns
 ---     the new Joker, or nil when the Joker slots are full or the id is unknown. A mod
 ---     Joker created this way hears its `add_to_deck`, like a bought one.
----   * `"Tarot"` / `"Planet"` / `"Spectral"` / `"Consumable"`: `t.key` is a consumable
+---   * `"Tarot"` / `"Planet"` / `"Spectral"` / `"Consumable"`, or a kind registered
+---     with `SMODS.ConsumableType`: `t.key` is a consumable
 ---     def id. Returns the new consumable, or nil when the consumable slots are full
 ---     (checked with `Game:can_add_consumable`, the shop's own check) or the id is unknown.
 ---   * `"Playing"`: `t.rank` / `t.suit` name the card (see `playing_card_data`), with
@@ -1610,7 +1727,9 @@ function SMODS.add_card(t)
         if not G:add_joker_by_def(t.key, params) then return nil end
         return G.jokers[#G.jokers]
     end
-    if set == "Tarot" or set == "Planet" or set == "Spectral" or set == "Consumable" then
+    -- A consumable set by any of its names: the vanilla three, "Consumable" (the def
+    -- decides), or a kind registered with `SMODS.ConsumableType`.
+    if set == "Consumable" or resolve_consumable_kind(set, nil) ~= nil then
         if type(t.key) ~= "string" or not (CONSUMABLE_DEFS and CONSUMABLE_DEFS[t.key]) then return nil end
         local params = {}
         local edition = edition_param(t)
@@ -1803,6 +1922,12 @@ function SMODS.rollback(mod)
         SMODS.Rarities[id] = nil
     end
     mod.registered.rarities = {}
+    for _, id in ipairs(mod.registered.consumable_types or {}) do
+        local entry = SMODS.ConsumableTypes[id]
+        if entry then SMODS.ConsumableKinds[entry.kind] = nil end
+        SMODS.ConsumableTypes[id] = nil
+    end
+    mod.registered.consumable_types = {}
     for _, name in ipairs(mod.registered.suits or {}) do SMODS.Suits[name] = nil end
     mod.registered.suits = {}
     for _, name in ipairs(mod.registered.poker_hands or {}) do

@@ -579,7 +579,7 @@ function ShopUI.draw_shop_item_actions(game)
     -- Consumables have the reference's second, side-mounted Buy & Use action.
     -- It is kept compact so it does not consume the shelf's already scarce height.
     local offer = action.offer
-    if offer and (offer.kind == "tarot" or offer.kind == "planet" or offer.kind == "spectral") then
+    if offer and game:is_consumable_kind(offer.kind) then
         local can_use = game:can_afford_price(game:get_shop_offer_price(offer))
             and game:shop_offer_consumable_use_enabled(offer)
         local use_rect = {

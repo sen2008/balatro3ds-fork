@@ -1,6 +1,6 @@
 # Modding Balatro3DS
 
-Balatro3DS loads mods written in the [Steamodded](https://github.com/Steamodded/smods) style: a folder with a `.json` manifest and a Lua file that calls `SMODS.Joker { ... }`, `SMODS.Consumable { ... }`, `SMODS.Voucher { ... }` and `SMODS.DeckSkin { ... }`. Simple Steamodded Jokers, such as the ones in [Steamodded's examples](https://github.com/Steamodded/examples/tree/master/Mods/JokerExamples), port with few changes. The main one is the art: here **every card is its own image file**, the way the game stores its own Jokers and consumables, instead of Steamodded's atlases. This is not Steamodded, though. There is no Lovely, no `G.GAME` and no shaders, and for now mods can add **Jokers, Tarots, Planets, Spectrals, Vouchers and face-card sets**.
+Balatro3DS loads mods written in the [Steamodded](https://github.com/Steamodded/smods) style: a folder with a `.json` manifest and a Lua file that calls `SMODS.Joker { ... }`, `SMODS.Consumable { ... }`, `SMODS.Voucher { ... }` and `SMODS.DeckSkin { ... }`. Simple Steamodded Jokers, such as the ones in [Steamodded's examples](https://github.com/Steamodded/examples/tree/master/Mods/JokerExamples), port with few changes. The main one is the art: here **every card is its own image file**, the way the game stores its own Jokers and consumables, instead of Steamodded's atlases. This is not Steamodded, though. There is no Lovely, no `G.GAME` and no shaders, and for now mods can add **Jokers, Tarots, Planets, Spectrals, Vouchers and face-card sets, plus their own rarities, suits, poker hands and consumable types**.
 
 A working example is in [`dev/example_mods/ExampleJokers`](dev/example_mods/ExampleJokers).
 
@@ -183,7 +183,7 @@ SMODS.destroy_card(n)    -- true when the card is gone
 `SMODS.create_card` is the same call as `SMODS.add_card`. Created cards go through the game's own creation paths -- the same ones shop purchases and Spectral cards use -- so they are discovered, saved, scored and have their art freed like any other card. Capacity is the game's: when there is no room the call returns `nil` and creates nothing.
 
 - **`set = "Joker"`:** `key` is a full Joker def id, vanilla (`"j_joker"`) or a mod's (`"j_<prefix>_<key>"`). `edition = "foil"` (or `"holo"`, `"polychrome"`, `"negative"`) makes that edition. A created mod Joker hears its `add_to_deck`, and every Joker hears `context.card_added`. Returns the Joker.
-- **`set = "Tarot"`, `"Planet"`, `"Spectral"` or `"Consumable"`:** `key` is a full consumable def id; the set only has to name the consumable family, the def decides. Returns the consumable.
+- **`set = "Tarot"`, `"Planet"`, `"Spectral"`, `"Consumable"` or a registered consumable type's name:** `key` is a full consumable def id; the set only has to name the consumable family, the def decides. Returns the consumable.
 - **`set = "Playing"`:** `rank` is a number (2-14, Ace is 14), a numeric string, or `"Ace"`, `"King"`, `"Queen"`, `"Jack"`; `suit` is `"Hearts"`, `"Clubs"`, `"Diamonds"` or `"Spades"`, or a suit registered with `SMODS.Suit`. `enhancement` takes a port name (`"gold"`) or a Steamodded key (`"m_gold"`); `seal` is `"gold"`, `"red"`, `"blue"` or `"purple"`; `edition` sets the card's edition. The card joins the hand -- `nil` when the hand is full, unless `bypass_limit = true` -- and the return is its node, the same object contexts hand over. With `area = "deck"` it joins the deck instead and the return is the `card_data` now in the deck.
 
 `SMODS.destroy_joker(joker)` removes a held Joker for good: a mod Joker's `remove_from_deck` runs and its art frees, exactly as when the game itself removes one. It forces past the eternal sticker -- destroying means it, where selling an eternal Joker is refused. `SMODS.destroy_card(card)` destroys a playing card: it leaves the game entirely and never reaches the discard pile. `card` may be a hand card's node, its `card_data`, or a `card_data` in the deck or discard pile. Both return whether anything was actually removed. Steamodded's batch `SMODS.destroy_cards` is not here; destroy one card at a time.
@@ -245,7 +245,7 @@ config = { h_size = 1 }   -- like Juggler
 
 ```lua
 SMODS.Consumable {
-    set = "Tarot",           -- "Tarot", "Planet" or "Spectral"
+    set = "Tarot",           -- "Tarot", "Planet", "Spectral", or a type registered with SMODS.ConsumableType
     key = "gild",            -- id is c_<prefix>_<key>
     loc_txt = { name = "Gild", text = { "Enhances up to {C:attention}#1#{}", "cards into {C:money}Gold Cards{}" } },
     config = { max_highlighted = 2, mod_conv = "m_gold" },
@@ -256,7 +256,7 @@ SMODS.Consumable {
 }
 ```
 
-They appear in packs and the shop alongside the vanilla cards of their set, and in the collection.
+They appear in packs and the shop alongside the vanilla cards of their set, and in the collection. A consumable in a set of the mod's own appears in the shop at its type's rate; custom sets have no packs or collection tab (see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types)).
 
 **Built in.** As in Steamodded, a consumable that only declares data needs no code:
 
@@ -308,10 +308,10 @@ SMODS.Voucher {
 
 Mod vouchers join the shop's voucher pool after the vanilla ones. With no mods installed the pool, and so every seed, is exactly vanilla's.
 
-## Custom rarities, suits and poker hands
+## Custom rarities, suits, poker hands and consumable types
 
-Three registries for the things a mod used to only be able to borrow from vanilla.
-All three register at load, before any game exists, and land in each game as it is
+Four registries for the things a mod used to only be able to borrow from vanilla.
+All four register at load, before any game exists, and land in each game as it is
 built; a game built with nothing registered is the vanilla game, untouched.
 
 **`SMODS.Rarity { key, loc_txt, badge_colour, weight }`** is a rarity of the mod's
@@ -396,6 +396,45 @@ mid-run, a game already built keeps the hand listed (positions must not move und
 a save) but can no longer evaluate it; the run's own mod check refuses to continue
 on a changed mod set anyway.
 
+**`SMODS.ConsumableType { key, loc_txt, shop_rate }`** is a consumable set of the
+mod's own. Register it before the consumables that use it:
+
+```lua
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    shop_rate = 6,
+}
+SMODS.Consumable { set = "Minor", key = "coin", ... }   -- the type's key,
+SMODS.Consumable { set = "ct_Minor", key = "sigil", ... } -- or its full id
+```
+
+The type's key *is* the kind its cards carry (their `kind`), the way a Tarot's kind
+is `"tarot"`. Kinds are global: no two mods can register the same kind, and a kind
+may not reuse a vanilla set's name. A consumable that names an unregistered set is
+a load error that says which set. Everything that treats the three vanilla sets as
+"a consumable" treats a registered kind the same way: the consumable area, the
+shop (buying, and buy-and-use), selling, `SMODS.add_card { set = "Minor", ... }`,
+effects that create a random consumable of a kind (they roll the kind's own pool),
+discovery, and saving and loading. The cards themselves work like any other mod
+consumable: `can_use` / `use`, `mod_conv` / `suit_conv` targeting, their own
+`cost` (until a card declares one, the generic default price applies; the vanilla
+sets' prices are theirs alone).
+
+`shop_rate` is the kind's weight in the shop roll, in the units of the vanilla
+weights (Jokers 20, Tarot 4, Planet 4; Spectrals only on decks that rate them).
+The default 4 makes the kind as present as a vanilla one. The Tarot and Planet
+merchant vouchers raise only their own kinds. A kind joins the roll only while it
+has cards and a positive rate; rate 0 keeps it out of the shop, and its cards can
+still be created directly.
+
+Two honest limits: a custom kind gets **no booster pack and no collection tab of
+its own** -- packs and the collection's categories belong to the vanilla sets (its
+cards are still discovered, and their tooltips work wherever they appear) -- and
+**hand-levelling stays Planet-only**: `config.hand_type` on a custom kind does
+nothing, because levelling is the Planet branch of the use flow, not a property of
+the set. Level from `use` if a card must.
+
 ## Card faces
 
 ```lua
@@ -425,7 +464,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks, editions, seals, enhancements, blinds and booster packs can't be added. (Rarities, suits and poker hands can: see [Custom rarities, suits and poker hands](#custom-rarities-suits-and-poker-hands).) Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Decks, editions, seals, enhancements, blinds and booster packs can't be added. (Rarities, suits, poker hands and consumable types can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.
