@@ -1432,6 +1432,12 @@ function Hand:build_contained_hand_types(nodes)
     if flush then contained["Flush"] = true end
     if straight then contained["Straight"] = true end
 
+    -- Mod-registered poker hands (SMODS.PokerHand): a hand the cards satisfy is
+    -- contained whatever the play finally scores as. Nothing registered: no call.
+    if SMODS and SMODS.contained_poker_hands then
+        SMODS.contained_poker_hands(nodes, contained)
+    end
+
     return contained
 end
 
@@ -2946,6 +2952,34 @@ function Hand:calculate_play()
         G.selectedHandMult = 0
     end
 
+    -- Mod-registered poker hands (SMODS.PokerHand): the strongest registered hand
+    -- that outranks the vanilla result and matches the cards takes the play, with
+    -- its own stats and its own scoring cards (marked below). Nothing registered:
+    -- `SMODS.evaluate_poker_hands` is never called and the play stands as vanilla
+    -- left it.
+    local custom_scoring = nil
+    if SMODS and SMODS.evaluate_poker_hands then
+        local idx, nodes = SMODS.evaluate_poker_hands(ordered, G.selectedHand)
+        if idx then
+            G.selectedHand = idx
+            local stats = G.hand_stats and G.hand_stats[idx]
+            if stats then
+                local level = math.max(1, tonumber(stats.level) or 1)
+                local chips = (tonumber(stats.base_chips) or 0)
+                    + ((level - 1) * (tonumber(stats.chips_per_level) or 0))
+                local mult = (tonumber(stats.base_mult) or 0)
+                    + ((level - 1) * (tonumber(stats.mult_per_level) or 0))
+                if G.boss_apply_hand_base_modifiers then
+                    chips, mult = G:boss_apply_hand_base_modifiers(chips, mult)
+                end
+                G.selectedHandLevel = level
+                G.selectedHandChips = chips
+                G.selectedHandMult = mult
+            end
+            custom_scoring = nodes
+        end
+    end
+
     if G.selectedHand and G.handlist and G.handlist[G.selectedHand] then
         print("Detected hand: " .. tostring(G.handlist[G.selectedHand]))
     else
@@ -3036,7 +3070,9 @@ function Hand:calculate_play()
         if not any then mark_all_ordered() end
     end
 
-    if G:hasJoker("j_splash") then
+    if custom_scoring then
+        mark_nodes(custom_scoring)
+    elseif G:hasJoker("j_splash") then
         mark_all_ordered()
     elseif hi == 1 or hi == 2 or hi == 3 or hi == 6 then
         mark_all_ordered()

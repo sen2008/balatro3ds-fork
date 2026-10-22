@@ -638,6 +638,393 @@ local function tooltip_lines_for(center)
 end
 
 --------------------------------------------------------------------------------
+-- Rarities, suits and poker hands (Tier 2)
+--------------------------------------------------------------------------------
+
+--- Things mods register once and the game then treats as its own. All three live in
+--- registries on SMODS (not in the game's tables) because mods load before the game
+--- exists: `Game:set_globals` calls `SMODS.install_into_game` as it builds the tables
+--- they extend (`G.C`, `handlist`, `hand_stats`), and a game built with nothing
+--- registered is the vanilla game, untouched.
+
+--- Custom rarities by full id (`<prefix>_<key>`) and by the numeric rarity their
+--- Jokers carry. Vanilla keeps 1-4; customs take 5, 6, ... in registration order
+--- (a rolled-back rarity's number is not reused, so a stale def can never silently
+--- change rarity while its mod is off).
+SMODS.Rarities = SMODS.Rarities or {}
+SMODS.RarityByIndex = SMODS.RarityByIndex or {}
+local next_rarity_index = 5
+
+--- Custom suits by canonical name (the string a card's `card_data.suit` carries).
+SMODS.Suits = SMODS.Suits or {}
+
+--- Custom poker hands, strongest first, and by hand name (the `handlist` entry).
+SMODS.PokerHands = SMODS.PokerHands or {}
+SMODS.PokerHandByName = SMODS.PokerHandByName or {}
+
+--- Where each vanilla hand sits on the strength scale `SMODS.PokerHand`'s `order`
+--- speaks: Flush Five strongest, High Card weakest. A custom hand's `order` is
+--- compared against these, both for its `handlist` place and for whether it takes
+--- a play from the vanilla hand the cards made.
+local VANILLA_HAND_ORDER = {
+    ["Flush Five"] = 120, ["Flush House"] = 110, ["Five of a Kind"] = 100,
+    ["Straight Flush"] = 90, ["Four of a Kind"] = 80, ["Full House"] = 70,
+    ["Flush"] = 60, ["Straight"] = 50, ["Three of a Kind"] = 40,
+    ["Two Pair"] = 30, ["Pair"] = 20, ["High Card"] = 10,
+}
+
+--- The strength of one hand name: a registered custom hand's `order`, else vanilla's.
+function SMODS.hand_order(name)
+    local center = SMODS.PokerHandByName[name]
+    if center then return center.order end
+    return VANILLA_HAND_ORDER[name] or 0
+end
+
+--- A colour the way mods write it -- `"#FE5F55"`, `"FE5F55"` or `{ r, g, b, a? }` in
+--- 0..1 -- as the `{ r, g, b, a }` table the game's palettes carry.
+local function parse_colour(value, what, key, field)
+    if value == nil then return nil end
+    if type(value) == "string" then
+        local hex = value:gsub("^#", "")
+        check(#hex == 6 and hex:match("^%x+$") ~= nil,
+            ("%s '%s': %s must be a hex colour like \"#FE5F55\""):format(what, key, field))
+        return { tonumber(hex:sub(1, 2), 16) / 255, tonumber(hex:sub(3, 4), 16) / 255,
+            tonumber(hex:sub(5, 6), 16) / 255, 1 }
+    end
+    if type(value) == "table" then
+        local r, g, b = tonumber(value[1]), tonumber(value[2]), tonumber(value[3])
+        check(r ~= nil and g ~= nil and b ~= nil,
+            ("%s '%s': %s must be a hex string or { r, g, b }"):format(what, key, field))
+        return { r, g, b, tonumber(value[4]) or 1 }
+    end
+    error(("%s '%s': %s must be a hex string or { r, g, b }"):format(what, key, field), 0)
+end
+
+--- Register the display name of a suit or poker hand with I18N, for English and for
+--- every other language the `loc_txt` carries, the way card names are registered.
+--- The strings are recorded on the mod, so rollback takes them away again.
+local function register_name_strings(mod, kind, internal, loc)
+    if not (I18N and I18N.add_strings) or type(loc) ~= "table" then return end
+    local function add(code, name)
+        if type(name) ~= "string" then return end
+        local strings = { [kind .. "." .. internal:lower():gsub("[^%w]+", "_")] = name }
+        local keys = {}
+        for k in pairs(strings) do keys[#keys + 1] = k end
+        I18N.add_strings(code, strings)
+        mod.registered.strings[#mod.registered.strings + 1] = { language = code, keys = keys }
+    end
+    local english = loc_for(loc, "en")
+    if english then add("en-us", english.name) end
+    for _, code in ipairs(other_languages(loc)) do
+        local entry = loc[code]
+        if type(entry) == "table" then add(code, entry.name) end
+    end
+end
+
+--- `SMODS.Rarity { key, loc_txt, badge_colour, weight }`: a rarity of this mod's own.
+--- A Joker declares it by name -- `rarity = "<prefix>_<key>"`, or just `"<key>"` from
+--- the same mod (or the table `SMODS.Rarity` returned). It gets the next numeric
+--- rarity after Legendary, so every place that compares rarities numerically (random
+--- rolls by rarity, the collection) treats it as a rarity like any other.
+---
+--- `badge_colour` is the colour of the rarity badge on the Joker's tooltip; without
+--- one the badge wears the last vanilla colour. `weight` is how much of the shop the
+--- rarity takes, in the units of the vanilla roll (Common 70, Uncommon 25, Rare 5
+--- out of 100): the default 3 makes it about as present as a second Rare. Weight 0
+--- keeps it out of the shop roll entirely (its Jokers can still be created directly).
+--- Legendary stays out of the shop, as vanilla has it; a custom rarity is in the
+--- roll whenever it has Jokers and a positive weight.
+function SMODS.Rarity(t)
+    local mod = need_mod("SMODS.Rarity")
+    check(type(t) == "table", "SMODS.Rarity expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
+        "SMODS.Rarity needs a 'key' of letters, digits and underscores")
+    local id = mod.prefix .. "_" .. t.key
+    check(SMODS.Rarities[id] == nil, "Rarity '" .. t.key .. "' is defined twice (id " .. id .. ")")
+    local weight = t.weight == nil and 3 or tonumber(t.weight)
+    check(weight ~= nil and weight >= 0, "Rarity '" .. t.key .. "': weight must be a number >= 0")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        colour = parse_colour(t.badge_colour or t.colour, "Rarity", t.key, "badge_colour"),
+        weight = weight,
+        index = next_rarity_index,
+    }
+    next_rarity_index = next_rarity_index + 1
+    SMODS.Rarities[id] = entry
+    SMODS.RarityByIndex[entry.index] = entry
+    mod.registered.rarities = mod.registered.rarities or {}
+    mod.registered.rarities[#mod.registered.rarities + 1] = id
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    t.index = entry.index
+    return t
+end
+
+--- What a Joker's `rarity` field means: 1-4, a vanilla name, or a custom rarity
+--- (its full id, its key from the same mod, or the registered table). Anything else
+--- is a load error naming the field.
+local function resolve_rarity(mod, key, value)
+    if value == nil then return 1 end
+    if type(value) == "number" then
+        check(value >= 1 and value <= 4 and value % 1 == 0, "Joker '" .. key
+            .. "': rarity must be 1-4 or the key of a rarity registered with SMODS.Rarity")
+        return value
+    end
+    if type(value) == "string" then
+        local vanilla = RARITY[value:lower()]
+        if vanilla then return vanilla end
+        local entry = SMODS.Rarities[value] or SMODS.Rarities[mod.prefix .. "_" .. value]
+        if entry then return entry.index end
+        error(("Joker '%s': unknown rarity '%s' (register it with SMODS.Rarity first, "
+            .. "or use 1-4 / Common / Uncommon / Rare / Legendary)"):format(key, value), 0)
+    end
+    if type(value) == "table" and SMODS.Rarities[tostring(value.key or "")] then
+        return SMODS.Rarities[value.key].index
+    end
+    error(("Joker '%s': rarity must be 1-4, a vanilla rarity name, or a rarity "
+        .. "registered with SMODS.Rarity"):format(key), 0)
+end
+
+--- The tooltip badge line for a Joker whose rarity is a mod's, or nil. The badge
+--- carries the rarity's own colour, which the tooltip draws ahead of the palette.
+function SMODS.rarity_badge(def)
+    local entry = def and SMODS.RarityByIndex[tonumber(def.rarity) or 0]
+    if not entry then return nil end
+    return { kind = "rarity_badge", text = entry.name, rarity = entry.index, colour = entry.colour }
+end
+
+local function rarity_has_jokers(index)
+    for _, def in pairs(JOKER_DEFS) do
+        if type(def) == "table" and tonumber(def.rarity) == index then return true end
+    end
+    return false
+end
+
+--- The shop's rarity roll, extended: with no custom rarities (or none with Jokers
+--- and a weight) the vanilla target stands and no extra random is drawn. Otherwise
+--- one more roll on its own stream stretches the vanilla 70/25/5 over
+--- 100 + (custom weights), so a custom rarity takes its declared share and the
+--- vanilla rarities keep their proportions between themselves.
+function SMODS.shop_rarity_target(game, ante, append, vanilla_target)
+    local customs = {}
+    for _, entry in pairs(SMODS.Rarities) do
+        if entry.weight > 0 and rarity_has_jokers(entry.index) then customs[#customs + 1] = entry end
+    end
+    if #customs == 0 then return vanilla_target end
+    table.sort(customs, function(a, b) return a.index < b.index end)
+    local total = 100
+    for _, entry in ipairs(customs) do total = total + entry.weight end
+    local x = game:random("rarity_custom" .. tostring(ante) .. (append or "sho")) * total
+    if x < 100 then return vanilla_target end
+    x = x - 100
+    for _, entry in ipairs(customs) do
+        x = x - entry.weight
+        if x < 0 then return entry.index end
+    end
+    return vanilla_target
+end
+
+--- `SMODS.Suit { key, loc_txt, ui_colour, card_key }`: a suit of this mod's own.
+--- `key` is the suit itself: the string a card carries in `card_data.suit` (one
+--- capitalised word, `"Stars"`), so `Card:is_suit("Stars")`, flush counting and
+--- every suit check in the game see it with no further work -- suit checks in this
+--- port compare names, and flush detection counts cards per suit name. Cards of
+--- the suit are made with `SMODS.add_card { set = "Playing", suit = "Stars" }` or
+--- by a consumable's `suit_conv`; the standard deck stays the four vanilla suits.
+---
+--- There is no art sheet for a mod suit: its cards draw on the Hearts row of the
+--- deck sheets (the game's own fallback for a suit it has no row for), in the
+--- suit's `ui_colour` wherever a suit is named in colour (tooltips). `card_key`
+--- is accepted for Steamodded compatibility and stored; nothing here keys cards
+--- by it.
+function SMODS.Suit(t)
+    local mod = need_mod("SMODS.Suit")
+    check(type(t) == "table", "SMODS.Suit expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w]+$"),
+        "SMODS.Suit needs a 'key' of letters, digits and underscores (the suit's name)")
+    local name = t.key:sub(1, 1):upper() .. t.key:sub(2)
+    check(CardArt.suit_key(name) == nil, "Suit '" .. t.key .. "' is one of the four vanilla suits")
+    check(SMODS.Suits[name] == nil, "Suit '" .. t.key .. "' is defined twice")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = mod.prefix .. "_" .. t.key, key = name, mod = mod,
+        name = tostring(loc.name or t.name or name),
+        colour = parse_colour(t.ui_colour or t.colour, "Suit", t.key, "ui_colour"),
+        card_key = t.card_key,
+    }
+    SMODS.Suits[name] = entry
+    mod.registered.suits = mod.registered.suits or {}
+    mod.registered.suits[#mod.registered.suits + 1] = name
+    register_name_strings(mod, "suit", name, t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = entry.id
+    return t
+end
+
+--- The canonical name of a suit a mod names (a vanilla suit or a registered one),
+--- or nil. Case is forgiving the way the game's own suit reads are.
+function SMODS.suit_name(suit)
+    if type(suit) ~= "string" then return nil end
+    local vanilla = CardArt.suit_key(suit)
+    if vanilla then return vanilla end
+    if SMODS.Suits[suit] then return suit end
+    local c = suit:sub(1, 1):upper() .. suit:sub(2):lower()
+    if SMODS.Suits[c] then return c end
+    return nil
+end
+
+--- `SMODS.PokerHand { key, loc_txt, chips, mult, l_chips, l_mult, evaluate, order }`:
+--- a poker hand of this mod's own. `key` is the hand's name -- the `handlist` entry,
+--- what `context.scoring_name` reads and what a Planet levels by
+--- (`config.hand_type = "Spectrum"`). The hand joins every game's `handlist`
+--- (appended after High Card; see `SMODS.install_into_game` for why) with a
+--- `hand_stats` entry of `chips`/`mult` at level 1 and `l_chips`/`l_mult` per
+--- level, so Planets, the Run Info screen and hand levels treat it as a hand
+--- like any other. `order` is its strength for contests: which of several
+--- matching hands wins, and whether it takes a play from the vanilla hand the
+--- cards made (the default 55 sits between Flush and Straight, where Bunco
+--- puts Spectrum).
+---
+--- `evaluate(self, hand)` is asked about a play only when the hand outranks the
+--- vanilla hand the cards made; it returns the scoring cards (a list of the hand's
+--- own card views), `true` for all of them, or nil/empty for no match. The same
+--- answer feeds `context.poker_hands`: a play whose cards satisfy `evaluate`
+--- contains the hand, whatever it finally scores as.
+function SMODS.PokerHand(t)
+    local mod = need_mod("SMODS.PokerHand")
+    check(type(t) == "table", "SMODS.PokerHand expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w ]+$") and t.key:match("%S"),
+        "SMODS.PokerHand needs a 'key' naming the hand (letters, digits, underscores, spaces)")
+    local name = t.key
+    check(VANILLA_HAND_ORDER[name] == nil, "PokerHand '" .. name .. "' is a vanilla hand")
+    check(SMODS.PokerHandByName[name] == nil, "PokerHand '" .. name .. "' is defined twice")
+    check(type(t.evaluate) == "function", "PokerHand '" .. name .. "': evaluate must be a function")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local center = {
+        key = name, mod = mod,
+        name = tostring(loc.name or t.name or name),
+        order = tonumber(t.order) or 55,
+        chips = tonumber(t.chips) or 0,
+        mult = tonumber(t.mult) or 0,
+        l_chips = tonumber(t.l_chips) or 0,
+        l_mult = tonumber(t.l_mult) or 0,
+        evaluate = t.evaluate,
+        visible = t.visible ~= false,
+    }
+    local pos = #SMODS.PokerHands + 1
+    for i, other in ipairs(SMODS.PokerHands) do
+        if other.order < center.order then pos = i break end
+    end
+    table.insert(SMODS.PokerHands, pos, center)
+    SMODS.PokerHandByName[name] = center
+    mod.registered.poker_hands = mod.registered.poker_hands or {}
+    mod.registered.poker_hands[#mod.registered.poker_hands + 1] = name
+    register_name_strings(mod, "hand", name, t.loc_txt)
+    t.mod = mod
+    return t
+end
+
+--- Whether `evaluate`'s answer means the hand matches, as the list of scoring
+--- nodes it names (only nodes that are part of the play), or nil.
+local function poker_hand_match(center, ordered)
+    local ret = SMODS.call(center.mod, center.evaluate, center, card_views(ordered))
+    if ret == true then return ordered end
+    if type(ret) ~= "table" or #ret == 0 then return nil end
+    local in_play = {}
+    for _, node in ipairs(ordered) do in_play[node] = true end
+    local nodes = {}
+    for _, node in ipairs(ret) do
+        if in_play[node] then nodes[#nodes + 1] = node end
+    end
+    if #nodes == 0 then return nil end
+    return nodes
+end
+
+--- The custom hand that takes this play, if any: the strongest registered hand
+--- that outranks the vanilla result and whose `evaluate` matches. Returns its
+--- `handlist` index and the cards that score. Called from `Hand:calculate_play`
+--- once the vanilla hand is known; with nothing registered it returns at once.
+function SMODS.evaluate_poker_hands(ordered, vanilla_index)
+    if #SMODS.PokerHands == 0 then return nil end
+    local handlist = G and G.handlist
+    if type(handlist) ~= "table" then return nil end
+    local vanilla_order = SMODS.hand_order(handlist[vanilla_index or 0])
+    for _, center in ipairs(SMODS.PokerHands) do
+        if center.order > vanilla_order then
+            for i, name in ipairs(handlist) do
+                if name == center.key then
+                    local nodes = poker_hand_match(center, ordered)
+                    if nodes then return i, nodes end
+                    break
+                end
+            end
+        end
+    end
+    return nil
+end
+
+--- Registered hands a set of cards contains, for `context.poker_hands`: every
+--- hand whose `evaluate` matches the cards, whatever the play scores as.
+function SMODS.contained_poker_hands(nodes, contained)
+    if #SMODS.PokerHands == 0 then return end
+    for _, center in ipairs(SMODS.PokerHands) do
+        if poker_hand_match(center, nodes) then contained[center.key] = true end
+    end
+end
+
+--- Put everything registered into one game as `Game:set_globals` builds it: suit
+--- and rarity colours into the palettes, and poker hands into `handlist` /
+--- `hand_stats`. Idempotent -- a hand already listed is left where it is, so
+--- re-running globals never duplicates one.
+---
+--- Hands APPEND after High Card rather than taking the place their `order` earns:
+--- the engine names a play by its hand's position in this list (the evaluation
+--- chain's indices are the vanilla twelve, hardcoded), so a hand inserted in the
+--- middle would rename every vanilla hand below it. `order` still decides every
+--- contest -- which custom hand wins, and whether one takes a play from the
+--- vanilla hand -- it just does not order this list.
+function SMODS.install_into_game(game)
+    if type(game) ~= "table" then return end
+    if type(game.C) == "table" then
+        if type(game.C.SUITS) == "table" then
+            for name, entry in pairs(SMODS.Suits) do
+                if entry.colour then
+                    game.C.SUITS[name] = entry.colour
+                    if type(game.C.SO_1) == "table" then game.C.SO_1[name] = entry.colour end
+                    if type(game.C.SO_2) == "table" then game.C.SO_2[name] = entry.colour end
+                end
+            end
+        end
+        if type(game.C.RARITY) == "table" then
+            for index, entry in pairs(SMODS.RarityByIndex) do
+                if entry.colour and game.C.RARITY[index] == nil then
+                    game.C.RARITY[index] = entry.colour
+                end
+            end
+        end
+    end
+    if type(game.handlist) == "table" and type(game.hand_stats) == "table" then
+        for _, center in ipairs(SMODS.PokerHands) do
+            local present = false
+            for _, name in ipairs(game.handlist) do
+                if name == center.key then present = true break end
+            end
+            if not present then
+                game.handlist[#game.handlist + 1] = center.key
+                game.hand_stats[#game.hand_stats + 1] = {
+                    level = 1, base_chips = center.chips, base_mult = center.mult,
+                    chips_per_level = center.l_chips, mult_per_level = center.l_mult,
+                }
+            end
+        end
+    end
+end
+
+--------------------------------------------------------------------------------
 -- Jokers
 --------------------------------------------------------------------------------
 
@@ -653,11 +1040,7 @@ function SMODS.Joker(t)
     local id = "j_" .. mod.prefix .. "_" .. t.key
     check(JOKER_DEFS[id] == nil, "Joker '" .. t.key .. "' is defined twice (id " .. id .. ")")
 
-    local rarity = t.rarity
-    if type(rarity) == "string" then rarity = RARITY[rarity:lower()] end
-    rarity = tonumber(rarity or 1)
-    check(rarity and rarity >= 1 and rarity <= 4 and rarity % 1 == 0,
-        "Joker '" .. t.key .. "': rarity must be 1-4 or Common/Uncommon/Rare/Legendary")
+    local rarity = resolve_rarity(mod, t.key, t.rarity)
     local cost = tonumber(t.cost or 3)
     check(cost and cost >= 0, "Joker '" .. t.key .. "': cost must be a number")
 
@@ -1124,7 +1507,6 @@ end
 --- (`Card:get_id`: Jack 11, Queen 12, King 13, Ace 14). Numbers and numeric strings
 --- ("7", "10") are taken as those numbers directly.
 local RANK_BY_NAME = { Ace = 14, King = 13, Queen = 12, Jack = 11, A = 14, K = 13, Q = 12, J = 11, T = 10 }
-local PLAYING_SUITS = { Hearts = true, Clubs = true, Diamonds = true, Spades = true }
 local PLAYING_ENHANCEMENTS = { bonus = true, mult = true, wild = true, glass = true,
     steel = true, stone = true, gold = true, lucky = true }
 local PLAYING_SEALS = { gold = true, red = true, blue = true, purple = true }
@@ -1139,10 +1521,8 @@ local function playing_card_data(t)
     if type(rank) == "string" then rank = RANK_BY_NAME[rank] or tonumber(rank) end
     rank = tonumber(rank)
     if not rank or rank % 1 ~= 0 or rank < 2 or rank > 14 then return nil end
-    local suit = src.suit
-    if type(suit) ~= "string" then return nil end
-    suit = suit:sub(1, 1):upper() .. suit:sub(2):lower()
-    if not PLAYING_SUITS[suit] then return nil end
+    local suit = SMODS.suit_name(src.suit)
+    if not suit then return nil end
     local data = { rank = rank, suit = suit, enhancement = nil, seal = nil }
     local enhancement = src.enhancement or t.enhancement
     if enhancement ~= nil then
@@ -1382,6 +1762,25 @@ function SMODS.rollback(mod)
         if VOUCHER_DEFS then VOUCHER_DEFS[id] = nil end
         SMODS.Centers[id] = nil
     end
+    for _, id in ipairs(mod.registered.rarities or {}) do
+        local entry = SMODS.Rarities[id]
+        if entry then SMODS.RarityByIndex[entry.index] = nil end
+        SMODS.Rarities[id] = nil
+    end
+    mod.registered.rarities = {}
+    for _, name in ipairs(mod.registered.suits or {}) do SMODS.Suits[name] = nil end
+    mod.registered.suits = {}
+    for _, name in ipairs(mod.registered.poker_hands or {}) do
+        -- The registry forgets the hand, so no game built from now on lists it. A
+        -- game already built keeps the name in its `handlist` (with its stats):
+        -- removing it mid-run would renumber every hand after it, and the saved
+        -- run's mod check refuses to continue on a changed mod set anyway.
+        SMODS.PokerHandByName[name] = nil
+        for i = #SMODS.PokerHands, 1, -1 do
+            if SMODS.PokerHands[i].key == name then table.remove(SMODS.PokerHands, i) end
+        end
+    end
+    mod.registered.poker_hands = {}
     for _, set in ipairs(mod.registered.strings or {}) do
         if I18N and I18N.remove_strings then I18N.remove_strings(set.language, set.keys) end
     end

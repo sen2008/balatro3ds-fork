@@ -523,7 +523,7 @@ function M.draw_tooltip_layout(font, title, resolved_lines, draw_x, draw_y, anch
             local seg = segments[1]
             local label = seg.text or ""
             local ri = tonumber(seg.rarity_index) or 1
-            local rc = (G and G.C and G.C.RARITY and G.C.RARITY[ri]) or { 0.035, 0.62, 1, 1 }
+            local rc = seg.rarity_colour or (G and G.C and G.C.RARITY and G.C.RARITY[ri]) or { 0.035, 0.62, 1, 1 }
             local bw = font:getWidth(label) + RARITY_BADGE_PAD_X * 2
             local x0 = body_x + math.floor((inner_w - bw) * 0.5 + 0.5)
             love.graphics.setColor(rc[1], rc[2], rc[3], rc[4] or 1)

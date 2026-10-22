@@ -416,4 +416,9 @@ function Game:set_globals()
         q = 'triggerleft',
         e = 'triggerright',
     }}
+    -- Mod-registered rarities, suits and poker hands (SMODS) join the tables built
+    -- above: their colours into the palettes, the hands into handlist/hand_stats.
+    -- Mods load before the game exists, so this is where registrations land; with
+    -- none registered, nothing is added and the tables stay exactly as built.
+    if SMODS and SMODS.install_into_game then SMODS.install_into_game(self) end
 end

@@ -78,7 +78,7 @@ SMODS.Joker {
     key = "plus_four",
     loc_txt = { name = "Plus Four", text = { "{C:mult}+#1#{} Mult" } },
     config = { extra = { mult = 4 } },
-    rarity = 1,              -- 1-4, or "Common" / "Uncommon" / "Rare" / "Legendary"
+    rarity = 1,              -- 1-4, a name ("Common" .. "Legendary"), or an SMODS.Rarity key
     cost = 3,
     sprite = "plus_four.png",
     blueprint_compat = true,
@@ -184,7 +184,7 @@ SMODS.destroy_card(n)    -- true when the card is gone
 
 - **`set = "Joker"`:** `key` is a full Joker def id, vanilla (`"j_joker"`) or a mod's (`"j_<prefix>_<key>"`). `edition = "foil"` (or `"holo"`, `"polychrome"`, `"negative"`) makes that edition. A created mod Joker hears its `add_to_deck`, and every Joker hears `context.card_added`. Returns the Joker.
 - **`set = "Tarot"`, `"Planet"`, `"Spectral"` or `"Consumable"`:** `key` is a full consumable def id; the set only has to name the consumable family, the def decides. Returns the consumable.
-- **`set = "Playing"`:** `rank` is a number (2-14, Ace is 14), a numeric string, or `"Ace"`, `"King"`, `"Queen"`, `"Jack"`; `suit` is `"Hearts"`, `"Clubs"`, `"Diamonds"` or `"Spades"`. `enhancement` takes a port name (`"gold"`) or a Steamodded key (`"m_gold"`); `seal` is `"gold"`, `"red"`, `"blue"` or `"purple"`; `edition` sets the card's edition. The card joins the hand -- `nil` when the hand is full, unless `bypass_limit = true` -- and the return is its node, the same object contexts hand over. With `area = "deck"` it joins the deck instead and the return is the `card_data` now in the deck.
+- **`set = "Playing"`:** `rank` is a number (2-14, Ace is 14), a numeric string, or `"Ace"`, `"King"`, `"Queen"`, `"Jack"`; `suit` is `"Hearts"`, `"Clubs"`, `"Diamonds"` or `"Spades"`, or a suit registered with `SMODS.Suit`. `enhancement` takes a port name (`"gold"`) or a Steamodded key (`"m_gold"`); `seal` is `"gold"`, `"red"`, `"blue"` or `"purple"`; `edition` sets the card's edition. The card joins the hand -- `nil` when the hand is full, unless `bypass_limit = true` -- and the return is its node, the same object contexts hand over. With `area = "deck"` it joins the deck instead and the return is the `card_data` now in the deck.
 
 `SMODS.destroy_joker(joker)` removes a held Joker for good: a mod Joker's `remove_from_deck` runs and its art frees, exactly as when the game itself removes one. It forces past the eternal sticker -- destroying means it, where selling an eternal Joker is refused. `SMODS.destroy_card(card)` destroys a playing card: it leaves the game entirely and never reaches the discard pile. `card` may be a hand card's node, its `card_data`, or a `card_data` in the deck or discard pile. Both return whether anything was actually removed. Steamodded's batch `SMODS.destroy_cards` is not here; destroy one card at a time.
 
@@ -308,6 +308,90 @@ SMODS.Voucher {
 
 Mod vouchers join the shop's voucher pool after the vanilla ones. With no mods installed the pool, and so every seed, is exactly vanilla's.
 
+## Custom rarities, suits and poker hands
+
+Three registries for the things a mod used to only be able to borrow from vanilla.
+All three register at load, before any game exists, and land in each game as it is
+built; a game built with nothing registered is the vanilla game, untouched.
+
+**`SMODS.Rarity { key, loc_txt, badge_colour, weight }`** is a rarity of the mod's
+own. It takes the next free rarity number after Legendary (5, 6, ... in registration
+order), and a Joker declares it by name:
+
+```lua
+SMODS.Rarity {
+    key = "mythic",
+    loc_txt = { name = "Mythic" },
+    badge_colour = "#B26CBB",          -- or { r, g, b } in 0..1
+    weight = 3,
+}
+SMODS.Joker { key = "big_one", rarity = "mythic", ... }        -- this mod's key
+SMODS.Joker { key = "guest", rarity = "otherprefix_mythic", ... } -- or the full id
+```
+
+`rarity = 9` and unknown names are load errors, as before. The badge on the Joker's
+tooltip wears the rarity's name and `badge_colour`. `weight` is the rarity's share
+of the shop roll, in the units of the vanilla roll (Common 70, Uncommon 25, Rare 5
+out of 100): the default 3 makes it about as present as a second Rare, and the
+vanilla three keep their proportions between themselves. Weight 0 keeps the rarity
+out of the shop entirely (its Jokers can still be created directly, and rolls by
+rarity still find them). Legendary stays out of the shop, as vanilla has it.
+
+**`SMODS.Suit { key, loc_txt, ui_colour, card_key }`** is a suit of the mod's own.
+The key *is* the suit: the string a card carries, one capitalised word.
+
+```lua
+SMODS.Suit { key = "Stars", loc_txt = { name = "Stars" }, ui_colour = "#FFAA00" }
+local card = SMODS.add_card { set = "Playing", rank = 7, suit = "Stars" }
+```
+
+Suit checks in this port compare names, and flush detection counts cards per suit
+name, so a custom suit needs no further wiring: `card:is_suit("Stars")` works, five
+Stars flush, and a consumable's `suit_conv` can convert cards into it. Cards enter
+play through creation and conversion only; the standard deck stays the four vanilla
+suits. Two honest limits: there is no art sheet for a mod suit, so its cards draw on
+the Hearts row of the deck sheets (the game's own fallback for a suit it has no row
+for), and `SMODS.DeckSkin` covers the vanilla suits only. `ui_colour` is worn
+wherever a suit is named in colour in the UI. `card_key` is accepted for
+Steamodded compatibility and stored; nothing here keys cards by it.
+
+**`SMODS.PokerHand { key, loc_txt, chips, mult, l_chips, l_mult, evaluate, order }`**
+is a poker hand of the mod's own. The key is the hand's name: its `handlist` entry,
+what `context.scoring_name` reads, and what a Planet levels by
+(`config = { hand_type = "Spectrum" }`).
+
+```lua
+SMODS.PokerHand {
+    key = "Spectrum",
+    loc_txt = { name = "Spectrum", text = { "Five cards, all different suits" } },
+    chips = 30, mult = 4, l_chips = 30, l_mult = 3,
+    order = 55,
+    evaluate = function(self, hand)
+        -- return the scoring cards, true for all of them, or nil for no match
+    end,
+}
+```
+
+`order` is the hand's strength on the vanilla scale (Flush Five 120 down to High
+Card 10; Flush 60, Straight 50). A play is offered to registered hands strongest
+first, and only to hands that outrank the vanilla hand the cards made: the first
+whose `evaluate` matches takes the play, with its own Chips/Mult and the cards
+`evaluate` named as the scoring cards. The same `evaluate` answers feed
+`context.poker_hands`, so a Joker keyed on
+`next(context.poker_hands["Spectrum"])` fires whenever the played cards satisfy it,
+whatever the play finally scores as. `evaluate` gets the played cards as card views
+(the same objects `calculate` sees) and runs error-contained like a `calculate`: a
+hand that throws simply does not match.
+
+One structural note: custom hands are *appended* to the hand list, after High Card,
+not placed at their `order`. The engine names a play by its hand's position in that
+list (the evaluation chain's positions are the vanilla twelve), so inserting a hand
+in the middle would rename every vanilla hand below it. `order` decides every
+contest; it just does not order the list. And if a poker-hand mod is switched off
+mid-run, a game already built keeps the hand listed (positions must not move under
+a save) but can no longer evaluate it; the run's own mod check refuses to continue
+on a changed mod set anyway.
+
 ## Card faces
 
 ```lua
@@ -337,7 +421,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks, editions, seals, enhancements, blinds, booster packs and poker hands can't be added. Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Decks, editions, seals, enhancements, blinds and booster packs can't be added. (Rarities, suits and poker hands can: see [Custom rarities, suits and poker hands](#custom-rarities-suits-and-poker-hands).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.

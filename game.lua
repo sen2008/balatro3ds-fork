@@ -12664,6 +12664,11 @@ function Game:_pick_joker_id_shop_rarity_distribution(rand_int, append, picked_i
         elseif rar_roll <= 0.95 then
             target_rar = 2
         end
+        -- Mod rarities (SMODS.Rarity) take their declared share of the roll; with
+        -- none registered this returns the vanilla target and draws nothing extra.
+        if SMODS and SMODS.shop_rarity_target then
+            target_rar = SMODS.shop_rarity_target(self, ante, append, target_rar)
+        end
     end
     local pool = {}
     for id, def in pairs(JOKER_DEFS) do

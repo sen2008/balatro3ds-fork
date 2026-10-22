@@ -1308,4 +1308,250 @@ suite.test("retrigger fields in a calculate return run the effect again", functi
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Rarities, suits and poker hands (Tier 2)
+--------------------------------------------------------------------------------
+
+local TIER2 = [[
+SMODS.Rarity {
+    key = "mythic", weight = 0,
+    loc_txt = { name = "Mythic" },
+    badge_colour = "#B26CBB",
+}
+SMODS.Rarity {
+    key = "cursed", weight = 50,
+    loc_txt = { name = "Cursed" },
+    badge_colour = { 0.5, 0.1, 0.9 },
+}
+SMODS.Suit {
+    key = "Stars",
+    loc_txt = { name = "Stars" },
+    ui_colour = "#FFAA00",
+}
+SMODS.PokerHand {
+    key = "Spectrum",
+    loc_txt = { name = "Spectrum", text = { "Five cards, all different suits" } },
+    chips = 30, mult = 4, l_chips = 30, l_mult = 3,
+    evaluate = function(self, hand)
+        local seen, wilds = {}, 0
+        for _, card in ipairs(hand) do
+            local data = card.card_data or {}
+            if data.enhancement == "wild" then
+                wilds = wilds + 1
+            else
+                local suit = card.base and card.base.suit or data.suit
+                if suit == nil or seen[suit] then return nil end
+                seen[suit] = true
+            end
+        end
+        local distinct = wilds
+        for _ in pairs(seen) do distinct = distinct + 1 end
+        if distinct >= 5 then return hand end
+        return nil
+    end,
+}
+SMODS.Consumable {
+    set = "Planet", key = "nebula",
+    loc_txt = { name = "Nebula", text = { "Levels Spectrum" } },
+    config = { hand_type = "Spectrum" },
+    sprite = "a.png",
+}
+SMODS.Joker {
+    key = "myth", rarity = "mythic", cost = 9, sprite = "a.png",
+    loc_txt = { name = "Myth", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = 5 } end
+    end,
+}
+SMODS.Joker {
+    key = "cursed_one", rarity = "t2_cursed", cost = 4, sprite = "a.png",
+    loc_txt = { name = "Cursed One", text = { "x" } },
+}
+SMODS.Joker {
+    key = "star_gazer", rarity = 2, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Star Gazer", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.joker_main and next(context.poker_hands["Spectrum"]) then
+            return { mult = 8 }
+        end
+    end,
+}
+]]
+
+local function install_tier2()
+    wipe_mods()
+    write_mod("Tier2", { id = "Tier2", prefix = "t2", main_file = "main.lua", version = "1" }, TIER2)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Tier2.status, "loaded", tostring(ModLoader.by_id.Tier2.error))
+    local game = bootstrap.new_game(4431)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.jokers = {}
+    return game
+end
+
+--- Classify a play the way `test_hand_eval` does: plain nodes, every one selected.
+local function classify(game, specs)
+    local h = Hand(game)
+    h.card_nodes, h.selected = {}, {}
+    for _, spec in ipairs(specs) do
+        local nd = { card_data = { rank = spec[1], suit = spec[2], enhancement = spec[3] }, face_up = true }
+        h.card_nodes[#h.card_nodes + 1] = nd
+        h.selected[#h.selected + 1] = nd
+    end
+    h:calculate_play()
+    return G.handlist and G.handlist[G.selectedHand], h
+end
+
+local function colour_eq(a, b)
+    return type(a) == "table" and math.abs((a[1] or -1) - b[1]) < 0.01
+        and math.abs((a[2] or -1) - b[2]) < 0.01 and math.abs((a[3] or -1) - b[3]) < 0.01
+end
+
+suite.test("custom rarities: registration, pool rolls, shop weight and the badge", function()
+    local game = install_tier2()
+    local mythic = SMODS.Rarities["t2_mythic"]
+    local cursed = SMODS.Rarities["t2_cursed"]
+    T.assert_true(mythic ~= nil and cursed ~= nil)
+    T.assert_true(mythic.index >= 5 and cursed.index >= 5 and mythic.index ~= cursed.index,
+        "custom rarities take numbers after Legendary")
+    T.assert_eq(JOKER_DEFS.j_t2_myth.rarity, mythic.index, "declared by key from its own mod")
+    T.assert_eq(JOKER_DEFS.j_t2_cursed_one.rarity, cursed.index, "declared by full id")
+
+    T.assert_eq(game:random_joker_def_id_by_rarity(mythic.index, "t2pool", true), "j_t2_myth",
+        "rolls by rarity find it")
+
+    -- The shop roll: Cursed (weight 50 of 150) turns up, Mythic (weight 0) never does.
+    game.shop_offers, game.ante = {}, 1
+    local seen_cursed, seen_myth = false, false
+    for i = 1, 200 do
+        local id = game:_pick_joker_id_shop_rarity_distribution(
+            function(lo, hi) return math.random(lo, hi) end, "t" .. i)
+        if id == "j_t2_cursed_one" then seen_cursed = true end
+        if id == "j_t2_myth" then seen_myth = true end
+    end
+    T.assert_true(seen_cursed, "a weighted custom rarity reaches the shop")
+    T.assert_false(seen_myth, "weight 0 stays out of the shop roll")
+
+    local j = add(game, "j_t2_myth")
+    local lines = j:get_tooltip_body_lines()
+    T.assert_eq(lines[1].kind, "rarity_badge")
+    T.assert_eq(lines[1].text, "Mythic")
+    T.assert_eq(lines[1].rarity, mythic.index)
+    local seg = j:resolve_tooltip_line_segments(lines[1])[1]
+    T.assert_true(colour_eq(seg.rarity_colour, { 0xB2 / 255, 0x6C / 255, 0xBB / 255 }),
+        "the badge carries the rarity's own colour")
+    T.assert_true(colour_eq(game.C.RARITY[mythic.index], { 0xB2 / 255, 0x6C / 255, 0xBB / 255 }),
+        "and the palette has it for anything else that badges by number")
+    wipe_mods()
+    T.assert_eq(next(SMODS.Rarities), nil, "rollback takes the rarities with the mod")
+end)
+
+suite.test("an unknown rarity name is a load error that says so", function()
+    wipe_mods()
+    write_mod("Bad", { id = "BadR", prefix = "br", main_file = "main.lua", version = "1" }, [[
+        SMODS.Joker { key = "j", rarity = "sparkly", sprite = "a.png" }
+    ]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadR.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadR.error):find("unknown rarity", 1, true) ~= nil,
+        tostring(ModLoader.by_id.BadR.error))
+    wipe_mods()
+end)
+
+suite.test("custom suits: is_suit, creation, colours and flush", function()
+    local game = install_tier2()
+    T.assert_true(SMODS.Suits["Stars"] ~= nil)
+    T.assert_true(colour_eq(game.C.SUITS["Stars"], { 1, 0xAA / 255, 0 }), "ui_colour installed")
+
+    local star = Card(0, 0, 1, 1, { rank = 7, suit = "Stars" })
+    T.assert_true(star:is_suit("Stars"))
+    T.assert_false(star:is_suit("Hearts"))
+    local wild_star = Card(0, 0, 1, 1, { rank = 7, suit = "Stars", enhancement = "wild" })
+    T.assert_true(wild_star:is_suit("Hearts"), "a Wild card is every suit, custom included")
+
+    game.hand = Hand(game)
+    game.deck = Deck(game)
+    local node = SMODS.add_card { set = "Playing", rank = 5, suit = "Stars" }
+    T.assert_true(node ~= nil, "a playing card of a custom suit can be created")
+    T.assert_eq(node.card_data.suit, "Stars")
+
+    local name = classify(game, {
+        { 2, "Stars" }, { 5, "Stars" }, { 9, "Stars" }, { 11, "Stars" }, { 13, "Stars" },
+    })
+    T.assert_eq(name, "Flush", "five of a custom suit flush like any suit")
+    wipe_mods()
+    T.assert_eq(SMODS.Suits["Stars"], nil, "rollback takes the suit with the mod")
+end)
+
+suite.test("custom poker hands: Spectrum over a custom suit, contained types, Planets", function()
+    local game = install_tier2()
+    T.assert_eq(#game.handlist, 13, "the hand joins the list")
+    local pos = {}
+    for i, name in ipairs(game.handlist) do pos[name] = i end
+    T.assert_true(pos["Spectrum"] == 13 and pos["High Card"] == 12,
+        "appended after High Card: the engine names plays by list position, "
+        .. "so the vanilla twelve keep their places")
+    local stats = game.hand_stats[pos["Spectrum"]]
+    T.assert_eq(stats.base_chips, 30)
+    T.assert_eq(stats.base_mult, 4)
+
+    local play = {
+        { 2, "Hearts" }, { 5, "Clubs" }, { 9, "Diamonds" }, { 13, "Spades" }, { 7, "Stars" },
+    }
+    local name, h = classify(game, play)
+    T.assert_eq(name, "Spectrum", "five cards, all different suits")
+    T.assert_eq(G.selectedHandChips, 30)
+    T.assert_eq(G.selectedHandMult, 4)
+    for _, nd in ipairs(h.card_nodes) do
+        T.assert_true(nd.counts_for_play_score, "every Spectrum card scores")
+    end
+
+    local nodes = {}
+    for _, spec in ipairs(play) do
+        nodes[#nodes + 1] = { card_data = { rank = spec[1], suit = spec[2] }, face_up = true }
+    end
+    T.assert_true(h:build_contained_hand_types(nodes)["Spectrum"] == true,
+        "contained types name it, so context.poker_hands sees it")
+
+    local plain = classify(game, {
+        { 2, "Hearts" }, { 5, "Clubs" }, { 9, "Diamonds" }, { 13, "Spades" }, { 7, "Hearts" },
+    })
+    T.assert_eq(plain, "High Card", "a duplicated suit is no Spectrum")
+    T.assert_eq(classify(game, {
+        { 2, "Stars" }, { 5, "Stars" }, { 9, "Stars" }, { 11, "Stars" }, { 13, "Stars" },
+    }), "Flush", "a Flush still outranks it")
+
+    -- A Joker keyed on the hand through context.poker_hands.
+    local gazer = add(game, "j_t2_star_gazer")
+    local ctx = { event = "on_hand_scored", event_name = "on_hand_scored", chips = 30, mult = 4,
+        hand_type = "Spectrum", contains_hand_types = { Spectrum = true } }
+    gazer:apply_effect(ctx)
+    T.assert_eq(ctx.mult, 12, "+8 Mult when the played hand is Spectrum")
+    ctx = { event = "on_hand_scored", event_name = "on_hand_scored", chips = 35, mult = 4,
+        hand_type = "Flush", contains_hand_types = { Flush = true } }
+    gazer:apply_effect(ctx)
+    T.assert_eq(ctx.mult, 4, "and not for a Flush")
+
+    -- A Planet levels it by name, and the level shows in the next play's numbers.
+    game:apply_consumable_effect(copy_table(CONSUMABLE_DEFS.c_t2_nebula))
+    T.assert_eq(game.hand_stats[pos["Spectrum"]].level, 2)
+    classify(game, play)
+    T.assert_eq(G.selectedHandChips, 60)
+    T.assert_eq(G.selectedHandMult, 7)
+    wipe_mods()
+end)
+
+suite.test("with no mods registered, hands and suits stay vanilla", function()
+    wipe_mods()
+    local game = bootstrap.new_game(4432)
+    G = game
+    T.assert_eq(#game.handlist, 12)
+    T.assert_eq(game.handlist[1], "Flush Five")
+    T.assert_eq(game.handlist[12], "High Card")
+    T.assert_eq(game.C.SUITS["Stars"], nil)
+    T.assert_eq(#SMODS.PokerHands, 0)
+end)
+
 return suite

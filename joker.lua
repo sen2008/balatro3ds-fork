@@ -891,8 +891,12 @@ end
 local function rarity_badge_line(def)
     local rarity = tonumber(def.rarity)
     local rarity_key = ({ "common", "uncommon", "rare", "legendary" })[rarity or 0]
-    if not rarity_key then return nil end
-    return { kind = "rarity_badge", text = I18N.t("rarity." .. rarity_key), rarity = rarity }
+    if rarity_key then
+        return { kind = "rarity_badge", text = I18N.t("rarity." .. rarity_key), rarity = rarity }
+    end
+    -- A mod rarity (SMODS.Rarity) badges with its own name and colour.
+    if def.smods and SMODS and SMODS.rarity_badge then return SMODS.rarity_badge(def) end
+    return nil
 end
 
 function Joker:get_tooltip_body_lines()
@@ -1013,9 +1017,11 @@ function Joker:resolve_tooltip_line_segments(line_def)
     if line_def.kind == "rarity_badge" then
         local r = tonumber(line_def.rarity) or 1
         if r < 1 then r = 1 end
-        if r > 4 then r = 4 end
+        -- A badge with its own colour (a mod rarity) keeps its number; the palette
+        -- only has the four vanilla colours to clamp the rest to.
+        if not line_def.colour and r > 4 then r = 4 end
         local text = tostring(line_def.text or "")
-        return { { text = text, rarity_badge = true, rarity_index = r } }
+        return { { text = text, rarity_badge = true, rarity_index = r, rarity_colour = line_def.colour } }
     end
 
     local text = tostring(line_def.text or "")
