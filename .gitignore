@@ -1,0 +1,32 @@
+# LovePotion / 3DS build output
+*.3dsx
+*.zip
+
+# Editor
+.vscode/
+
+# Scripts
+*.bat
+.luarc.json
+scripts/*
+tools/*
+
+# Local dev tooling: downloaded binaries, build cache, output and the dev server
+dev/.tools/
+dev/.cache/
+dev/.venv/
+dev/dist/
+dev/server/
+dev/mods/
+__pycache__/
+
+# Misc
+Bugs.txt
+conf.lua
+.DS_Store
+
+# Design iteration scratch
+.scratch/
+
+# Reference material + review notes (not for version control)
+reference/

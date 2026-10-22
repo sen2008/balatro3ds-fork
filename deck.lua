@@ -1,0 +1,205 @@
+---@class Deck
+Deck = Object:extend()
+
+local SUITS = { "Clubs", "Diamonds", "Hearts", "Spades" }
+local RANKS = { 2, 3, 4, 5, 6, 7, 8, 9, 14, 11, 13, 12, 10 }
+
+--- Shallow copy of a card data table (rank/suit/extras). Avoids shared refs between hand and piles.
+---@param data table|nil
+---@return table|nil
+function Deck.copy_card_data(data)
+    if type(data) ~= "table" then return nil end
+    local c = {}
+    for k, v in pairs(data) do
+        c[k] = v
+    end
+    return c
+end
+
+function Deck:init(game)
+    self.game = game
+    self.cards = {}
+    --- Logical cards discarded from the hand (and similar). Not the same as UI discard animation queue.
+    self.discard_pile = {}
+    self:fill()
+end
+
+function Deck:fill()
+    self.cards = {}
+    --local enhancements = { "mult", "steel", "none", "bonus", "gold", "glass", "lucky", "stone", "wild"}
+    --local seals = { "gold", "red", "blue", "purple", "none" }
+    local sort_id = 0
+    for _, suit in ipairs(SUITS) do
+        for _, rank in ipairs(RANKS) do
+            sort_id = sort_id + 1
+            --local enhancement = enhancements[math.random(1, #enhancements)]
+            --local seal = seals[math.random(1, #seals)]
+            table.insert(self.cards, {
+                rank = rank, suit = suit, enhancement = nil, seal = nil, _sort_id = sort_id,
+            })
+        end
+    end
+end
+
+--- Assign the stable creation order that reference `CardArea:shuffle` restores before every
+--- Fisher-Yates pass. The base run builds and sorts card prototypes before creating cards
+--- (`game.lua:2365-2383`), so a later shuffle never depends on the previous shuffle's order.
+function Deck:assign_reference_sort_ids()
+    local suit_key = { Clubs = "C", Diamonds = "D", Hearts = "H", Spades = "S" }
+    local rank_key = { [10] = "T", [11] = "J", [12] = "Q", [13] = "K", [14] = "A" }
+    table.sort(self.cards, function(a, b)
+        local function key(card)
+            return (suit_key[card.suit] or "")
+                .. (rank_key[card.rank] or tostring(card.rank or ""))
+                .. tostring(card.enhancement or "")
+                .. tostring(card.modifier and card.modifier.edition or "")
+                .. tostring(card.seal or "")
+        end
+        return key(a) < key(b)
+    end)
+    for i, card in ipairs(self.cards) do card._sort_id = i end
+end
+
+function Deck:shuffle(seed_key)
+    local n = #self.cards
+    local next_sort_id = 0
+    for _, card in ipairs(self.cards) do
+        next_sort_id = math.max(next_sort_id, tonumber(card._sort_id) or 0)
+    end
+    for _, card in ipairs(self.cards) do
+        if card._sort_id == nil then
+            next_sort_id = next_sort_id + 1
+            card._sort_id = next_sort_id
+        end
+    end
+    table.sort(self.cards, function(a, b)
+        return (tonumber(a._sort_id) or 0) < (tonumber(b._sort_id) or 0)
+    end)
+    local rng = self.game and self.game._reference_math_rng
+    if self.game and rng and not self.game._legacy_rng_streams then
+        rng:seed(self.game:pseudoseed(seed_key or "shuffle"))
+    end
+    for i = n, 2, -1 do
+        local j
+        if rng and not self.game._legacy_rng_streams then
+            j = rng:random(1, i)
+        else
+            j = self.game and self.game:random("deck", 1, i) or math.random(1, i)
+        end
+        self.cards[i], self.cards[j] = self.cards[j], self.cards[i]
+    end
+end
+
+--- Add a logical card to the discard pile (stores a copy). Used when the player **discards** — not when a card is **destroyed** (destroyed cards leave the game entirely).
+---@param card_data table|nil
+function Deck:push_discard(card_data)
+    local c = Deck.copy_card_data(card_data)
+    if c then
+        table.insert(self.discard_pile, c)
+    end
+end
+
+--- Move every card still in the draw pile into the discard pile (each copied).
+function Deck:move_draw_pile_to_discard()
+    while #self.cards > 0 do
+        local c = table.remove(self.cards)
+        self:push_discard(c)
+    end
+end
+
+--- Shuffle discard into the draw pile. Call once when the **round** ends (not when the draw pile is empty mid-round).
+function Deck:shuffle_discard_into_draw()
+    if #self.discard_pile == 0 then return end
+    for _, c in ipairs(self.discard_pile) do
+        table.insert(self.cards, c)
+    end
+    self.discard_pile = {}
+    self:shuffle()
+end
+
+--- Recycle the full deck at blind/round end: remaining draw pile and discard pile merge, then shuffle into draw.
+function Deck:end_round()
+    self:move_draw_pile_to_discard()
+    self:shuffle_discard_into_draw()
+end
+
+--- Merge draw pile, discard pile, and optional hand sources into one shuffled draw pile.
+---@param hand_cards table[]|nil
+---@param hand_queue table[]|nil
+function Deck:recycle_all(hand_cards, hand_queue)
+    local merged = {}
+    local function add(c)
+        local copy = Deck.copy_card_data(c)
+        if copy then merged[#merged + 1] = copy end
+    end
+    for _, c in ipairs(self.discard_pile) do add(c) end
+    for _, c in ipairs(self.cards) do add(c) end
+    for _, c in ipairs(hand_cards or {}) do add(c) end
+    for _, c in ipairs(hand_queue or {}) do add(c) end
+    self.cards = merged
+    self.discard_pile = {}
+    if #self.cards > 0 then
+        self:shuffle()
+    end
+end
+
+--- Use after a game/run: the discard pile becomes the only source for the next game's draw pile.
+--- Remaining cards in `self.cards` are left untouched; call `move_draw_pile_to_discard()` first if they should be included.
+function Deck:set_next_game_draw_from_discard()
+    self.cards = {}
+    for _, c in ipairs(self.discard_pile) do
+        table.insert(self.cards, Deck.copy_card_data(c))
+    end
+    self.discard_pile = {}
+    self:shuffle()
+end
+
+---@return integer
+function Deck:discard_size()
+    return #self.discard_pile
+end
+
+--- Pop a card from the draw pile. Does **not** pull from the discard pile mid-run; call `end_round()` / `shuffle_discard_into_draw()` when the round ends.
+---@return table|nil
+function Deck:draw()
+    if #self.cards == 0 then return nil end
+    return table.remove(self.cards)
+end
+
+--- Return a **copy** of a uniformly random card's data from the draw pile (`self.cards`).
+--- Does not remove the card. Does **not** include the discard pile. Returns nil if empty.
+---@return table|nil
+function Deck:random_card()
+    local n = #self.cards
+    if n == 0 then return nil end
+    local i = self.game and self.game:random("deck", 1, n) or math.random(1, n)
+    return Deck.copy_card_data(self.cards[i])
+end
+
+--- Draw a card and add it to the given hand list. Returns the card or nil.
+---@param hand table
+---@return table|nil
+function Deck:draw_to_hand(hand)
+    local card = self:draw()
+    if card and hand then
+        table.insert(hand, card)
+    end
+    return card
+end
+
+function Deck:size()
+    return #self.cards
+end
+
+--- Return a card to the draw area. The next reference shuffle restores creation order before
+--- shuffling, so spending a separate random draw on the temporary insertion point is incorrect.
+---@param card_data table|nil
+function Deck:insert_random(card_data)
+    local c = Deck.copy_card_data(card_data)
+    if not c then return end
+    self.cards[#self.cards + 1] = c
+end
+
+function Deck:empty()
+    return #self.cards == 0
+end

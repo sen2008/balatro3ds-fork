@@ -1,0 +1,529 @@
+---@class Consumable : Moveable
+Consumable = Moveable:extend()
+
+local TooltipDraw = require("tooltip_draw")
+-- Tarots.png starts its negative variants at cell 56. Cells 24-27 are card backs,
+-- so the offset is larger than the number of base consumables.
+local NEGATIVE_CONSUMABLE_INDEX_OFFSET = 56
+local CONSUMABLE_SPRITE_DIR = "resources/textures/1x/Consumables/"
+local _consumable_missing_atlas_reported = {}
+
+--- Shared, refcounted consumable sprites.
+---
+--- These used to be loaded per instance with no cache at all, so two of the same tarot in
+--- the tray were two copies of one 64x128 texture, opening a five-card Arcana pack was five
+--- SD reads and five t3x decodes inside a single frame, and paging the collection browser
+--- re-read every sprite on the page.
+---
+--- The shape mirrors the joker front sprites (`game.lua`, `_inc_atlas_owner` /
+--- `_dec_atlas_owner`): entries are shared and the image is freed when the last consumable
+--- holding it goes. That is safe because removal has exactly one path -- `Game:remove` calls
+--- `release_texture`, which is idempotent through `_texture_released`, so a card cannot
+--- decrement its entry twice.
+--- Bumped by `release_all_sprites`. A card stamps the generation it acquired under and can
+--- only decrement a count from that same generation: the sweep drops every count to zero,
+--- so a card that outlived it would otherwise decrement a count belonging to a card
+--- acquired afterwards and free a sprite still being drawn.
+local _sprite_cache = {}
+local _sprite_owners = {}
+local _sprite_generation = 0
+
+--- Load one sprite into the cache, or return the entry already there.
+---
+--- Split out of `consumable_acquire_sprite` so the cost can be paid before the frame that
+--- needs it: `newImage` is a blocking SD read plus a texture build, ~24 ms on console, and
+--- five of them landing together is a visible freeze rather than a slow frame.
+local function consumable_load_sprite(index)
+    local entry = _sprite_cache[index]
+    if not entry then
+        -- A mod consumable names its own image by sprite key (`smods.lua`); it is cached,
+        -- counted and freed exactly like a vanilla one.
+        local path = (type(index) == "string" and SMODS and SMODS.sprite_path(index))
+            or string.format("%s%03d.png", CONSUMABLE_SPRITE_DIR, tonumber(index) or 0)
+        local ok, image = pcall(love.graphics.newImage, path, { dpiscale = 1, mipmaps = false })
+        local err = ok and nil or image
+        if not ok then
+            ok, image = pcall(love.graphics.newImage, path, {})
+            if not ok then err = image end
+        end
+        entry = {
+            name = "Consumable_" .. tostring(index),
+            path = path,
+            image = ok and image or nil,
+            load_error = (not ok) and tostring(err) or nil,
+            px = 64,
+            py = 96,
+            cols = 1,
+        }
+        _sprite_cache[index] = entry
+    end
+    return entry
+end
+
+--- Pull a sprite into the cache without taking ownership of it.
+---
+--- Deliberately does not touch `_sprite_owners`: the consumable that eventually wants this
+--- sprite takes the reference itself, and a warmed sprite nobody constructs is left for
+--- `release_all_sprites` at run teardown rather than being pinned by a phantom owner.
+---@param index number
+function Consumable.warm_sprite(index)
+    if index == nil then return end
+    consumable_load_sprite(index)
+end
+
+--- Whether a sprite is already resident, so a warming pass can skip it and spend its frame
+--- on one that is not.
+---@param index number
+---@return boolean
+function Consumable.sprite_is_resident(index)
+    local entry = _sprite_cache[index]
+    return entry ~= nil and entry.image ~= nil
+end
+
+local function consumable_acquire_sprite(index)
+    local entry = consumable_load_sprite(index)
+    _sprite_owners[index] = (_sprite_owners[index] or 0) + 1
+    return entry, _sprite_generation
+end
+
+local function consumable_release_sprite(index, generation)
+    -- Stale reference: the cache was swept out from under this card, and its count now
+    -- belongs to whoever acquired the sprite after the sweep.
+    if generation ~= _sprite_generation then return end
+
+    local remaining = (_sprite_owners[index] or 0) - 1
+    if remaining > 0 then
+        _sprite_owners[index] = remaining
+        return
+    end
+
+    _sprite_owners[index] = nil
+    local entry = _sprite_cache[index]
+    _sprite_cache[index] = nil
+    if entry and entry.image then
+        if entry.image.release then
+            pcall(function() entry.image:release() end)
+        end
+        entry.image = nil
+    end
+end
+
+--- Free every cached sprite and forget the counts.
+---
+--- Refcounts only stay balanced while every constructed consumable reaches `Game:remove`.
+--- That holds today -- the tray, the shop and the collection browser all tear down through
+--- it -- but a missed release would otherwise pin a texture for the life of the process.
+--- The run teardown calls this for the same reason it bulk-frees the run atlases: a leak
+--- bounded by one run is recoverable, a permanent one is not.
+function Consumable.release_all_sprites()
+    for index, entry in pairs(_sprite_cache) do
+        if entry.image then
+            if entry.image.release then
+                pcall(function() entry.image:release() end)
+            end
+            entry.image = nil
+        end
+        _sprite_cache[index] = nil
+    end
+    for index in pairs(_sprite_owners) do
+        _sprite_owners[index] = nil
+    end
+    -- Anything still holding a reference is now stale and must not decrement these counts.
+    _sprite_generation = _sprite_generation + 1
+end
+
+--- How many distinct sprites are resident, and how many cards hold the one for `index`.
+--- Test seam only; nothing in the game reads these.
+function Consumable.sprite_cache_stats(index)
+    local resident = 0
+    for _ in pairs(_sprite_cache) do resident = resident + 1 end
+    return resident, (index ~= nil) and (_sprite_owners[index] or 0) or nil
+end
+
+local function consumable_compute_quad(atlas, index)
+    if not atlas or not atlas.image or index == nil then return nil, 0, 0 end
+    local iw, ih = atlas.image:getDimensions()
+    local cell_w, cell_h = atlas.px, atlas.py
+    if not cell_w or not cell_h or cell_w <= 0 or cell_h <= 0 then
+        return nil, 0, 0
+    end
+    -- T3X can report its padded/runtime width rather than the PNG's source
+    -- width on hardware. Consumables use a fixed 16-column source atlas, so
+    -- prefer that declared geometry instead of deriving it from the image.
+    local cols = tonumber(atlas.cols) or math.floor(iw / cell_w)
+    if cols <= 0 then return nil, 0, 0 end
+    local col = index % cols
+    local row = math.floor(index / cols)
+    local sx = col * cell_w
+    local sy = row * cell_h
+    local quad = love.graphics.newQuad(sx, sy, cell_w, cell_h, iw, ih)
+    return quad, cell_w, cell_h
+end
+
+local function consumable_normalize_edition(raw)
+    if raw == nil or raw == "" then return "base" end
+    local e = string.lower(tostring(raw))
+    if e == "e_negative" or e == "negative" then return "negative" end
+    return "base"
+end
+
+--- The sprite index a consumable built from this def would load.
+---
+--- The negative offset lives here and only here: a warming pass that recomputed it would load
+--- the base sprite and leave the real one to block the frame it was supposed to be sparing,
+--- and nothing would look wrong until a negative consumable turned up in a pack.
+---@param def table entry from CONSUMABLE_DEFS
+---@return number
+function Consumable.sprite_index_for(def)
+    if type(def) ~= "table" then return 0 end
+    if def.mod_sprite then
+        -- A mod consumable's own image (`smods.lua`), or its negative one when it has it.
+        if consumable_normalize_edition(def.edition) == "negative" and def.mod_negative_sprite then
+            return def.mod_negative_sprite
+        end
+        return def.mod_sprite
+    end
+    local index = tonumber(def.index) or 0
+    if consumable_normalize_edition(def.edition) == "negative" then
+        index = index + NEGATIVE_CONSUMABLE_INDEX_OFFSET
+    end
+    return index
+end
+
+---@param X number
+---@param Y number
+---@param def table  -- entry from CONSUMABLE_DEFS
+function Consumable:init(X, Y, def)
+    self.def = def or {}
+    self.id = self.def.id
+    self.kind = self.def.kind
+    self.name = self.def.name or "Consumable"
+    self.sell_cost = (self.kind == "spectral") and 2 or 1
+    self.edition = consumable_normalize_edition(self.def.edition)
+    self.atlas_name = self.def.atlas or "Tarot"
+    self.index = Consumable.sprite_index_for(self.def)
+    self.atlas_name = "Consumable_" .. tostring(self.index)
+
+    local cw, ch = 72, 95
+    Moveable.init(self, X or 0, Y or 0, cw, ch)
+
+    self.states.collide.can = false
+    self.states.click.can = true
+    self.states.drag.can = true
+    self.states.visible = true
+
+    -- Individual power-of-two sprites avoid reserving a 2 MiB atlas for a
+    -- handful of visible cards and bypass T3X subtexture geometry on 3DS.
+    self.atlas, self._sprite_gen = consumable_acquire_sprite(self.index)
+    self._sprite_index = self.index
+    self.quad, self.w, self.h = consumable_compute_quad(self.atlas, 0)
+
+    if (not self.atlas or not self.atlas.image or not self.quad) and G and self.atlas_name then
+        local key = tostring(self.atlas_name) .. ":" .. tostring(self.index)
+        if not _consumable_missing_atlas_reported[key] then
+            _consumable_missing_atlas_reported[key] = true
+            local err = (self.atlas and self.atlas.load_error) and tostring(self.atlas.load_error) or "unknown atlas/quad failure"
+            print(string.format("[Consumable] draw fallback for '%s' atlas='%s' idx=%s err=%s",
+                tostring(self.name), tostring(self.atlas_name), tostring(self.index), err))
+        end
+    end
+
+    if self.w and self.h and self.w > 0 and self.h > 0 then
+        self.T.w = self.w
+        self.T.h = self.h
+        if self.VT then
+            self.VT.w = self.w
+            self.VT.h = self.h
+        end
+    end
+end
+
+function Consumable:release_texture()
+    if self._texture_released then return end
+    self._texture_released = true
+    -- The atlas entry is shared, so this drops a reference rather than releasing the image:
+    -- another card of the same consumable may still be drawing it.
+    if self._sprite_index ~= nil then
+        consumable_release_sprite(self._sprite_index, self._sprite_gen)
+        self._sprite_index = nil
+        self._sprite_gen = nil
+    end
+    self.atlas = nil
+    self.quad = nil
+end
+
+function Consumable:get_collision_rect()
+    local t = self.VT or self.T
+    local s = t.scale or 1
+    local w = t.w or 0
+    local h = t.h or 0
+
+    local offx = (self.collision_offset and self.collision_offset.x) or 0
+    local offy = (self.collision_offset and self.collision_offset.y) or 0
+
+    local scaled_w = w * s
+    local scaled_h = h * s
+
+    local delta_x = (w * s * (1 - s)) / 2
+    local delta_y = (h * s * (1 - s)) / 2
+
+    local draw_x = t.x + offx
+    local draw_y = t.y + offy
+
+    return {
+        x = draw_x + delta_x,
+        y = draw_y + delta_y,
+        w = scaled_w,
+        h = scaled_h,
+    }
+end
+
+function Consumable:draw()
+    if not self.states.visible then return end
+
+    local draw_x = self.VT.x + self.collision_offset.x
+    local draw_y = self.VT.y + self.collision_offset.y
+    local draw_w = (self.VT and self.VT.w) or (self.T and self.T.w) or 72
+    local draw_h = (self.VT and self.VT.h) or (self.T and self.T.h) or 95
+
+    local cx = draw_x + (self.VT.w * self.VT.scale) / 2
+    local cy = draw_y + (self.VT.h * self.VT.scale) / 2
+    -- A used consumable keeps its size and comes apart inside the sprite, the way the
+    -- reference's dissolve shader does it (`reference/Balatro/card.lua:2130`).
+    local dissolve = self._card_lifecycle and self:lifecycle_dissolve() or nil
+    -- The pop the reference fires at both ends of a lifecycle (`card.lua:2135`, `:2196`).
+    -- `Moveable:update_juice` has always been driving these fields on a consumable; nothing
+    -- read them, so a used tarot was the one thing on screen that came apart without
+    -- flinching first. This transform is already centre-anchored, so the pop needs no
+    -- re-centring the way `Card:draw` does.
+    local scale = self.VT.scale * (self.juice_scale or 1)
+    local rot = self.VT.r + (self.juice_r or 0)
+
+    -- The plain path draws exactly one quad, so the pivot transform goes into that draw's own
+    -- arguments instead of onto the stack: translate/rotate/scale/translate about (cx, cy) and
+    -- then a quad at (draw_x, draw_y) is the same matrix as a draw at (cx, cy) with the origin
+    -- offset back to the quad's corner. Six graphics calls become none.
+    local plain = self.atlas and self.atlas.image and self.quad
+        and not (dissolve and Fx and Fx.draw_dissolve_cell)
+
+    if plain then
+        love.graphics.setColor(1, 1, 1, dissolve and (1 - dissolve) or 1)
+        love.graphics.draw(self.atlas.image, self.quad, cx, cy, rot, scale, scale,
+            cx - draw_x, cy - draw_y)
+        if self.def and self.def.id == "spectral_soul" then
+            -- The Soul has a dedicated shader layer in the reference. One faint additive
+            -- echo gives the rare card its own silhouette without a shader or resident asset.
+            local t = Fx and Fx.time and Fx.time() or 0
+            love.graphics.setBlendMode("add")
+            love.graphics.setColor(0.45, 0.2, 0.8, 0.22)
+            love.graphics.draw(self.atlas.image, self.quad, cx + math.sin(t * 1.4) * 1.2,
+                cy + math.cos(t * 1.1) * 1.2, rot, scale * 1.025, scale * 1.025,
+                cx - draw_x, cy - draw_y)
+            love.graphics.setBlendMode("alpha")
+        end
+        return self:draw_focus_outline()
+    end
+
+    Moveable.push_pivot_transform(cx, cy, rot, scale, scale)
+
+    if self.atlas and self.atlas.image and self.quad then
+        love.graphics.setColor(1, 1, 1, dissolve and (1 - dissolve) or 1)
+        local masked = false
+        -- `Fx` is a global wired up by main.lua; a consumable can be drawn by a harness that
+        -- never loaded it, and a dissolve is not worth erroring over.
+        if dissolve and Fx and Fx.draw_dissolve_cell then
+            local b1, b2 = self:lifecycle_burn()
+            local qx, qy, qw, qh = self.quad:getViewport()
+            masked = Fx.draw_dissolve_cell(self.atlas.image, qx, qy, qw, qh, draw_x, draw_y,
+                qw, qh, dissolve, b1, b2, self:lifecycle_seed())
+        end
+        if not masked then
+            love.graphics.draw(self.atlas.image, self.quad, draw_x, draw_y, 0, 1, 1)
+        end
+    else
+        -- Visual fallback helps distinguish "not drawn" vs "texture failed."
+        love.graphics.setColor(0.9, 0.25, 0.25, 0.9)
+        love.graphics.rectangle("line", draw_x, draw_y, draw_w, draw_h)
+        love.graphics.setColor(1, 1, 1, 1)
+    end
+
+    love.graphics.pop()
+
+    return self:draw_focus_outline()
+end
+
+--- The gamepad focus ring, drawn outside the sprite transform. Its own function only so the
+--- plain draw path above can return straight into it.
+function Consumable:draw_focus_outline()
+    if G and G.draw_node_gamepad_focus_outline then
+        G:draw_node_gamepad_focus_outline(self)
+    end
+end
+
+function Consumable:draw_tooltip_overlay()
+    if not self.states.visible or not self:tooltip_is_active() then return end
+    local draw_x = self.VT.x + self.collision_offset.x
+    local draw_y = self.VT.y + self.collision_offset.y
+    self:draw_tooltip(draw_x, draw_y)
+end
+
+--- `def.tooltip` as a line list, whether it was written as one string or several.
+---@return string[]
+local function static_tooltip_lines(def)
+    local out = {}
+    local tip = def and def.tooltip
+    if type(tip) == "table" then
+        for _, l in ipairs(tip) do
+            if type(l) == "string" and l ~= "" then out[#out + 1] = l end
+        end
+    elseif type(tip) == "string" and tip ~= "" then
+        for line in tip:gmatch("[^\r\n]+") do
+            if line ~= "" then out[#out + 1] = line end
+        end
+    end
+    return out
+end
+
+--- The description lines in the live language: a translation (`locales/content/<language>/
+--- consumables.lua`) when there is one, the catalog's English otherwise.
+local function description_lines(def)
+    if def.id and I18N.has("consumable." .. def.id .. ".description") then
+        local out = {}
+        for _, l in ipairs(I18N.content_lines("consumable", def.id)) do
+            if l ~= "" then out[#out + 1] = l end
+        end
+        return out
+    end
+    return static_tooltip_lines(def)
+end
+
+--- Planet: hand level text. Tarot: optional `def.tooltip` string or list of strings.
+---@return string[]
+function Consumable:get_tooltip_body_lines()
+    local def = self.def or {}
+    if def.mod_id and SMODS and SMODS.tooltip_lines then
+        -- `card.ability` is the owned copy's state; a pack or collection card reads its config.
+        local card = { ability = def.ability or def.config or {}, config = def }
+        local lines = SMODS.tooltip_lines(def.id, card)
+        if type(lines) == "table" and #lines > 0 then return lines end
+    end
+    if def.id == "spectral_ectoplasm" then
+        local penalty = math.max(1, (tonumber(G and G.ectoplasm_used) or 0) + 1)
+        return { I18N.t("spectral.ectoplasm_penalty", { count = penalty }) }
+    end
+    if def.id == "tarot_fool" and G then
+        local out = description_lines(def)
+        local last_id = G.last_consumable_use_id
+        if last_id and CONSUMABLE_DEFS and CONSUMABLE_DEFS[last_id] then
+            local name = I18N.content_name("consumable", last_id, CONSUMABLE_DEFS[last_id].name or last_id)
+            out[#out + 1] = I18N.t("term.fool_current", { name = name })
+        end
+        if #out > 0 then return out end
+    end
+    -- Temperance quotes what it would pay right now. The reference fills that in as the card's
+    -- second localisation variable (`localization/en-us.lua:2938-2946`,
+    -- `functions/common_events.lua:2687-2696`); without it the card is the one consumable whose
+    -- worth the player cannot read off the card.
+    if def.id == "tarot_temperance" and G and G.temperance_payout then
+        local out = description_lines(def)
+        out[#out + 1] = I18N.t("term.current_money", { value = G:temperance_payout() })
+        if #out > 0 then return out end
+    end
+    if def.kind == "planet" and type(def.hand) == "string" and def.hand ~= "" then
+        -- The reference names the hand's current level and the exact mult/chips the card
+        -- grants, not just the hand (`localization/en-us.lua:2335-2342`, four lines:
+        -- "(lvl.N) Level up" / hand / "+M Mult and" / "+C chips"). Those numbers are what
+        -- the player is choosing between when a Celestial pack offers three planets.
+        local idx
+        for i, name in ipairs((G and G.handlist) or {}) do
+            if name == def.hand then idx = i break end
+        end
+        local stats = idx and G and G.hand_stats and G.hand_stats[idx] or nil
+        if stats then
+            return {
+                I18N.t("planet.level_up", { level = math.max(1, math.floor(tonumber(stats.level) or 1)) }),
+                I18N.hand_name(def.hand),
+                I18N.t("planet.mult", { value = math.floor(tonumber(stats.mult_per_level) or 0) }),
+                I18N.t("planet.chips", { value = math.floor(tonumber(stats.chips_per_level) or 0) }),
+            }
+        end
+        return { I18N.t("term.planet_upgrade", { hand = I18N.hand_name(def.hand) }) }
+    end
+    if (def.kind == "tarot" or def.kind == "spectral") and def.id
+        and I18N.has("consumable." .. def.id .. ".description") then
+        return description_lines(def)
+    end
+    if def.kind == "tarot" or def.kind == "spectral" then
+        local tip = def.tooltip
+        if type(tip) == "table" then
+            local out = {}
+            for _, l in ipairs(tip) do
+                if type(l) == "string" and l ~= "" then out[#out + 1] = l end
+            end
+            if #out > 0 then return out end
+        elseif type(tip) == "string" and tip ~= "" then
+            local out = {}
+            for line in tip:gmatch("[^\r\n]+") do
+                if line ~= "" then out[#out + 1] = line end
+            end
+            if #out > 0 then return out end
+        end
+    end
+    return {}
+end
+
+function Consumable:tooltip_is_active()
+    if not G then return false end
+    if G.is_hand_scoring_active and G:is_hand_scoring_active() then return false end
+    if G._collection_open and G._collection_tooltip_node == self then return true end
+    if G.is_card_select_mode and G:is_card_select_mode() then return false end
+    if self.shop_offer_slot and G.STATE == G.STATES.SHOP and G.active_tooltip_joker == self then
+        return true
+    end
+    if G.should_draw_gamepad_focus_outline and G:should_draw_gamepad_focus_outline(self) then
+        return true
+    end
+    if G.is_shop_item_selected and G:is_shop_item_selected(self) then
+        return true
+    end
+    if self._booster_choice_index and G.STATE == G.STATES.OPEN_BOOSTER and G.booster_session then
+        return tonumber(G.booster_session.active_choice_index) == self._booster_choice_index
+    end
+    if G.consumables_on_bottom ~= true then
+        if self.states.drag.is then return true end
+        return false
+    end
+    if self.states.drag.is then return true end
+    local idx = G.active_tooltip_consumable_index
+    if idx and G.consumable_nodes and G.consumable_nodes[idx] == self then
+        return true
+    end
+    return false
+end
+
+function Consumable:draw_tooltip(draw_x, draw_y)
+    local lines = self:get_tooltip_body_lines()
+    if #lines == 0 then return end
+
+    local def = self.def or {}
+    local title = I18N.content_name("consumable", def.id, self.name or def.name or "Consumable")
+    if G and G.is_discovered and def.id and not G:is_discovered(def.id) then
+        title = I18N.t("term.not_discovered")
+    end
+    local font = G.FONTS.PIXEL.SMALL or love.graphics.getFont()
+
+    local resolved = {}
+    for _, line in ipairs(lines) do
+        if type(line) == "table" and type(line.segments) == "table" then
+            resolved[#resolved + 1] = line.segments
+        else
+            resolved[#resolved + 1] = TooltipDraw.build_segments_from_text(line)
+        end
+    end
+
+    TooltipDraw.draw_tooltip_layout(
+        font, title, resolved,
+        draw_x, draw_y,
+        self.VT.w * self.VT.scale, self.VT.h * self.VT.scale
+    )
+end

@@ -1,0 +1,419 @@
+local Fonts = require("fonts")
+
+VERSION = '1.0.1o'
+VERSION = VERSION..'-FULL'
+--check_version
+
+-- basic helpers used by global config
+function HEX(hex)
+    if #hex <= 6 then hex = hex.."FF" end
+  local _,_,r,g,b,a = hex:find('(%x%x)(%x%x)(%x%x)(%x%x)')
+  local color = {tonumber(r,16)/255,tonumber(g,16)/255,tonumber(b,16)/255,tonumber(a,16)/255 or 255}
+  return color
+end
+
+function copy_table(t)
+    if type(t) ~= 'table' then return t end
+    local nt = {}
+    for k, v in pairs(t) do
+        if type(v) == 'table' then
+            nt[k] = copy_table(v)
+        else
+            nt[k] = v
+        end
+    end
+    return nt
+end
+
+--Globals
+function Game:set_globals()
+    
+    --||||||||||||||||||||||||||||||
+    --         Feature Flags
+    --||||||||||||||||||||||||||||||
+    -- The original game's full F_* block was inherited wholesale and never read; only
+    -- the flags this port actually acts on are kept.
+    self.F_MUTE = false                     --Force mute all sounds (checked in Sfx.play)
+
+
+    --||||||||||||||||||||||||||||||
+    --             Time / RNG
+    --||||||||||||||||||||||||||||||
+    -- SEED: used for math.randomseed in Game:init. Pass seed to Game(seed) for reproducible runs.
+    self.SEED = os.time()
+    self.TIMERS = {
+        TOTAL=0,
+        REAL = 0,
+        REAL_SHADER = 0,
+        UPTIME = 0,
+        BACKGROUND = 0
+    }
+    self.FRAMES = {
+        DRAW = 0,
+        MOVE = 0
+    }
+    self.exp_times = {xy = 0, scale = 0, r = 0}
+    --||||||||||||||||||||||||||||||
+    --           SETTINGS
+    --||||||||||||||||||||||||||||||
+    self.SETTINGS = {
+        GAMESPEED = 1,
+        SOUND = {
+            volume = 100,        -- master, scales both music and SFX
+            music_volume = 100,
+            sfx_volume = 100,
+        },
+        GRAPHICS = {
+            texture_scaling = 1,
+        },
+    }
+
+    --||||||||||||||||||||||||||||||
+    --           PROFILES
+    --||||||||||||||||||||||||||||||
+    self.PROFILES = {
+        {},
+        {},
+        {},
+    }
+
+    --||||||||||||||||||||||||||||||
+    --        RENDER SCALE
+    --||||||||||||||||||||||||||||||
+    self.TILESIZE = 20
+    self.TILESCALE = 3.65
+    self.TILE_W = 20
+    self.TILE_H = 11.5
+    self.DRAW_HASH_BUFF = 2
+    self.CARD_W = 2.4*35/41
+    self.CARD_H = 2.4*47/41
+    self.HIGHLIGHT_H = 0.2*self.CARD_H
+    self.COLLISION_BUFFER = 0.05
+
+    self.PITCH_MOD = 1
+
+    --||||||||||||||||||||||||||||||
+    --        GAMESTATES
+    --||||||||||||||||||||||||||||||
+    self.STATES = {
+        SELECTING_HAND = 1,
+        HAND_PLAYED = 2,
+        DRAW_TO_HAND = 3,
+        GAME_OVER = 4,
+        SHOP = 5,
+        PLAY_TAROT = 6,
+        BLIND_SELECT = 7,
+        ROUND_EVAL = 8,
+        TAROT_PACK = 9,
+        PLANET_PACK = 10,
+        MENU = 11,
+        TUTORIAL = 12,
+        SPLASH = 13,--DO NOT CHANGE, this has a dependency in the SOUND_MANAGER
+        SANDBOX = 14,
+        SPECTRAL_PACK = 15,
+        DEMO_CTA = 16,
+        STANDARD_PACK = 17,
+        BUFFOON_PACK = 18,
+        NEW_ROUND = 19,
+        --- Opening a booster from the shop (single state for all pack types).
+        OPEN_BOOSTER = 20,
+        --- In-run pause menu overlay.
+        PAUSED = 21,
+        --- Run won (Ante 8 boss beaten).
+        YOU_WIN = 22,
+    }
+
+    self.STAGES = {
+        MAIN_MENU = 1,
+        RUN = 2,
+        SANDBOX = 3
+    }
+    self.STAGE_OBJECTS = {
+        {},{},{}
+    }
+    self.STAGE = self.STAGES.MAIN_MENU
+    self.STATE = self.STATES.SPLASH
+    self.TAROT_INTERRUPT = nil
+    self.STATE_COMPLETE = false
+    self.BASE_REQUIREMENT_BY_ANTE = {
+        [0] = 100,
+        [1] = 300,
+        [2] = 800,
+        [3] = 2000,
+        [4] = 5000,
+        [5] = 11000,
+        [6] = 20000,
+        [7] = 35000,
+        [8] = 50000,
+        -- Green Stake
+        [9] = 100,
+        [10] = 300,
+        [11] = 900,
+        [12] = 2600,
+        [13] = 8000,
+        [14] = 20000,
+        [15] = 36000,
+        [16] = 60000,
+        [17] = 100000,
+        -- Purple Stake
+        [18] = 100,
+        [19] = 300,
+        [20] = 1000,
+        [21] = 3200,
+        [22] = 9000,
+        [23] = 25000,
+        [24] = 60000,
+        [25] = 110000,
+        [26] = 200000
+    }
+    self.BLIND_DEFS = {
+        { id = "small", name = "Small Blind", key = "Small", multiplier = 1.0, reward = 3 },
+        { id = "big", name = "Big Blind", key = "Big", multiplier = 1.5, reward = 4 },
+        { id = "boss", name = "Boss Blind", key = "Boss", multiplier = 2.0, reward = 5 }
+    }
+
+    --||||||||||||||||||||||||||||||
+    --          INSTANCES
+    --||||||||||||||||||||||||||||||
+    self.ARGS = {}
+    self.FUNCS = {}
+    self.I = {
+        NODE = {},
+        MOVEABLE = {},
+        SPRITE = {},
+        UIBOX = {},
+        POPUP = {},
+        CARD = {},
+        CARDAREA = {},
+        ALERT = {}
+    }
+    self.ANIMATION_ATLAS = {}
+    self.ASSET_ATLAS = {}
+    self.JOKER_SPRITES = {}
+    self.MOVEABLES = {}
+    self.ANIMATIONS = {}
+    self.DRAW_HASH = {}
+
+    --||||||||||||||||||||||||||||||
+    --        CONSTANTS
+    --||||||||||||||||||||||||||||||
+    self.MIN_CLICK_DIST = 0.9
+    self.MIN_HOVER_TIME = 0.1
+    self.DEBUG = false
+    self.ANIMATION_FPS = 10
+    self.VIBRATION = 0
+    self.CHALLENGE_WINS = 5
+
+    --||||||||||||||||||||||||||||||
+    --        COLOURS
+    --||||||||||||||||||||||||||||||
+    self.C = {
+        MULT = HEX('FE5F55'),
+        MULT_DARK = HEX('a42615'),
+        CHIPS = HEX("009dff"),
+        CHIPS_DARK = HEX("0f53a6"),
+        MONEY = HEX('f3b958'),
+        XMULT = HEX('FE5F55'),
+        FILTER = HEX('ff9a00'),
+        BLUE = HEX("009dff"),
+        RED = HEX('FE5F55'),
+        GREEN = HEX("4BC292"),
+        PALE_GREEN = HEX("56a887"),
+        ORANGE = HEX("fda200"),
+        IMPORTANT = HEX("ff9a00"),
+        GOLD = HEX('eac058'),
+        YELLOW = {1,1,0,1},
+        CLEAR = {0, 0, 0, 0}, 
+        WHITE = {1,1,1,1},
+        DARK_WHITE = HEX('ababab'),
+        PURPLE = HEX('8867a5'),
+        BLACK = HEX("374244"),--4f6367"),
+        L_BLACK = HEX("4f6367"),
+        GREY = HEX("5f7377"),
+        LIGHT_GREY = HEX("9aa2ab"),
+        CHANCE = HEX("4BC292"),
+        JOKER_GREY = HEX('bfc7d5'),
+        VOUCHER = HEX("cb724c"),
+        BOOSTER = HEX("646eb7"),
+        EDITION = {1,1,1,1},
+        DARK_EDITION = {0,0,0,1},
+        ETERNAL = HEX('c75985'),
+        PERISHABLE = HEX('4f5da1'),
+        RENTAL = HEX('b18f43'),
+        TOOLTIP = HEX('3f4a4d'),
+        PANEL = HEX('394f55'),
+        BLOCK = {
+            BACK = HEX('1b2629'),
+            SHADOW = HEX('0b1415')
+        },
+        
+        DYN_UI = {
+            MAIN = HEX('374244'),
+            DARK = HEX('374244'),
+            BOSS_MAIN = HEX('374244'),
+            BOSS_DARK = HEX('374244'),
+            BOSS_PALE = HEX('374244')
+        },
+        --For other high contrast suit colours
+        SO_1 = {
+            Hearts = HEX('f03464'),
+            Diamonds = HEX('f06b3f'),
+            Spades = HEX("403995"),
+            Clubs = HEX("235955"),
+        },
+        SO_2 = {
+            Hearts = HEX('f83b2f'),
+            Diamonds = HEX('e29000'),
+            Spades = HEX("4f31b9"),
+            Clubs = HEX("008ee6"),
+        },
+        SUITS = {
+            Hearts = HEX('FE5F55'),
+            Diamonds = HEX('FE5F55'),
+            Spades = HEX("374649"),
+            Clubs = HEX("424e54"),
+        },
+        UI = {
+            TEXT_LIGHT = {1,1,1,1},
+            TEXT_DARK = HEX("4F6367"),
+            TEXT_INACTIVE = HEX("88888899"),
+            BACKGROUND_LIGHT = HEX("B8D8D8"),
+            BACKGROUND_WHITE = {1,1,1,1},
+            BACKGROUND_DARK = HEX("7A9E9F"),
+            BACKGROUND_INACTIVE = HEX("666666FF"),
+            OUTLINE_LIGHT = HEX("D8D8D8"),
+            OUTLINE_LIGHT_TRANS = HEX("D8D8D866"),
+            OUTLINE_DARK = HEX("7A9E9F"),
+            TRANSPARENT_LIGHT = HEX("eeeeee22"),
+            TRANSPARENT_DARK = HEX("22222222"),
+            HOVER = HEX('00000055'),
+        },
+        SET = {
+            Default = HEX("cdd9dc"),
+            Enhanced = HEX("cdd9dc"),
+            Joker = HEX('424e54'),
+            Tarot = HEX('424e54'),--HEX('29adff'),
+            Planet = HEX("424e54"),
+            Spectral = HEX('424e54'),
+            Voucher = HEX("424e54"),
+        }, 
+        SECONDARY_SET = {
+            Default = HEX("9bb6bdFF"),
+            Enhanced = HEX("8389DDFF"),
+            Joker = HEX('708b91'),
+            Tarot = HEX('a782d1'),--HEX('29adff'),
+            Planet = HEX('13afce'),
+            Spectral = HEX('4584fa'),
+            Voucher = HEX("fd682b"),
+            Edition = HEX("4ca893"),
+        }, 
+        RARITY = {
+            HEX('009dff'),--HEX("708b91"),
+            HEX("4BC292"),
+            HEX('fe5f55'),
+            HEX("b26cbb")
+        },
+        BLIND = {
+            Small = HEX("50846e"),
+            Big = HEX("225b49"),
+            Boss = HEX("b44430"),
+            won = HEX("4f6367")
+        },
+        BLIND_COLORS = {
+            Small = HEX("0068ad"),
+            Big = HEX("a56c00"),
+            BigSign = HEX("54451a"),
+            Boss = HEX("b44430"),
+            won = HEX("4f6367")
+        },
+        HAND_LEVELS = {
+            HEX("efefef"),
+            HEX("95acff"),
+            HEX("65efaf"),
+            HEX('fae37e'), 
+            HEX('ffc052'), 
+            HEX('f87d75'),
+            HEX('caa0ef')
+        },
+        BACKGROUND = {
+            L = {1,1,0,1},
+            D = HEX("374244"),
+            C = HEX("374244"),
+            contrast = 1
+        }
+    }
+    G.C.HAND_LEVELS[0] = G.C.RED
+    G.C.UI_CHIPS = copy_table(G.C.BLUE)
+    G.C.UI_MULT = copy_table(G.C.RED)
+
+    -- Built through `fonts.lua` so the ladder can be swapped at runtime; see the header there for
+    -- why the size a font is requested at decides whether it renders sharp on hardware. MICRO is
+    -- wrapped Cash Out payouts and the boss-effect line only - too small for anything you have to
+    -- read at length.
+    self.FONTS = {
+        PIXEL = Fonts.build(Fonts.DEFAULT_PROFILE),
+    }
+    --||||||||||||||||||||||||||||||
+    --        ENUMS
+    --||||||||||||||||||||||||||||||
+    self.UIT = {
+        T=1, --text
+        B=2, --box (can be rounded)
+        C=3, --column
+        R=4, --row
+        O=5, --object - must be a Node
+        ROOT=7,
+        S=8, --slider
+        I=9, --input text box
+        padding = 0, --default padding
+    }
+    self.handlist = {
+        "Flush Five",
+        "Flush House",
+        "Five of a Kind",
+        "Straight Flush",
+        "Four of a Kind",
+        "Full House",
+        "Flush",
+        "Straight",
+        "Three of a Kind",
+        "Two Pair",
+        "Pair",
+        "High Card",
+    }
+    -- Hand scoring data aligned to self.handlist indices.
+    -- chips/mult at a given level:
+    -- chips = base_chips + (level - 1) * chips_per_level
+    -- mult  = base_mult  + (level - 1) * mult_per_level
+    -- Per-level values match the reference hand table (reference game.lua:2002-2013).
+    self.hand_stats = {
+        [1]  = { level = 1, base_chips = 160, base_mult = 16, chips_per_level = 50, mult_per_level = 3 }, -- Flush Five
+        [2]  = { level = 1, base_chips = 140, base_mult = 14, chips_per_level = 40, mult_per_level = 4 }, -- Flush House
+        [3]  = { level = 1, base_chips = 120, base_mult = 12, chips_per_level = 35, mult_per_level = 3 }, -- Five of a Kind
+        [4]  = { level = 1, base_chips = 100, base_mult = 8,  chips_per_level = 40, mult_per_level = 4 }, -- Straight Flush
+        [5]  = { level = 1, base_chips = 60,  base_mult = 7,  chips_per_level = 30, mult_per_level = 3 }, -- Four of a Kind
+        [6]  = { level = 1, base_chips = 40,  base_mult = 4,  chips_per_level = 25, mult_per_level = 2 }, -- Full House
+        [7]  = { level = 1, base_chips = 35,  base_mult = 4,  chips_per_level = 15, mult_per_level = 2 }, -- Flush
+        [8]  = { level = 1, base_chips = 30,  base_mult = 4,  chips_per_level = 30, mult_per_level = 3 }, -- Straight
+        [9]  = { level = 1, base_chips = 30,  base_mult = 3,  chips_per_level = 20, mult_per_level = 2 }, -- Three of a Kind
+        [10] = { level = 1, base_chips = 20,  base_mult = 2,  chips_per_level = 20, mult_per_level = 1 }, -- Two Pair
+        [11] = { level = 1, base_chips = 10,  base_mult = 2,  chips_per_level = 15, mult_per_level = 1 }, -- Pair
+        [12] = { level = 1, base_chips = 5,   base_mult = 1,  chips_per_level = 10, mult_per_level = 1 }, -- High Card
+    }
+    -- Empty: the A/B and X/Y swap flags this used to read were console-specific and
+    -- have no 3DS equivalent. Rebinding lives in InputBindings.
+    self.button_mapping = {}
+    self.keybind_mapping = {{
+        a = 'dpleft',
+        d = 'dpright',
+        w = 'dpup',
+        s = 'dpdown',
+        x = 'x',
+        c = 'y',
+        space = 'a',
+        shift = 'b',
+        esc = 'start',
+        q = 'triggerleft',
+        e = 'triggerright',
+    }}
+end
