@@ -12089,6 +12089,19 @@ end
 
 function Game:_random_reference_playing_card_front(key)
     local fronts = reference_playing_card_fronts()
+    -- Mod suits whose pool gate is open add their fronts (one per rank) to the
+    -- draw (`smods.lua`: `SMODS.extra_playing_card_fronts`). With no mod suit
+    -- registered, or every gate shut, the pool is the vanilla 52 and this is
+    -- the same single draw it always was.
+    if SMODS and SMODS.extra_playing_card_fronts then
+        local extra = SMODS.extra_playing_card_fronts(self)
+        if type(extra) == "table" and #extra > 0 then
+            local merged = {}
+            for _, f in ipairs(fronts) do merged[#merged + 1] = f end
+            for _, f in ipairs(extra) do merged[#merged + 1] = f end
+            fronts = merged
+        end
+    end
     return fronts[self:random(key, 1, #fronts)]
 end
 

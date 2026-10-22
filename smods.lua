@@ -827,13 +827,22 @@ function SMODS.shop_rarity_target(game, ante, append, vanilla_target)
     return vanilla_target
 end
 
---- `SMODS.Suit { key, loc_txt, ui_colour, card_key }`: a suit of this mod's own.
---- `key` is the suit itself: the string a card carries in `card_data.suit` (one
---- capitalised word, `"Stars"`), so `Card:is_suit("Stars")`, flush counting and
---- every suit check in the game see it with no further work -- suit checks in this
---- port compare names, and flush detection counts cards per suit name. Cards of
---- the suit are made with `SMODS.add_card { set = "Playing", suit = "Stars" }` or
---- by a consumable's `suit_conv`; the standard deck stays the four vanilla suits.
+--- `SMODS.Suit { key, loc_txt, ui_colour, card_key, in_pool }`: a suit of this
+--- mod's own. `key` is the suit itself: the string a card carries in
+--- `card_data.suit` (one capitalised word, `"Stars"`), so
+--- `Card:is_suit("Stars")`, flush counting and every suit check in the game see
+--- it with no further work -- suit checks in this port compare names, and flush
+--- detection counts cards per suit name. Cards of the suit are made with
+--- `SMODS.add_card { set = "Playing", suit = "Stars" }` or by a consumable's
+--- `suit_conv`; the standard deck stays the four vanilla suits.
+---
+--- The optional `in_pool(self, game)` gates the suit's one other way into play:
+--- random playing-card fronts. While the gate passes, one front per rank in
+--- the suit joins the pool `Game:_random_reference_playing_card_front` draws
+--- from (Standard packs and shop playing cards), so gated suits stay out of
+--- random creation until the mod opens the gate -- Bunco's exotic suits open
+--- theirs the first time a Spectrum-family hand is scored. A suit with no
+--- `in_pool` is always in the pool. The standard deck is never touched.
 ---
 --- There is no art sheet for a mod suit: its cards draw on the Hearts row of the
 --- deck sheets (the game's own fallback for a suit it has no row for), in the
@@ -845,6 +854,8 @@ function SMODS.Suit(t)
     check(type(t) == "table", "SMODS.Suit expects a table")
     check(type(t.key) == "string" and t.key:match("^[%w]+$"),
         "SMODS.Suit needs a 'key' of letters, digits and underscores (the suit's name)")
+    check(t.in_pool == nil or type(t.in_pool) == "function",
+        "Suit '" .. t.key .. "': in_pool must be a function")
     local name = t.key:sub(1, 1):upper() .. t.key:sub(2)
     check(CardArt.suit_key(name) == nil, "Suit '" .. t.key .. "' is one of the four vanilla suits")
     check(SMODS.Suits[name] == nil, "Suit '" .. t.key .. "' is defined twice")
@@ -854,6 +865,7 @@ function SMODS.Suit(t)
         name = tostring(loc.name or t.name or name),
         colour = parse_colour(t.ui_colour or t.colour, "Suit", t.key, "ui_colour"),
         card_key = t.card_key,
+        in_pool = t.in_pool,
     }
     SMODS.Suits[name] = entry
     mod.registered.suits = mod.registered.suits or {}
@@ -863,6 +875,29 @@ function SMODS.Suit(t)
     t.original_key = t.key
     t.key = entry.id
     return t
+end
+
+--- The extra fronts `Game:_random_reference_playing_card_front` deals from:
+--- one per rank (2..Ace) for every registered suit whose `in_pool` gate passes
+--- (a suit with no gate is always in). Sorted by suit name, so the pool's shape
+--- depends only on which gates are open, never on registration or table order.
+--- Empty when no suit is registered or every gate is shut -- the caller then
+--- draws from exactly the vanilla 52, spending the same single random draw.
+function SMODS.extra_playing_card_fronts(game)
+    local names = {}
+    for name, entry in pairs(SMODS.Suits) do
+        if type(entry.in_pool) ~= "function" then
+            names[#names + 1] = name
+        elseif SMODS.call(entry.mod, entry.in_pool, entry, game) then
+            names[#names + 1] = name
+        end
+    end
+    table.sort(names)
+    local fronts = {}
+    for _, name in ipairs(names) do
+        for rank = 2, 14 do fronts[#fronts + 1] = { rank = rank, suit = name } end
+    end
+    return fronts
 end
 
 --- The canonical name of a suit a mod names (a vanilla suit or a registered one),

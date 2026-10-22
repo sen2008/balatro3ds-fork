@@ -1554,4 +1554,77 @@ suite.test("with no mods registered, hands and suits stay vanilla", function()
     T.assert_eq(#SMODS.PokerHands, 0)
 end)
 
+--------------------------------------------------------------------------------
+-- Suit pool gates: random playing-card fronts (the exotic-suits hook)
+--------------------------------------------------------------------------------
+
+local SUITGATE = [[
+SMODS.Suit {
+    key = "Stars",
+    loc_txt = { name = "Stars" },
+    ui_colour = "#FFAA00",
+    in_pool = function(self, game) return _G.T2_SUIT_OPEN == true end,
+}
+SMODS.Suit {
+    key = "Moons",
+    loc_txt = { name = "Moons" },
+    ui_colour = "#AAAAFF",
+}
+]]
+
+suite.test("suit in_pool gates the random playing-card fronts", function()
+    wipe_mods()
+    write_mod("SuitGate", { id = "SuitGate", prefix = "sg", main_file = "main.lua", version = "1" }, SUITGATE)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.SuitGate.status, "loaded", tostring(ModLoader.by_id.SuitGate.error))
+    local game = bootstrap.new_game(5150)
+    G = game
+
+    -- Gate shut: only the ungated suit (Moons) deals fronts, 13 of them.
+    _G.T2_SUIT_OPEN = false
+    local fronts = SMODS.extra_playing_card_fronts(game)
+    T.assert_eq(#fronts, 13, "one ungated suit contributes 13 fronts")
+    for _, f in ipairs(fronts) do T.assert_eq(f.suit, "Moons") end
+
+    -- Gate open: both suits, sorted by name ahead of registration order.
+    _G.T2_SUIT_OPEN = true
+    fronts = SMODS.extra_playing_card_fronts(game)
+    T.assert_eq(#fronts, 26, "two open suits contribute 26 fronts")
+    T.assert_eq(fronts[1].suit, "Moons")
+    T.assert_eq(fronts[14].suit, "Stars")
+    T.assert_eq(fronts[14].rank, 2)
+    T.assert_eq(fronts[26].rank, 14)
+
+    -- The roll itself reaches the gated suit while the gate is open...
+    local saw = {}
+    for _ = 1, 400 do
+        local f = game:_random_reference_playing_card_front("fronttest")
+        saw[f.suit] = true
+    end
+    T.assert_true(saw["Stars"] and saw["Moons"] and saw["Hearts"],
+        "random fronts include gated, ungated and vanilla suits")
+
+    -- ...and never deals it once the gate shuts.
+    _G.T2_SUIT_OPEN = false
+    saw = {}
+    for _ = 1, 400 do
+        local f = game:_random_reference_playing_card_front("fronttest")
+        saw[f.suit] = true
+    end
+    T.assert_true(saw["Stars"] == nil and saw["Moons"] and saw["Hearts"],
+        "a shut gate keeps its suit out of random fronts")
+    _G.T2_SUIT_OPEN = nil
+    wipe_mods()
+
+    -- No suits registered at all: no extras, and the roll is vanilla's 52.
+    local plain = bootstrap.new_game(5151)
+    G = plain
+    T.assert_eq(#SMODS.extra_playing_card_fronts(plain), 0)
+    for _ = 1, 200 do
+        local f = plain:_random_reference_playing_card_front("fronttest")
+        T.assert_true(f.suit == "Hearts" or f.suit == "Diamonds"
+            or f.suit == "Clubs" or f.suit == "Spades", "vanilla fronts only")
+    end
+end)
+
 return suite

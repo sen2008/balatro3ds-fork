@@ -348,8 +348,12 @@ local card = SMODS.add_card { set = "Playing", rank = 7, suit = "Stars" }
 Suit checks in this port compare names, and flush detection counts cards per suit
 name, so a custom suit needs no further wiring: `card:is_suit("Stars")` works, five
 Stars flush, and a consumable's `suit_conv` can convert cards into it. Cards enter
-play through creation and conversion only; the standard deck stays the four vanilla
-suits. Two honest limits: there is no art sheet for a mod suit, so its cards draw on
+play through creation and conversion; the standard deck stays the four vanilla
+suits. Random creation (Standard packs, shop playing cards) is the one gated
+route: while a suit's optional `in_pool(self, game)` passes, one front per rank
+in that suit joins the random-front pool, and a suit with no `in_pool` is always
+in. That is how Bunco's exotic suits stay out of packs and the shop until the
+first Spectrum-family hand is scored, then start turning up. Two honest limits: there is no art sheet for a mod suit, so its cards draw on
 the Hearts row of the deck sheets (the game's own fallback for a suit it has no row
 for), and `SMODS.DeckSkin` covers the vanilla suits only. `ui_colour` is worn
 wherever a suit is named in colour in the UI. `card_key` is accepted for
