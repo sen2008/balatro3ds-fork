@@ -347,6 +347,39 @@ function SMODS.apply_return(joker, ctx, ret, kind)
     if type(ret.extra) == "table" then SMODS.apply_return(joker, ctx, ret.extra, kind) end
 end
 
+--- Retrigger fields in a `calculate` return: `repetitions = n` repeats this Joker, and
+--- `retrigger_joker = <a held Joker>` (or `true`, meaning this Joker) repeats that one.
+--- Steamodded honours both from any effect context; `apply_return` used to drop them. The
+--- extra passes run through the game's own retrigger path (`Game:_apply_joker_retrigger`),
+--- so they are announced with "Again!" and hear `post_trigger` like the passes
+--- `retrigger_joker_check` grants -- except they run on the spot, inside this Joker's own
+--- beat, rather than being queued for a beat of their own. Two bounds keep a bad return
+--- from hanging the run: a pass already running as a retrigger never retriggers (the same
+--- rule the game applies to `retrigger_joker_check`), and one return buys at most
+--- MAX_RETURN_RETRIGGERS extra passes.
+local MAX_RETURN_RETRIGGERS = 100
+local function retrigger_return_passes(joker, ctx, ret)
+    if type(ret) ~= "table" or ctx.retrigger_joker then return end
+    local target = ret.retrigger_joker
+    if target == true then target = joker end
+    local reps = math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+    if target ~= nil and reps == 0 then reps = 1 end
+    if reps == 0 then return end
+    if type(target) ~= "table" then
+        target = joker
+    elseif target ~= joker then
+        local held = false
+        for _, j in ipairs(G and type(G.jokers) == "table" and G.jokers or EMPTY) do
+            if j == target then held = true break end
+        end
+        if not held then return end
+    end
+    if not (G and G._apply_joker_retrigger) then return end
+    for _ = 1, math.min(reps, MAX_RETURN_RETRIGGERS) do
+        G:_apply_joker_retrigger(target, joker, ctx)
+    end
+end
+
 --- The `JokerEffects` implementation for one mod Joker.
 local function build_effect(center, def)
     local mod = center.mod
@@ -366,6 +399,7 @@ local function build_effect(center, def)
             local ret = SMODS.call(mod, center.calculate, center, joker,
                 SMODS.build_context(event_name, ctx, joker))
             SMODS.apply_return(joker, ctx, ret, kind)
+            retrigger_return_passes(joker, ctx, ret)
         end
         -- Steamodded pays this at cash-out; the port's cash-out is the round-end payout table.
         if kind == "end_of_round" and not ctx.blueprint and type(center.calc_dollar_bonus) == "function" then
@@ -1073,6 +1107,159 @@ end
 function SMODS.on_joker_removed(joker)
     local center = joker and joker.def and joker.def.smods
     if center and center.remove_from_deck then SMODS.call(center.mod, center.remove_from_deck, center, joker, false) end
+end
+
+--------------------------------------------------------------------------------
+-- Creating and destroying cards
+--------------------------------------------------------------------------------
+
+--- Steamodded mods create cards mid-run (`SMODS.add_card`, its alias `SMODS.create_card`)
+--- and destroy them. The port already creates and destroys for its own effects -- shop
+--- purchases, Ankh's clone, Incantation's generated cards -- so these route to those same
+--- functions and a created card is a card like any other: it is discovered, saved, scored
+--- and its art freed the same way. Capacity is the game's own, checked the same way the
+--- game checks it: no room means the call returns nil and nothing is created.
+
+--- Rank names a mod may pass for a playing card, onto the game's rank numbers
+--- (`Card:get_id`: Jack 11, Queen 12, King 13, Ace 14). Numbers and numeric strings
+--- ("7", "10") are taken as those numbers directly.
+local RANK_BY_NAME = { Ace = 14, King = 13, Queen = 12, Jack = 11, A = 14, K = 13, Q = 12, J = 11, T = 10 }
+local PLAYING_SUITS = { Hearts = true, Clubs = true, Diamonds = true, Spades = true }
+local PLAYING_ENHANCEMENTS = { bonus = true, mult = true, wild = true, glass = true,
+    steel = true, stone = true, gold = true, lucky = true }
+local PLAYING_SEALS = { gold = true, red = true, blue = true, purple = true }
+
+--- The `card_data` for one playing card `SMODS.add_card` was asked for, built the way the
+--- game builds its own (`{ rank, suit, enhancement, seal }`), or nil when the ask is one
+--- the game has no card for. Also accepts the rank/suit on a `card` sub-table, as
+--- Steamodded's `create_card` takes them.
+local function playing_card_data(t)
+    local src = type(t.card) == "table" and t.card or t
+    local rank = src.rank
+    if type(rank) == "string" then rank = RANK_BY_NAME[rank] or tonumber(rank) end
+    rank = tonumber(rank)
+    if not rank or rank % 1 ~= 0 or rank < 2 or rank > 14 then return nil end
+    local suit = src.suit
+    if type(suit) ~= "string" then return nil end
+    suit = suit:sub(1, 1):upper() .. suit:sub(2):lower()
+    if not PLAYING_SUITS[suit] then return nil end
+    local data = { rank = rank, suit = suit, enhancement = nil, seal = nil }
+    local enhancement = src.enhancement or t.enhancement
+    if enhancement ~= nil then
+        enhancement = ENHANCEMENT[enhancement] or enhancement
+        if not PLAYING_ENHANCEMENTS[enhancement] then return nil end
+        data.enhancement = enhancement
+    end
+    local seal = src.seal or t.seal
+    if seal ~= nil then
+        seal = tostring(seal):lower()
+        if not PLAYING_SEALS[seal] then return nil end
+        data.seal = seal
+    end
+    local edition = src.edition or t.edition
+    if edition ~= nil then data.modifier = { edition = edition } end
+    return data
+end
+
+local function edition_param(t)
+    local edition = t.edition
+    if type(edition) == "table" then edition = edition.key or edition.name end
+    return edition
+end
+
+--- Create a card and give it to the player. One call, by `t.set`:
+---   * `"Joker"`: `t.key` is a Joker def id (`"j_joker"`, `"j_<prefix>_<key>"`). Returns
+---     the new Joker, or nil when the Joker slots are full or the id is unknown. A mod
+---     Joker created this way hears its `add_to_deck`, like a bought one.
+---   * `"Tarot"` / `"Planet"` / `"Spectral"` / `"Consumable"`: `t.key` is a consumable
+---     def id. Returns the new consumable, or nil when the consumable slots are full
+---     (checked with `Game:can_add_consumable`, the shop's own check) or the id is unknown.
+---   * `"Playing"`: `t.rank` / `t.suit` name the card (see `playing_card_data`), with
+---     optional `enhancement` (a port name or a Steamodded `m_` key), `seal` and
+---     `edition`. It joins the hand (nil when the hand is full, unless
+---     `t.bypass_limit`), or the deck when `t.area` is `"deck"` (or `G.deck`). A hand
+---     card returns its node, refreshed as contexts hand cards over; a deck card returns
+---     the `card_data` now in the deck.
+--- `t.edition` also applies to Jokers and consumables (`"foil"`, `"negative"`, ...).
+function SMODS.add_card(t)
+    if type(t) ~= "table" or not G then return nil end
+    local set = tostring(t.set or "")
+    if set == "Joker" then
+        if type(t.key) ~= "string" or not (JOKER_DEFS and JOKER_DEFS[t.key]) then return nil end
+        local params = {}
+        local edition = edition_param(t)
+        if edition ~= nil then params.edition = edition end
+        if type(t.create_params) == "table" then
+            for k, v in pairs(t.create_params) do params[k] = v end
+        end
+        if not G:add_joker_by_def(t.key, params) then return nil end
+        return G.jokers[#G.jokers]
+    end
+    if set == "Tarot" or set == "Planet" or set == "Spectral" or set == "Consumable" then
+        if type(t.key) ~= "string" or not (CONSUMABLE_DEFS and CONSUMABLE_DEFS[t.key]) then return nil end
+        local params = {}
+        local edition = edition_param(t)
+        if edition ~= nil then params.edition = edition end
+        if not G:can_add_consumable(params) then return nil end
+        if not G:add_consumable(t.key, params) then return nil end
+        return G.consumables[#G.consumables]
+    end
+    if set == "Playing" then
+        local data = playing_card_data(t)
+        if not data then return nil end
+        if t.area == "deck" or (G.deck and t.area == G.deck) then
+            if not G._deck_inject_playing_card or not G:_deck_inject_playing_card(data) then return nil end
+            return G.deck.cards[#G.deck.cards]
+        end
+        local hand = G.hand
+        if not hand or not hand.add_card then return nil end
+        local node = hand:add_card(data, t.bypass_limit == true)
+        if not node then return nil end
+        if G.notify_cards_added_to_deck then G:notify_cards_added_to_deck(1) end
+        return refresh_card_view(node)
+    end
+    return nil
+end
+SMODS.create_card = SMODS.add_card
+
+--- Destroy a held Joker: gone for good, through the game's own removal, so a mod Joker's
+--- `remove_from_deck` runs and its art frees exactly as when the game removes one.
+--- Unlike selling or the game's own removal, this forces past the eternal sticker --
+--- a mod destroying a Joker means it. Returns true when the Joker was held and removed.
+function SMODS.destroy_joker(joker)
+    if not (G and type(G.jokers) == "table" and G.remove_owned_joker_at) then return false end
+    for i, j in ipairs(G.jokers) do
+        if j == joker then return G:remove_owned_joker_at(i, true) ~= nil end
+    end
+    return false
+end
+
+--- Destroy a playing card: it leaves the game entirely, never reaching the discard pile,
+--- the way Immolate's victims do. `card` may be a hand card's node (what contexts hand
+--- over), its `card_data`, or a `card_data` sitting in the deck or the discard pile.
+--- Returns true when a card was destroyed.
+function SMODS.destroy_card(card)
+    if type(card) ~= "table" or not G then return false end
+    local data = card.card_data or card
+    local hand = G.hand
+    if hand and hand.destroy_card_node then
+        if card.card_data and hand:destroy_card_node(card) then return true end
+        for _, node in ipairs(type(hand.card_nodes) == "table" and hand.card_nodes or EMPTY) do
+            if node.card_data == data then return hand:destroy_card_node(node) end
+        end
+    end
+    local deck = G.deck
+    for _, list in ipairs({ deck and deck.cards, deck and deck.discard_pile }) do
+        if type(list) == "table" then
+            for i, c in ipairs(list) do
+                if c == data or (data.uid ~= nil and c.uid == data.uid) then
+                    table.remove(list, i)
+                    return true
+                end
+            end
+        end
+    end
+    return false
 end
 
 --------------------------------------------------------------------------------

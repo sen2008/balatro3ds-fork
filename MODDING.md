@@ -158,6 +158,8 @@ Playing cards support `:get_id()` (2 to 14, where Jack is 11 and Ace is 14), `:i
 
 `chips`, `mult`, `xmult` (also `x_mult` and `Xmult`), `dollars` and `message`, plus `extra` to chain another table. They score exactly like a vanilla Joker's, with the same popups, sounds and timing. A return with only a `message` (such as `"Upgrade!"`) shows it and counts as the Joker triggering.
 
+A return may also ask for retriggers, as in Steamodded: `repetitions = n` runs this Joker's effect `n` more times, and `retrigger_joker = <a held Joker>` (or `true`, for this Joker) runs that Joker's effect again -- once, or `repetitions` times when both are given. The extra passes see `context.retrigger_joker`, are announced with "Again!", and run on the spot inside this Joker's own beat rather than being queued for a beat of their own. A pass that is itself a retrigger never retriggers, and one return buys at most 100 extra passes, so a Joker that always asks cannot loop forever.
+
 ### Helpers
 
 All of these use the run's seed:
@@ -167,6 +169,24 @@ All of these use the run's seed:
 - `pseudorandom_element(list, seed)`
 
 Oops! All 6s and every `mod_probability` / `fix_probability` Joker are counted, unless `no_mod` is true. `localize("k_upgrade_ex")` and a few other common message keys work, and so does `ease_dollars(n)`.
+
+### Creating and destroying cards
+
+```lua
+local j = SMODS.add_card { set = "Joker", key = "j_joker" }              -- the new Joker, or nil
+local c = SMODS.add_card { set = "Tarot", key = "tarot_fool" }           -- the new consumable, or nil
+local n = SMODS.add_card { set = "Playing", rank = "Ace", suit = "Spades" }  -- a node in the hand
+SMODS.destroy_joker(j)   -- true when it was held and is gone
+SMODS.destroy_card(n)    -- true when the card is gone
+```
+
+`SMODS.create_card` is the same call as `SMODS.add_card`. Created cards go through the game's own creation paths -- the same ones shop purchases and Spectral cards use -- so they are discovered, saved, scored and have their art freed like any other card. Capacity is the game's: when there is no room the call returns `nil` and creates nothing.
+
+- **`set = "Joker"`:** `key` is a full Joker def id, vanilla (`"j_joker"`) or a mod's (`"j_<prefix>_<key>"`). `edition = "foil"` (or `"holo"`, `"polychrome"`, `"negative"`) makes that edition. A created mod Joker hears its `add_to_deck`, and every Joker hears `context.card_added`. Returns the Joker.
+- **`set = "Tarot"`, `"Planet"`, `"Spectral"` or `"Consumable"`:** `key` is a full consumable def id; the set only has to name the consumable family, the def decides. Returns the consumable.
+- **`set = "Playing"`:** `rank` is a number (2-14, Ace is 14), a numeric string, or `"Ace"`, `"King"`, `"Queen"`, `"Jack"`; `suit` is `"Hearts"`, `"Clubs"`, `"Diamonds"` or `"Spades"`. `enhancement` takes a port name (`"gold"`) or a Steamodded key (`"m_gold"`); `seal` is `"gold"`, `"red"`, `"blue"` or `"purple"`; `edition` sets the card's edition. The card joins the hand -- `nil` when the hand is full, unless `bypass_limit = true` -- and the return is its node, the same object contexts hand over. With `area = "deck"` it joins the deck instead and the return is the `card_data` now in the deck.
+
+`SMODS.destroy_joker(joker)` removes a held Joker for good: a mod Joker's `remove_from_deck` runs and its art frees, exactly as when the game itself removes one. It forces past the eternal sticker -- destroying means it, where selling an eternal Joker is refused. `SMODS.destroy_card(card)` destroys a playing card: it leaves the game entirely and never reaches the discard pile. `card` may be a hand card's node, its `card_data`, or a `card_data` in the deck or discard pile. Both return whether anything was actually removed. Steamodded's batch `SMODS.destroy_cards` is not here; destroy one card at a time.
 
 ## Negative art
 
@@ -318,7 +338,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 ## What doesn't work (yet)
 
 - **No other content yet.** Decks, editions, seals, enhancements, blinds, booster packs and poker hands can't be added. Vouchers have no `calculate`, and deck skins cover only the face cards.
-- **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards`, `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
+- **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.
 - **Contexts not raised yet:** `blind_disabled`, `debuff_card`, `debuff_hand`, `destroy_card` (`destroying_card`), `modify_scoring_hand`, `evaluate_poker_hand`, `check_enhancement`, `money_altered`, `initial_scoring_step`, `playing_card_end_of_round`, `change_rank` and `change_suit`. These need deeper changes to the port's scoring and deck code.

@@ -1154,4 +1154,158 @@ suite.test("final_scoring_step changes the score before it lands", function()
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Creating and destroying cards (Tier 1)
+--------------------------------------------------------------------------------
+
+local TIER1 = [[
+SEEN = {}
+_MOD.seen = SEEN
+SMODS.Joker {
+    key = "maker", rarity = 1, sprite = "a.png",
+    loc_txt = { name = "Maker", text = { "x" } },
+    remove_from_deck = function(self, card) SEEN.removed = (SEEN.removed or 0) + 1 end,
+    calculate = function(self, card, context)
+        if context.setting_blind then
+            SMODS.add_card { set = "Joker", key = "j_joker" }
+            return { message = "Made!" }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "looper", rarity = 1, sprite = "a.png",
+    loc_txt = { name = "Looper", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.joker_main then
+            if context.retrigger_joker then SEEN.passes = (SEEN.passes or 0) + 1 end
+            return { mult = 3, repetitions = 1 }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "booster", rarity = 1, sprite = "a.png",
+    loc_txt = { name = "Booster", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.joker_main then
+            for _, j in ipairs(G.jokers) do
+                if j.def and j.def.id == "j_t1_looper" and j ~= card then
+                    return { retrigger_joker = j, repetitions = 1 }
+                end
+            end
+        end
+    end,
+}
+]]
+
+local function install_tier1()
+    wipe_mods()
+    write_mod("Tier1", { id = "Tier1", prefix = "t1", main_file = "main.lua", version = "1" }, TIER1)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Tier1.status, "loaded", tostring(ModLoader.by_id.Tier1.error))
+    local game = bootstrap.new_game(4430)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.jokers = {}
+    return game
+end
+
+local function t1_seen()
+    return ModLoader.by_id.Tier1.seen
+end
+
+suite.test("SMODS.add_card creates Jokers and consumables, respecting capacity", function()
+    local game = install_tier1()
+    local j = SMODS.add_card { set = "Joker", key = "j_t1_maker" }
+    T.assert_true(j ~= nil, "the created Joker is returned")
+    T.assert_eq(j.def.id, "j_t1_maker")
+    T.assert_eq(#game.jokers, 1)
+    local v = SMODS.create_card { set = "Joker", key = "j_joker" }
+    T.assert_eq(v.def.id, "j_joker", "create_card is the same call")
+    T.assert_eq(#game.jokers, 2)
+    T.assert_eq(SMODS.add_card { set = "Joker", key = "j_nope" }, nil, "unknown id: nothing created")
+    T.assert_eq(#game.jokers, 2)
+
+    game.consumables, game.consumable_nodes = {}, {}
+    local c = SMODS.add_card { set = "Tarot", key = "tarot_fool" }
+    T.assert_true(c ~= nil)
+    T.assert_eq(game.consumables[1].id, "tarot_fool")
+    local cap = game:get_effective_consumable_capacity()
+    local guard = 0
+    while SMODS.add_card { set = "Consumable", key = "tarot_magician" } and guard < 20 do guard = guard + 1 end
+    T.assert_eq(#game.consumables, cap, "fills to the consumable slots and no further")
+    T.assert_eq(SMODS.add_card { set = "Tarot", key = "tarot_fool" }, nil, "full: refused")
+
+    local jcap = game:joker_base_capacity()
+    guard = 0
+    while SMODS.add_card { set = "Joker", key = "j_joker" } and guard < 20 do guard = guard + 1 end
+    T.assert_eq(#game.jokers, jcap, "fills to the Joker slots and no further")
+    wipe_mods()
+end)
+
+suite.test("a mod can create a Joker from inside calculate", function()
+    local game = install_tier1()
+    T.assert_true(game:add_joker_by_def("j_t1_maker"))
+    game.jokers[1]:apply_effect({ event = "on_blind_selected", event_name = "on_blind_selected" })
+    T.assert_eq(#game.jokers, 2)
+    T.assert_eq(game.jokers[2].def.id, "j_joker")
+    wipe_mods()
+end)
+
+suite.test("SMODS.destroy_joker removes a held Joker and runs remove_from_deck", function()
+    local game = install_tier1()
+    local j = SMODS.add_card { set = "Joker", key = "j_t1_maker" }
+    T.assert_true(SMODS.destroy_joker(j))
+    T.assert_eq(#game.jokers, 0)
+    T.assert_eq(t1_seen().removed, 1, "remove_from_deck ran: SMODS.on_joker_removed fired")
+    T.assert_false(SMODS.destroy_joker(j), "already gone")
+    wipe_mods()
+end)
+
+suite.test("SMODS.add_card creates playing cards in hand and deck; destroy_card removes them", function()
+    local game = install_tier1()
+    game.hand = Hand(game)   -- a headless game has no hand or deck until a run starts them
+    game.deck = Deck(game)
+    local node = SMODS.add_card { set = "Playing", rank = "Ace", suit = "Spades" }
+    T.assert_true(node ~= nil, "the new hand card's node is returned")
+    T.assert_eq(node.card_data.rank, 14)
+    T.assert_eq(node.base.id, 14, "the view contexts see is refreshed")
+    T.assert_eq(#game.hand.cards, 1)
+    T.assert_eq(#game.hand.card_nodes, 1)
+
+    local in_deck = #game.deck.cards
+    local cd = SMODS.add_card { set = "Playing", rank = 7, suit = "Hearts", area = "deck", enhancement = "m_gold" }
+    T.assert_true(cd ~= nil)
+    T.assert_eq(cd.rank, 7)
+    T.assert_eq(cd.enhancement, "gold", "Steamodded enhancement keys translate")
+    T.assert_eq(#game.deck.cards, in_deck + 1)
+
+    T.assert_true(SMODS.destroy_card(node))
+    T.assert_eq(#game.hand.cards, 0, "destroyed from the hand")
+    T.assert_eq(#game.hand.card_nodes, 0)
+    T.assert_eq(#game.deck.discard_pile, 0, "and it never reached the discard pile")
+    T.assert_true(SMODS.destroy_card(cd))
+    T.assert_eq(#game.deck.cards, in_deck)
+    T.assert_false(SMODS.destroy_card(cd), "already gone")
+    T.assert_eq(SMODS.add_card { set = "Playing", rank = "Joker", suit = "Spades" }, nil, "no such rank")
+    wipe_mods()
+end)
+
+suite.test("retrigger fields in a calculate return run the effect again", function()
+    local game = install_tier1()
+    T.assert_true(game:add_joker_by_def("j_t1_looper"))
+    local ctx = { event = "on_hand_scored", event_name = "on_hand_scored", chips = 10, mult = 2 }
+    game:emit_joker_event("on_hand_scored", ctx)
+    T.assert_eq(ctx.mult, 8, "+3 Mult, then +3 again from its own repetitions return")
+    T.assert_eq(t1_seen().passes, 1, "the pass sees context.retrigger_joker and does not loop")
+
+    T.assert_true(game:add_joker_by_def("j_t1_booster"))
+    t1_seen().passes = 0
+    ctx = { event = "on_hand_scored", event_name = "on_hand_scored", chips = 10, mult = 2 }
+    game:emit_joker_event("on_hand_scored", ctx)
+    T.assert_eq(ctx.mult, 11, "booster's retrigger_joker return runs the looper once more")
+    T.assert_eq(t1_seen().passes, 2, "one self pass and one booster pass")
+    wipe_mods()
+end)
+
 return suite
