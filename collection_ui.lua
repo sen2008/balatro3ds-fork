@@ -658,7 +658,11 @@ function CollectionUI.draw_category_menu(game)
     local cons_y = y
     local cons_w = col_w
     local cons_inner_w = cons_w - cons_pad * 2
-    local cons_h = cons_header_h + cons_pad + small_h * 3 + btn_gap * 2 + cons_pad
+    -- One extra row per registered custom consumable kind (`SMODS.ConsumableType`);
+    -- with none, the box is exactly its vanilla size.
+    local custom_cats = CollectionCatalog.custom_consumable_categories()
+    local cons_rows = 3 + #custom_cats
+    local cons_h = cons_header_h + cons_pad + small_h * cons_rows + btn_gap * (cons_rows - 1) + cons_pad
 
     if _G.draw_rect_with_shadow then
         draw_rect_with_shadow(cons_x, cons_y, cons_w, cons_h, 4, 4, C.BLOCK.BACK, C.BLOCK.SHADOW, 2)
@@ -674,7 +678,10 @@ function CollectionUI.draw_category_menu(game)
     local cy = cons_y + cons_header_h + cons_pad
     cy = add_btn("tarots", cons_x + cons_pad, cy, cons_inner_w, small_h, "Tarot Cards", "PURPLE")
     cy = add_btn("planets", cons_x + cons_pad, cy, cons_inner_w, small_h, "Planet Cards", "PLANET")
-    add_btn("spectrals", cons_x + cons_pad, cy, cons_inner_w, small_h, "Spectral Cards", "SPECTRAL")
+    cy = add_btn("spectrals", cons_x + cons_pad, cy, cons_inner_w, small_h, "Spectral Cards", "SPECTRAL")
+    for _, cat in ipairs(custom_cats) do
+        cy = add_btn(cat.id, cons_x + cons_pad, cy, cons_inner_w, small_h, cat.label, cat.color_key)
+    end
 
     -- Right column
     y = 2

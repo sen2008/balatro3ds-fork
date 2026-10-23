@@ -1833,6 +1833,295 @@ suite.test("with no custom types, consumable kinds and a tarot use stay vanilla"
 end)
 
 --------------------------------------------------------------------------------
+-- Custom consumable types in booster packs + collection (Tier 3c)
+--------------------------------------------------------------------------------
+
+local PTYPES = [[
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    shop_rate = 0,
+    packs = { arcana = 96, celestial = 96, spectral = 96 },
+}
+SMODS.Consumable {
+    set = "Minor", key = "coin",
+    loc_txt = { name = "Coin", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 5 } },
+    cost = 3, sprite = "coin.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Consumable {
+    set = "Minor", key = "sigil",
+    loc_txt = { name = "Sigil", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 2 } },
+    sprite = "sigil.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+]]
+
+local function install_pk()
+    wipe_mods()
+    write_mod("PackTypes", { id = "PackTypes", prefix = "pk", main_file = "main.lua", version = "1" }, PTYPES)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.PackTypes.status, "loaded", tostring(ModLoader.by_id.PackTypes.error))
+    local game = bootstrap.new_game(4465)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 10
+    return game
+end
+
+suite.test("custom consumable types: packs opt-in deals the kind, and a dealt card picks and uses", function()
+    local game = install_pk()
+    local entry = SMODS.ConsumableTypes["pk_Minor"]
+    T.assert_eq(entry.packs.arcana, 96, "the type records its pack rates")
+    local subs = SMODS.pack_substitutions("arcana")
+    T.assert_true(subs ~= nil and #subs == 1 and subs[1].kind == "Minor" and subs[1].rate == 96,
+        "the pack substitution list carries the kind and its rate")
+    T.assert_eq(SMODS.pack_substitutions("buffoon"), nil, "no kind opts into Buffoon packs")
+
+    -- Every opted-in pack kind deals both Minor cards (rate 96 against the pack
+    -- kind's 4, and the two-card pool is then culled for the rest of the pack).
+    game.consumables, game.jokers = {}, {}
+    for _, pack in ipairs({ "arcana", "celestial", "spectral" }) do
+        for round = 1, 10 do
+            game.ante = round
+            local seen = {}
+            local choices = game:_booster_build_choices({ pack = pack, card_count = 5, picks_granted = 2 })
+            T.assert_eq(#choices, 5, pack .. " still deals a full pack")
+            for _, ch in ipairs(choices) do
+                if ch.consumable_def then seen[ch.consumable_def.id] = true end
+            end
+            T.assert_true(seen["c_pk_coin"] and seen["c_pk_sigil"],
+                pack .. " pack deals both Minor cards (round " .. round .. ")")
+        end
+    end
+
+    -- Open a real Arcana pack and use a dealt Minor card straight out of it: its
+    -- `use` reads `card.ability`, which the pack's def copy now carries.
+    game.STATE = game.STATES.SHOP
+    game.money = 10
+    game:begin_booster_session({ kind = "booster", pack = "arcana", size = "mega",
+        card_count = 5, picks_granted = 2, booster_sprite_index = 0 })
+    local sess = game.booster_session
+    T.assert_true(sess ~= nil, "the pack session opens")
+    local idx, want
+    for i, ch in ipairs(sess.choices) do
+        if ch.consumable_def and ch.consumable_def.id == "c_pk_coin" then idx, want = i, 5 end
+        if ch.consumable_def and ch.consumable_def.id == "c_pk_sigil" and not idx then idx, want = i, 2 end
+    end
+    T.assert_true(idx ~= nil, "a Minor card is among the choices")
+    T.assert_true(game.booster_session.choices[idx].consumable_def.ability ~= nil,
+        "the dealt def copy carries its ability")
+    T.assert_true(game:_booster_choice_is_custom_consumable(sess.choices[idx]))
+    T.assert_true(game:pick_booster_choice(idx), "the custom-kind choice picks")
+    T.assert_eq(game.money, 10 + want, "and its use fires from the pack")
+    T.assert_true(sess.choices[idx].taken)
+    game:end_booster_session()
+    wipe_mods()
+end)
+
+suite.test("custom consumable types: no packs opt-in, no pack appearances; bad packs are load errors", function()
+    wipe_mods()
+    write_mod("NoPacks", { id = "NoPacks", prefix = "np", main_file = "main.lua", version = "1" }, [[
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    shop_rate = 0,
+}
+SMODS.Consumable {
+    set = "Minor", key = "coin",
+    loc_txt = { name = "Coin", text = { "Gain $5" } },
+    config = { extra = { dollars = 5 } },
+    sprite = "coin.png",
+    use = function(self, card) ease_dollars(5) end,
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.NoPacks.status, "loaded", tostring(ModLoader.by_id.NoPacks.error))
+    T.assert_eq(SMODS.pack_substitutions("arcana"), nil, "a type without packs opts into nothing")
+    local game = bootstrap.new_game(4466)
+    G = game
+    game.consumables, game.jokers = {}, {}
+    for round = 1, 30 do
+        game.ante = round
+        for _, ch in ipairs(game:_booster_build_choices({ pack = "arcana", card_count = 5 })) do
+            T.assert_true(ch.consumable_def == nil or ch.consumable_def.id ~= "c_np_coin",
+                "the kind never appears without opting in")
+        end
+    end
+    wipe_mods()
+
+    write_mod("BadPacks", { id = "BadPacks", prefix = "bp", main_file = "main.lua", version = "1" }, [[
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    packs = { buffoon = 2 },
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadPacks.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadPacks.error):find("buffoon", 1, true) ~= nil,
+        "the error names the bad pack: " .. tostring(ModLoader.by_id.BadPacks.error))
+    wipe_mods()
+end)
+
+suite.test("a mod Tarot used straight out of a pack reads its card.ability", function()
+    wipe_mods()
+    write_mod("PackBug", { id = "PackBug", prefix = "pb", main_file = "main.lua", version = "1" }, [[
+SMODS.Consumable {
+    set = "Tarot", key = "purse",
+    loc_txt = { name = "The Purse", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 7 } },
+    sprite = "purse.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.PackBug.status, "loaded", tostring(ModLoader.by_id.PackBug.error))
+    local game = bootstrap.new_game(4467)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.consumables, game.jokers = {}, {}
+    game.money = 10
+    local dealt
+    for round = 1, 200 do
+        game.ante = round
+        local choices = game:_booster_build_choices({ pack = "arcana", card_count = 5, picks_granted = 1 })
+        for i, ch in ipairs(choices) do
+            if ch.consumable_def and ch.consumable_def.id == "c_pb_purse" then
+                dealt = { choices = choices, idx = i }
+                break
+            end
+        end
+        if dealt then break end
+    end
+    T.assert_true(dealt ~= nil, "the Purse is dealt by an Arcana pack")
+    T.assert_true(dealt.choices[dealt.idx].consumable_def.ability ~= nil,
+        "the pack's def copy materialises ability (the pack-path bug)")
+    game.booster_session = { choices = dealt.choices, picks_remaining = 1,
+        hand_for_tarot = false, choice_nodes = {} }
+    T.assert_true(game:pick_booster_choice(dealt.idx), "the dealt Tarot picks")
+    T.assert_eq(game.money, 17, "its use read card.ability and paid out")
+    wipe_mods()
+end)
+
+-- The seeded pack contents of a vanilla install, captured from the build
+-- before custom-kind pack support: any change to the vanilla draw sequence
+-- (extra RNG draws, reordered pools) breaks this line by line.
+local BASELINE_PACK_SEQ = {
+    "arcana:tarot_death,tarot_empress,tarot_chariot,tarot_star,tarot_lovers",
+    "celestial:planet_mars,planet_uranus,planet_neptune,planet_earth,planet_jupiter",
+    "spectral:spectral_ouija,spectral_sigil,spectral_deja_vu,spectral_wraith,spectral_ectoplasm",
+    "buffoon:j_drunkard,j_scary_face,j_mad,j_smiley_face,j_8_ball",
+    "standard:P14/Diamonds/wild/-,P6/Hearts/wild/-,P10/Clubs/-/-,P8/Hearts/-/-,P8/Hearts/mult/-",
+    "arcana:tarot_hanged_man,tarot_empress,tarot_moon,tarot_magician,tarot_death",
+    "celestial:planet_neptune,planet_pluto,planet_earth,planet_jupiter,planet_saturn",
+    "spectral:spectral_hex,spectral_deja_vu,spectral_familiar,spectral_aura,spectral_medium",
+    "buffoon:j_baron,j_gros_michel,j_zany,j_walkie_talkie,j_mad",
+    "standard:P7/Clubs/-/-,P12/Clubs/glass/-,P14/Hearts/-/-,P11/Clubs/wild/-,P14/Diamonds/gold/-",
+    "arcana:tarot_justice,tarot_strength,tarot_star,tarot_judgement,tarot_sun",
+    "celestial:planet_venus,planet_pluto,planet_mercury,planet_earth,planet_mars",
+    "spectral:spectral_hex,spectral_sigil,spectral_grim,spectral_medium,spectral_ankh",
+    "buffoon:j_joker,j_spare_trousers,j_raised_fist,j_dna,j_gluttenous_joker",
+    "standard:P9/Spades/-/-,P8/Clubs/-/-,P9/Hearts/-/-,P2/Spades/stone/-,P3/Hearts/-/-",
+    "arcana:tarot_devil,tarot_fool,tarot_sun,tarot_judgement,tarot_hierophant",
+    "celestial:planet_mercury,planet_earth,planet_saturn,planet_mars,planet_venus",
+    "spectral:spectral_immolate,spectral_ouija,spectral_grim,spectral_incantation,spectral_familiar",
+    "buffoon:j_todo_list,j_mail,j_reserved_parking,j_castle,j_trading_card",
+    "standard:P14/Hearts/-/-,P13/Hearts/stone/-,P14/Diamonds/-/-,P9/Diamonds/bonus/-,P9/Clubs/-/-",
+    "arcana:tarot_emperor,tarot_magician,tarot_world,tarot_strength,tarot_devil",
+    "celestial:planet_mercury,planet_saturn,planet_jupiter,planet_uranus,planet_earth",
+    "spectral:spectral_ouija,spectral_trance,spectral_ectoplasm,spectral_talisman,spectral_hex",
+    "buffoon:j_fibonacci,j_crazy,j_castle,j_odd_todd,j_egg",
+    "standard:P2/Spades/wild/-,P6/Diamonds/-/-,P11/Hearts/-/-,P13/Hearts/gold/-,P12/Hearts/mult/-",
+    "arcana:tarot_judgement,tarot_devil,tarot_chariot,tarot_strength,tarot_high_priestess",
+    "celestial:planet_jupiter,planet_mars,planet_neptune,planet_venus,planet_mercury",
+    "spectral:spectral_ectoplasm,spectral_trance,spectral_aura,spectral_familiar,spectral_immolate",
+    "buffoon:j_vagabond,j_burglar,j_walkie_talkie,j_todo_list,j_campfire",
+    "standard:P13/Clubs/-/-,P9/Hearts/-/-,P2/Hearts/-/-,P11/Clubs/bonus/-,P13/Hearts/-/-",
+}
+
+local function pack_sequence(game)
+    local packs = { "arcana", "celestial", "spectral", "buffoon", "standard" }
+    local out = {}
+    for round = 1, 6 do
+        game.ante = round
+        for _, pack in ipairs(packs) do
+            local ids = {}
+            for _, ch in ipairs(game:_booster_build_choices({ pack = pack, card_count = 5, picks_granted = 2 })) do
+                if ch.consumable_def then
+                    ids[#ids + 1] = ch.consumable_def.id
+                elseif ch.joker_id then
+                    ids[#ids + 1] = ch.joker_id
+                else
+                    local d = ch.playing_data
+                    ids[#ids + 1] = "P" .. tostring(d.rank) .. "/" .. tostring(d.suit)
+                        .. "/" .. tostring(d.enhancement or "-") .. "/" .. tostring(d.edition or "-")
+                end
+            end
+            out[#out + 1] = pack .. ":" .. table.concat(ids, ",")
+        end
+    end
+    return out
+end
+
+suite.test("booster pack contents are the seeded vanilla sequence, before and after a pack-type rollback", function()
+    wipe_mods()
+    local game = bootstrap.new_game(9101)
+    G = game
+    game.consumables, game.jokers = {}, {}
+    local seq = pack_sequence(game)
+    T.assert_eq(#seq, #BASELINE_PACK_SEQ)
+    for i, line in ipairs(BASELINE_PACK_SEQ) do
+        T.assert_eq(seq[i], line, "sequence line " .. i)
+    end
+
+    -- Registering an opted-in type and rolling it back restores the sequence.
+    local game2 = install_pk()
+    T.assert_true(SMODS.pack_substitutions("arcana") ~= nil, "the type is live for this part")
+    wipe_mods()
+    T.assert_eq(SMODS.pack_substitutions("arcana"), nil, "rollback removes the opt-in")
+    local game3 = bootstrap.new_game(9101)
+    G = game3
+    game3.consumables, game3.jokers = {}, {}
+    local seq3 = pack_sequence(game3)
+    for i, line in ipairs(BASELINE_PACK_SEQ) do
+        T.assert_eq(seq3[i], line, "post-rollback sequence line " .. i)
+    end
+end)
+
+suite.test("custom consumable kinds get their own collection category", function()
+    local game = install_pk()
+    local Catalog = require("collection_catalog")
+    Catalog.invalidate_cache()
+    local def = Catalog.get_category_def("consumable_kind_Minor")
+    T.assert_true(def ~= nil, "the kind has a category def")
+    T.assert_eq(def.label, "Minor Arcana", "labelled with the type's name")
+    T.assert_eq(def.group, "consumables")
+    local entries = Catalog.get_entries("consumable_kind_Minor")
+    T.assert_eq(#entries, 2, "both Minor cards are listed")
+    for _, e in ipairs(entries) do
+        T.assert_eq(e.category, "consumable_kind_Minor")
+        T.assert_eq(e.node_kind, "consumable")
+    end
+    local prog = Catalog.get_progress(game, "consumable_kind_Minor")
+    T.assert_eq(prog.total, 2)
+    T.assert_eq(#Catalog.get_entries("tarots"), 22, "vanilla categories untouched")
+    T.assert_eq(#Catalog.get_entries("planets"), 12)
+    T.assert_eq(#Catalog.get_entries("spectrals"), 18)
+    T.assert_eq(#Catalog.categories(), #Catalog.CATEGORIES + 1, "one category is added")
+
+    wipe_mods()
+    Catalog.invalidate_cache()
+    T.assert_eq(Catalog.get_category_def("consumable_kind_Minor"), nil, "the category goes with the mod")
+    T.assert_eq(#Catalog.get_entries("consumable_kind_Minor"), 0)
+    T.assert_eq(#Catalog.categories(), #Catalog.CATEGORIES, "and the category list is vanilla again")
+end)
+
+--------------------------------------------------------------------------------
 -- Custom centers: enhancements, seals and editions (SMODS.Enhancement / Seal / Edition)
 --------------------------------------------------------------------------------
 

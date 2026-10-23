@@ -1714,8 +1714,9 @@ function Game:get_drag_zones_for_context(ctx)
         local sess = self.booster_session
         local ch = sess and sess.choices and sess.choices[ctx.choice_index]
         local c = ch and ch.consumable_def
-        local needs_use = ch and (ch.kind == "tarot" or ch.kind == "spectral")
-            and c and (self:booster_tarot_needs_hand(c) or self:booster_spectral_needs_hand(c))
+        local needs_use = ch and (ch.kind == "tarot" or ch.kind == "spectral"
+                or self:_booster_choice_is_custom_consumable(ch))
+            and c and self:booster_consumable_needs_hand(c)
         if needs_use then
             local can_use = ch and not ch.taken and (tonumber(sess.picks_remaining) or 0) > 0
                 and c and self:pack_consumable_can_apply(c)
@@ -1724,7 +1725,8 @@ function Game:get_drag_zones_for_context(ctx)
             local can_pick = ch and not ch.taken and (tonumber(sess.picks_remaining) or 0) > 0
             if can_pick and ch.kind == "joker" then
                 can_pick = self:joker_has_room_for_new(ch.edition or "base")
-            elseif can_pick and (ch.kind == "planet" or ch.kind == "tarot" or ch.kind == "spectral") then
+            elseif can_pick and (ch.kind == "planet" or ch.kind == "tarot" or ch.kind == "spectral"
+                or self:_booster_choice_is_custom_consumable(ch)) then
                 can_pick = c and self:pack_consumable_can_apply(c)
             end
             zones.full = DragZonesUI.make_zone(I18N.text("action.pick", nil, "PICK"), can_pick, can_pick and C.GREEN or C.GREY, "pick", true)
@@ -2225,7 +2227,7 @@ end
 --- Mark every collection entry discovered. Decks come from unlocks; seals and
 --- editions are always visible, so both are skipped here.
 local function discover_all_entries(discovered)
-    for _, cat in ipairs(CollectionCatalog.CATEGORIES) do
+    for _, cat in ipairs(CollectionCatalog.categories()) do
         if cat.id ~= "decks" and cat.id ~= "seals" and cat.id ~= "editions" then
             for _, entry in ipairs(CollectionCatalog.get_entries(cat.id)) do
                 local did = CollectionCatalog.discovery_id_for_entry(entry)
@@ -3686,7 +3688,7 @@ function Game:get_profile_progress(profile_id)
     local stake_count = #(STAKE_DEFS or {})
 
     local collection_have, collection_total = 0, 0
-    for _, cat in ipairs(CollectionCatalog.CATEGORIES) do
+    for _, cat in ipairs(CollectionCatalog.categories()) do
         for _, entry in ipairs(CollectionCatalog.get_entries(cat.id)) do
             collection_total = collection_total + 1
             if CollectionCatalog.is_entry_discovered(view, entry) then
@@ -6851,15 +6853,19 @@ local function consumable_pool_order(kind)
     -- is its cards alone, and a kind with no cards at all has no pool.
     if not base and #mods == 0 then return nil end
     if #mods == 0 then return base end
-    local cached = consumable_order_cache[kind]
-    if cached and cached.n == #mods then return cached.list end
     table.sort(mods, function(a, b)
         return (tonumber(CONSUMABLE_DEFS[a].index) or 0) < (tonumber(CONSUMABLE_DEFS[b].index) or 0)
     end)
+    -- The cache is keyed by the sorted mod ids themselves, not their count: two
+    -- different mod sets of the same size (a mod toggled off, another on) must
+    -- not inherit each other's pool.
+    local sig = table.concat(mods, "\1")
+    local cached = consumable_order_cache[kind]
+    if cached and cached.sig == sig then return cached.list end
     local list = {}
     for _, id in ipairs(base or {}) do list[#list + 1] = id end
     for _, id in ipairs(mods) do list[#list + 1] = id end
-    consumable_order_cache[kind] = { n = #mods, list = list }
+    consumable_order_cache[kind] = { sig = sig, list = list }
     return list
 end
 
@@ -12271,21 +12277,23 @@ local REFERENCE_VOUCHER_ORDER = {
 
 --- The pool the shop rolls vouchers from: the reference's, then any mod vouchers in the order
 --- they were registered. With no mods it is exactly the reference list, so seeds are unchanged.
-local voucher_roll_cache = { n = -1, list = REFERENCE_VOUCHER_ORDER }
+local voucher_roll_cache = { sig = nil, list = REFERENCE_VOUCHER_ORDER }
 local function voucher_roll_order()
     local mods = {}
     for vid, def in pairs(VOUCHER_DEFS or {}) do
         if type(def) == "table" and def.mod_id then mods[#mods + 1] = vid end
     end
     if #mods == 0 then return REFERENCE_VOUCHER_ORDER end
-    if voucher_roll_cache.n == #mods then return voucher_roll_cache.list end
     table.sort(mods, function(a, b)
         return (tonumber(VOUCHER_DEFS[a].order) or 0) < (tonumber(VOUCHER_DEFS[b].order) or 0)
     end)
+    -- Keyed by the sorted mod ids, not their count (see `consumable_pool_order`).
+    local sig = table.concat(mods, "\1")
+    if voucher_roll_cache.sig == sig then return voucher_roll_cache.list end
     local list = {}
     for _, id in ipairs(REFERENCE_VOUCHER_ORDER) do list[#list + 1] = id end
     for _, id in ipairs(mods) do list[#list + 1] = id end
-    voucher_roll_cache.n, voucher_roll_cache.list = #mods, list
+    voucher_roll_cache.sig, voucher_roll_cache.list = sig, list
     return list
 end
 
@@ -13791,7 +13799,7 @@ function Game:_booster_build_choices(offer)
             return fallback
         end
 
-        local key = type_names[kind] .. append .. ante
+        local key = (type_names[kind] or kind) .. append .. ante
         local attempt = 1
         while true do
             local id = ordered[self:random(attempt == 1 and key or key .. "_resample" .. attempt,
@@ -13829,14 +13837,60 @@ function Game:_booster_build_choices(offer)
         if type(def) ~= "table" or not copy_table then return end
         local c = copy_table(def)
         c.id = id
+        -- As in `add_consumable` and the shop's buy-and-use: a mod card's `can_use` /
+        -- `use` reads `card.ability`, which a held copy carries and a raw def copy
+        -- does not. Materialise it here so a mod consumable used straight out of a
+        -- pack behaves like the same card held in the consumable row.
+        if def.mod_id and c.ability == nil then c.ability = copy_table(def.config or {}) end
         choices[#choices + 1] = { kind = c.kind or kind, consumable_def = c, taken = false }
+    end
+
+    -- Custom consumable kinds that opted into this pack (`SMODS.ConsumableType`
+    -- `packs`). A slot first rolls its vanilla kind; then, on a stream of its own,
+    -- a weighted draw can hand the slot to an opted-in kind instead -- the pack's
+    -- own kind weighs 4 (the shop's base unit) against each kind's declared rate.
+    -- A kind whose pool is fully culled (in play, already dealt, banned) sits the
+    -- draw out, so a pack never comes up short. `pack_subs` is nil while no kind
+    -- is opted in, and then no slot spends the extra draw and vanilla pack
+    -- contents are exactly what they were.
+    local pack_subs = SMODS and SMODS.pack_substitutions and SMODS.pack_substitutions(pack) or nil
+
+    local function kind_has_available(kind)
+        local ordered = consumable_pool_order(kind)
+        if not ordered then return false end
+        for _, id in ipairs(ordered) do
+            if not center_blocked(id, true) then return true end
+        end
+        return false
+    end
+
+    local function substitute_kind(vanilla_kind)
+        local live = {}
+        local total = 4
+        for _, sub in ipairs(pack_subs) do
+            if kind_has_available(sub.kind) then
+                live[#live + 1] = sub
+                total = total + sub.rate
+            end
+        end
+        if #live == 0 then return vanilla_kind end
+        local roll = self:random("packsub_" .. pack .. ante) * total
+        if roll <= 4 then return vanilla_kind end
+        roll = roll - 4
+        for _, sub in ipairs(live) do
+            roll = roll - sub.rate
+            if roll <= 0 then return sub.kind end
+        end
+        return vanilla_kind
     end
 
     if pack == "arcana" then
         for _ = 1, n do
             local kind = self:has_voucher("v_omen_globe") and self:random("omen_globe") > 0.8
                 and "spectral" or "tarot"
-            local id = create_consumable(kind, kind == "spectral" and "ar2" or "ar1")
+            if pack_subs then kind = substitute_kind(kind) end
+            local append = kind == "spectral" and "ar2" or (kind == "tarot" and "ar1" or "cp")
+            local id = create_consumable(kind, append)
             consumable_choice(kind, id)
         end
     elseif pack == "celestial" then
@@ -13847,11 +13901,21 @@ function Game:_booster_build_choices(offer)
         end
         for i = 1, n do
             local forced = (i == 1) and pref or nil
-            consumable_choice("planet", create_consumable("planet", "pl1", forced))
+            if forced then
+                -- Telescope's guaranteed Planet is the voucher's promise; a custom
+                -- kind never takes that slot.
+                consumable_choice("planet", create_consumable("planet", "pl1", forced))
+            else
+                local kind = "planet"
+                if pack_subs then kind = substitute_kind(kind) end
+                consumable_choice(kind, create_consumable(kind, kind == "planet" and "pl1" or "cp"))
+            end
         end
     elseif pack == "spectral" then
         for _ = 1, n do
-            consumable_choice("spectral", create_consumable("spectral", "spe"))
+            local kind = "spectral"
+            if pack_subs then kind = substitute_kind(kind) end
+            consumable_choice(kind, create_consumable(kind, kind == "spectral" and "spe" or "cp"))
         end
     elseif pack == "buffoon" then
         local entries = self:_shop_pick_unique_joker_ids(n)
@@ -13913,7 +13977,10 @@ local function warm_next_booster_choice(sess)
     while i <= #choices do
         local ch = choices[i]
         if type(ch) == "table" and not ch.taken then
-            if (ch.kind == "tarot" or ch.kind == "planet" or ch.kind == "spectral")
+            if (ch.kind == "tarot" or ch.kind == "planet" or ch.kind == "spectral"
+                    or (type(ch.consumable_def) == "table" and ch.consumable_def.mod_id
+                        and SMODS and SMODS.is_consumable_kind
+                        and SMODS.is_consumable_kind(ch.kind)))
                 and Consumable and Consumable.warm_sprite then
                 local def = ch.consumable_def
                 -- Asked for rather than recomputed: the negative-edition offset belongs to
@@ -13946,7 +14013,8 @@ function Game:_booster_spawn_choice_nodes(choices)
     for i, ch in ipairs(choices) do
         if ch.taken then
             nodes[i] = nil
-        elseif ch.kind == "tarot" or ch.kind == "planet" or ch.kind == "spectral" then
+        elseif ch.kind == "tarot" or ch.kind == "planet" or ch.kind == "spectral"
+            or self:_booster_choice_is_custom_consumable(ch) then
             local def = ch.consumable_def
             if Consumable and type(def) == "table" then
                 local node = Consumable(0, 0, def)
@@ -14327,6 +14395,31 @@ function Game:booster_spectral_needs_hand(c)
     return false
 end
 
+--- Whether a pack consumable needs hand cards selected before it can be used:
+--- the Tarot/Spectral rules above, extended to a mod's custom kinds
+--- (`SMODS.ConsumableType`), whose targeted cards declare the same `select`.
+function Game:booster_consumable_needs_hand(c)
+    if type(c) ~= "table" then return false end
+    if c.kind == "tarot" then return self:booster_tarot_needs_hand(c) end
+    if c.kind == "spectral" then return self:booster_spectral_needs_hand(c) end
+    if c.mod_id and self:is_consumable_kind(c.kind) then
+        local s = c.select
+        if type(s) ~= "table" then return false end
+        if (s.exact or 0) > 0 then return true end
+        if s.min and tonumber(s.min) > 0 then return true end
+    end
+    return false
+end
+
+--- Whether a booster choice is a consumable of a kind a mod registered
+--- (`SMODS.ConsumableType`). Such choices are picked and used exactly like
+--- Tarot/Spectral choices; the vanilla kinds keep their own branches.
+function Game:_booster_choice_is_custom_consumable(ch)
+    if type(ch) ~= "table" or type(ch.consumable_def) ~= "table" then return false end
+    if not ch.consumable_def.mod_id then return false end
+    return self:is_consumable_kind(ch.kind) == true
+end
+
 function Game:pack_consumable_can_apply(c)
     if type(c) ~= "table" then return false end
     if c.mod_id then
@@ -14407,7 +14500,8 @@ function Game:pick_booster_choice(idx)
             self.deck:insert_random(ch.playing_data)
             self:notify_cards_added_to_deck(1)
         end
-    elseif ch.kind == "tarot" or ch.kind == "spectral" then
+    elseif ch.kind == "tarot" or ch.kind == "spectral"
+        or self:_booster_choice_is_custom_consumable(ch) then
         local c = ch.consumable_def
         -- A pick mid-deal must act on the full preview hand, not the part that has landed.
         if sess.hand_for_tarot and self.hand and self.hand.flush_draw_queue then
@@ -14433,7 +14527,8 @@ function Game:pick_booster_choice(idx)
     end
     sess.active_choice_index = nil
     sess.picks_remaining = (tonumber(sess.picks_remaining) or 0) - 1
-    if ch.kind == "tarot" or ch.kind == "spectral" then
+    if ch.kind == "tarot" or ch.kind == "spectral"
+        or self:_booster_choice_is_custom_consumable(ch) then
         if sess.hand_for_tarot then
             self:_booster_discard_pack_hand_maybe_refill()
         end
@@ -18401,15 +18496,12 @@ function Game:gamepad_booster_confirm()
     local ch = sess.choices and sess.choices[idx]
     if not ch or ch.taken then return false end
 
-    if ch.kind == "tarot" or ch.kind == "spectral" then
+    if ch.kind == "tarot" or ch.kind == "spectral"
+        or self:_booster_choice_is_custom_consumable(ch) then
         local c = ch.consumable_def
         local needs_hand = false
         if sess.hand_for_tarot then
-            if ch.kind == "tarot" then
-                needs_hand = self:booster_tarot_needs_hand(c)
-            else
-                needs_hand = self:booster_spectral_needs_hand(c)
-            end
+            needs_hand = self:booster_consumable_needs_hand(c)
         end
         if needs_hand then
             if self.hand and self.hand.has_selection and self.hand:has_selection() then
@@ -18497,14 +18589,10 @@ function Game:gamepad_booster_apply_hand_targeted()
     if not idx then return false end
     local ch = sess.choices and sess.choices[idx]
     if not ch or ch.taken then return false end
-    if ch.kind ~= "tarot" and ch.kind ~= "spectral" then return false end
+    if ch.kind ~= "tarot" and ch.kind ~= "spectral"
+        and not self:_booster_choice_is_custom_consumable(ch) then return false end
     local c = ch.consumable_def
-    local needs_hand = false
-    if ch.kind == "tarot" then
-        needs_hand = self:booster_tarot_needs_hand(c)
-    else
-        needs_hand = self:booster_spectral_needs_hand(c)
-    end
+    local needs_hand = self:booster_consumable_needs_hand(c)
     if not needs_hand then
         local ok = self:pick_booster_choice(idx)
         if ok then self:booster_gamepad_focus_next_after_pick() end

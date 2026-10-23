@@ -396,14 +396,15 @@ mid-run, a game already built keeps the hand listed (positions must not move und
 a save) but can no longer evaluate it; the run's own mod check refuses to continue
 on a changed mod set anyway.
 
-**`SMODS.ConsumableType { key, loc_txt, shop_rate }`** is a consumable set of the
-mod's own. Register it before the consumables that use it:
+**`SMODS.ConsumableType { key, loc_txt, shop_rate, packs }`** is a consumable set
+of the mod's own. Register it before the consumables that use it:
 
 ```lua
 SMODS.ConsumableType {
     key = "Minor",
     loc_txt = { name = "Minor Arcana" },
     shop_rate = 6,
+    packs = { arcana = 2 },   -- optional
 }
 SMODS.Consumable { set = "Minor", key = "coin", ... }   -- the type's key,
 SMODS.Consumable { set = "ct_Minor", key = "sigil", ... } -- or its full id
@@ -428,12 +429,28 @@ merchant vouchers raise only their own kinds. A kind joins the roll only while i
 has cards and a positive rate; rate 0 keeps it out of the shop, and its cards can
 still be created directly.
 
-Two honest limits: a custom kind gets **no booster pack and no collection tab of
-its own** -- packs and the collection's categories belong to the vanilla sets (its
-cards are still discovered, and their tooltips work wherever they appear) -- and
-**hand-levelling stays Planet-only**: `config.hand_type` on a custom kind does
-nothing, because levelling is the Planet branch of the use flow, not a property of
-the set. Level from `use` if a card must.
+`packs` opts the kind into the vanilla booster packs: keys are `arcana`,
+`celestial` and `spectral` (any other key is a load error naming it), values are
+weights in the same units as `shop_rate` -- the pack's own kind weighs 4, so
+`packs = { arcana = 2 }` makes about a third of an Arcana pack's slots deal from
+the kind's own pool instead. A substituted slot deals by the pack's own rules:
+cards already in play, duplicates within the pack and challenge bans are culled,
+exactly as for the pack's own kind. Rates of 0, or omitting `packs`, keep the kind
+out of packs entirely; the shop behaviour above is unaffected either way. Choose
+the packs a kind joins with its cards' `use` in mind: a card that targets hand
+cards can only be played in a pack that shows the hand (Arcana and Spectral do;
+Celestial does not, so a targeting card dealt there cannot be used from it).
+
+The kind also gets a **collection category of its own**, named by its `loc_txt`
+name and listed with the Tarots, Planets and Spectrals: its cards appear there
+with their discovery states, and they count toward the collection's totals.
+
+One honest limit remains: **hand-levelling stays Planet-only**:
+`config.hand_type` on a custom kind does nothing, because levelling is the Planet
+branch of the use flow, not a property of the set. Level from `use` if a card
+must. And booster packs *of* a custom kind cannot be registered: packs themselves
+(their sizes, prices and art) belong to the five vanilla pack kinds; `packs` only
+lets a kind's cards be dealt by the packs that exist.
 
 ## Custom enhancements, seals and editions
 

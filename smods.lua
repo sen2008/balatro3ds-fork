@@ -1735,18 +1735,27 @@ SMODS.ConsumableTypes = SMODS.ConsumableTypes or {}
 SMODS.ConsumableKinds = SMODS.ConsumableKinds or {}
 local next_consumable_type_order = 1
 
---- `SMODS.ConsumableType { key, loc_txt, shop_rate }`: a consumable set of this mod's
---- own. A consumable then declares it with `set = "<key>"` (or the type's full id) in
---- `SMODS.Consumable`, and its cards are held, pooled, sold and used exactly like the
---- vanilla sets' -- but as their own kind wherever the game asks which set a card
---- belongs to. Planet hand-levelling and the Tarot/Spectral-only effects stay with
---- their own kinds; a custom kind's cards do what their own `use` says.
+--- `SMODS.ConsumableType { key, loc_txt, shop_rate, packs }`: a consumable set of
+--- this mod's own. A consumable then declares it with `set = "<key>"` (or the
+--- type's full id) in `SMODS.Consumable`, and its cards are held, pooled, sold
+--- and used exactly like the vanilla sets' -- but as their own kind wherever the
+--- game asks which set a card belongs to. Planet hand-levelling and the
+--- Tarot/Spectral-only effects stay with their own kinds; a custom kind's cards
+--- do what their own `use` says.
 ---
 --- `shop_rate` is the kind's weight in the shop's consumable roll, in the units of
 --- the vanilla weights (Tarot and Planet are 4 each before their merchant vouchers
 --- raise them): the default 4 makes the kind as present as a vanilla one. The kind
 --- joins the roll only while it has cards and a positive rate; rate 0 keeps it out
 --- of the shop (its cards can still be created directly).
+---
+--- `packs` opts the kind into booster packs: a table mapping a pack kind --
+--- "arcana", "celestial" or "spectral" -- to a rate in the same units (the pack's
+--- own kind weighs 4). Each consumable slot of an opted-in pack first rolls its
+--- vanilla kind, then a weighted draw can hand the slot to an opted-in kind with
+--- cards available instead. A kind with no `packs` (or a rate of 0 for a pack)
+--- never appears in that pack, and packs spend no extra draws while no kind is
+--- opted in, so vanilla pack contents are unchanged.
 function SMODS.ConsumableType(t)
     local mod = need_mod("SMODS.ConsumableType")
     check(type(t) == "table", "SMODS.ConsumableType expects a table")
@@ -1765,11 +1774,28 @@ function SMODS.ConsumableType(t)
     local rate = t.shop_rate == nil and 4 or tonumber(t.shop_rate)
     check(rate ~= nil and rate >= 0,
         "ConsumableType '" .. t.key .. "': shop_rate must be a number >= 0")
+    local packs = nil
+    if t.packs ~= nil then
+        check(type(t.packs) == "table",
+            "ConsumableType '" .. t.key .. "': packs must be a table mapping pack kinds to rates")
+        packs = {}
+        for pack, pack_rate in pairs(t.packs) do
+            check(pack == "arcana" or pack == "celestial" or pack == "spectral",
+                "ConsumableType '" .. t.key .. "': packs names unknown pack '" .. tostring(pack)
+                .. "' (packs hold consumables only in \"arcana\", \"celestial\" and \"spectral\")")
+            local r = tonumber(pack_rate)
+            check(r ~= nil and r >= 0,
+                "ConsumableType '" .. t.key .. "': packs." .. pack .. " must be a number >= 0")
+            if r > 0 then packs[pack] = r end
+        end
+        if next(packs) == nil then packs = nil end
+    end
     local loc = loc_for(t.loc_txt, "en") or {}
     local entry = {
         id = id, key = t.key, kind = t.key, mod = mod,
         name = tostring(loc.name or t.name or t.key),
         shop_rate = rate,
+        packs = packs,
         order = next_consumable_type_order,
     }
     next_consumable_type_order = next_consumable_type_order + 1
@@ -1830,6 +1856,28 @@ function SMODS.shop_consumable_kinds()
             for _, def in pairs(CONSUMABLE_DEFS or {}) do
                 if type(def) == "table" and def.kind == entry.kind then
                     out[#out + 1] = entry
+                    break
+                end
+            end
+        end
+    end
+    if #out == 0 then return nil end
+    table.sort(out, function(a, b) return a.order < b.order end)
+    return out
+end
+
+--- Custom kinds that opted into the booster pack kind `pack` (see the `packs`
+--- field of `SMODS.ConsumableType`): those with a positive rate for the pack and
+--- at least one def of the kind, in registration order, as `{ kind, rate }`.
+--- Nil when there are none, so pack building is untouched.
+function SMODS.pack_substitutions(pack)
+    local out = {}
+    for _, entry in pairs(SMODS.ConsumableKinds) do
+        local rate = entry.packs and entry.packs[pack] or 0
+        if rate > 0 then
+            for _, def in pairs(CONSUMABLE_DEFS or {}) do
+                if type(def) == "table" and def.kind == entry.kind then
+                    out[#out + 1] = { kind = entry.kind, rate = rate, order = entry.order }
                     break
                 end
             end

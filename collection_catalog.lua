@@ -177,13 +177,57 @@ function CollectionCatalog.build_joker_entries()
     return out
 end
 
+--- The collection category a consumable kind lists under: the vanilla kinds
+--- keep their static categories; a kind a mod registered with
+--- `SMODS.ConsumableType` gets a category of its own.
+function CollectionCatalog.consumable_category_id(kind)
+    if kind == "tarot" then return "tarots" end
+    if kind == "planet" then return "planets" end
+    if kind == "spectral" then return "spectrals" end
+    return "consumable_kind_" .. tostring(kind)
+end
+
+--- Category defs for registered custom consumable kinds, in registration
+--- order: `{ id, label, color_key, group, kind }`, the label being the type's
+--- own name. Empty while no custom kind is registered.
+function CollectionCatalog.custom_consumable_categories()
+    local out = {}
+    local kinds = SMODS and SMODS.ConsumableKinds
+    if type(kinds) == "table" then
+        for _, entry in pairs(kinds) do
+            out[#out + 1] = {
+                id = CollectionCatalog.consumable_category_id(entry.kind),
+                label = entry.name,
+                color_key = "PURPLE",
+                group = "consumables",
+                kind = entry.kind,
+                order = entry.order or 9999,
+            }
+        end
+        table.sort(out, function(a, b) return a.order < b.order end)
+        for _, cat in ipairs(out) do cat.order = nil end
+    end
+    return out
+end
+
+--- Every category def: the static list, then any custom consumable kinds.
+--- Identical to `CATEGORIES` while no custom kind is registered.
+function CollectionCatalog.categories()
+    local custom = CollectionCatalog.custom_consumable_categories()
+    if #custom == 0 then return CollectionCatalog.CATEGORIES end
+    local out = {}
+    for _, cat in ipairs(CollectionCatalog.CATEGORIES) do out[#out + 1] = cat end
+    for _, cat in ipairs(custom) do out[#out + 1] = cat end
+    return out
+end
+
 function CollectionCatalog.build_consumable_entries(kind)
     local out = {}
     for id, def in pairs(CONSUMABLE_DEFS or {}) do
         if type(def) == "table" and def.kind == kind then
             out[#out + 1] = {
                 id = id,
-                category = kind == "tarot" and "tarots" or (kind == "planet" and "planets" or "spectrals"),
+                category = CollectionCatalog.consumable_category_id(kind),
                 node_kind = "consumable",
                 name = I18N.content_name("consumable", id, def.name or id),
                 order = tonumber(def.index) or 9999,
@@ -470,6 +514,9 @@ function CollectionCatalog.all_entries_by_category()
         tags = CollectionCatalog.build_tag_entries(),
         blinds = CollectionCatalog.build_blind_entries(),
     }
+    for _, cat in ipairs(CollectionCatalog.custom_consumable_categories()) do
+        _entries_cache[cat.id] = CollectionCatalog.build_consumable_entries(cat.kind)
+    end
     return _entries_cache
 end
 
@@ -492,6 +539,9 @@ end
 
 function CollectionCatalog.get_category_def(category_id)
     for _, cat in ipairs(CollectionCatalog.CATEGORIES) do
+        if cat.id == category_id then return cat end
+    end
+    for _, cat in ipairs(CollectionCatalog.custom_consumable_categories()) do
         if cat.id == category_id then return cat end
     end
     return nil
