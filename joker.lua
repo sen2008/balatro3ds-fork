@@ -129,6 +129,12 @@ function Joker.normalize_edition(raw)
     if e == "e_polychrome" or e == "polychrome" then return "polychrome" end
     if e == "e_negative" or e == "negative" then return "negative" end
     if e == "holo" or e == "polychrome" or e == "negative" then return e end
+    -- An edition a mod registered (SMODS.Edition) keeps its name; anything
+    -- else unknown still falls back to base, as before.
+    if SMODS and SMODS.edition_value then
+        local custom = SMODS.edition_value(e)
+        if custom then return custom end
+    end
     return "base"
 end
 
@@ -1363,6 +1369,15 @@ function Joker:apply_edition_on_hand_scored(ctx, after_effect)
     if type(ctx) ~= "table" then return end
     local ed = Joker.normalize_edition(self.edition)
     if ed == "base" or ed == "negative" then return end
+    -- An edition a mod registered (SMODS.Edition): its flat chips/mult land in
+    -- the before pass and its x_mult in the after pass, the slots the vanilla
+    -- editions split between. No-op when nothing is registered.
+    if ed ~= "foil" and ed ~= "holo" and ed ~= "polychrome" then
+        if SMODS and SMODS.apply_custom_edition_on_hand_scored then
+            SMODS.apply_custom_edition_on_hand_scored(self, ctx, after_effect)
+        end
+        return
+    end
     if (ed == "polychrome") ~= (after_effect == true) then return end
     if ed == "foil" then
         ctx.chips = (tonumber(ctx.chips) or 0) + 50

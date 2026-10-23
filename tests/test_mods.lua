@@ -1832,4 +1832,332 @@ suite.test("with no custom types, consumable kinds and a tarot use stay vanilla"
     T.assert_eq(game.money, 20, "The Hermit still doubles the money (capped at $20)")
 end)
 
+--------------------------------------------------------------------------------
+-- Custom centers: enhancements, seals and editions (SMODS.Enhancement / Seal / Edition)
+--------------------------------------------------------------------------------
+
+local CENTERS = [[
+SMODS.Enhancement {
+    key = "copper",
+    loc_txt = { name = "Copper", text = { "{C:chips}+#1#{} Chips", "{C:mult}+#2#{} Mult when played" } },
+    config = { chips = 25, h_chips = 10, h_dollars = 2 },
+    loc_vars = function(self, info_queue, card) return { vars = { self.config.chips, 3 } } end,
+    calculate = function(self, card, context)
+        if context.card_played then return { mult = 3 } end
+    end,
+}
+SMODS.Seal {
+    key = "lime",
+    loc_txt = { name = "Lime Seal", text = { "Earn {C:money}$2{} when played", "Retrigger this card" } },
+    config = { retrigger = 1 },
+    calculate = function(self, card, context)
+        if context.repetition then return { repetitions = 1 } end
+        if context.card_played then return { dollars = 2 } end
+        if context.on_discard then _G.T3_DISCARDS = (_G.T3_DISCARDS or 0) + 1 end
+    end,
+}
+SMODS.Edition {
+    key = "fluoro",
+    loc_txt = { name = "Fluorescent", text = { "{C:chips}+40{} Chips, {C:mult}+6{} Mult,", "{X:mult,C:white}X2{} Mult" } },
+    config = { chips = 40, mult = 6, x_mult = 2 },
+}
+SMODS.Edition {
+    key = "roomy",
+    loc_txt = { name = "Roomy", text = { "{C:attention}+1{} Joker slot" } },
+    config = { joker_slots = 1 },
+    weight = 0,
+}
+SMODS.Consumable {
+    set = "tarot", key = "brand",
+    loc_txt = { name = "The Brand", text = { "Enhances {C:attention}1{} selected card", "into a {C:chips}Copper{} card" } },
+    config = { max_highlighted = 1, mod_conv = "m_copper" },
+    sprite = "brand.png",
+}
+]]
+
+local function install_t3(seed)
+    wipe_mods()
+    write_mod("Centers", { id = "Centers", prefix = "t3", main_file = "main.lua", version = "1" }, CENTERS)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Centers.status, "loaded", tostring(ModLoader.by_id.Centers.error))
+    local game = bootstrap.new_game(seed or 4470)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 10
+    return game
+end
+
+local function hand_node(game, rank, suit, fields)
+    local hand = Hand(game)
+    game.hand = hand
+    local data = { rank = rank, suit = suit }
+    for k, v in pairs(fields or {}) do data[k] = v end
+    hand:add_card(data)
+    return hand.card_nodes[#hand.card_nodes]
+end
+
+suite.test("custom centers: registration, resolvers and rollback", function()
+    local game = install_t3()
+    T.assert_true(SMODS.EnhancementByValue.copper ~= nil, "the enhancement registers by value")
+    T.assert_eq(SMODS.Enhancements["t3_copper"].value, "copper")
+    T.assert_eq(SMODS.Enhancements["t3_copper"].mod.id, "Centers")
+    T.assert_true(SMODS.SealByValue.lime ~= nil and SMODS.EditionByValue.fluoro ~= nil)
+    T.assert_eq(SMODS.EditionByValue.roomy.weight, 0, "weight 0 keeps an edition out of the polls")
+
+    T.assert_eq(SMODS.enhancement_name("copper"), "copper")
+    T.assert_eq(SMODS.enhancement_name("m_copper"), "copper", "Steamodded-style key resolves")
+    T.assert_eq(SMODS.enhancement_name("m_t3_copper"), "copper", "and by full id")
+    T.assert_eq(SMODS.enhancement_name("m_bonus"), "bonus", "vanilla m_ keys still resolve")
+    T.assert_eq(SMODS.enhancement_name("bogus"), nil)
+    T.assert_eq(SMODS.seal_name("Lime"), "lime", "seal names are case-insensitive")
+    T.assert_eq(SMODS.seal_name("gold"), "gold")
+    T.assert_eq(SMODS.edition_value("fluoro"), "fluoro")
+    T.assert_eq(SMODS.edition_value("e_fluoro"), "fluoro")
+    T.assert_eq(SMODS.edition_value("Holographic"), "holo", "vanilla spellings still resolve")
+    T.assert_eq(SMODS.edition_value("bogus"), nil)
+    T.assert_eq(Joker.normalize_edition("fluoro"), "fluoro", "a registered edition survives normalization")
+    T.assert_eq(Joker.normalize_edition("e_roomy"), "roomy")
+
+    -- The tooltip reads the registered name and loc text.
+    local name, lines = SMODS.center_tooltip("enhancement", "copper")
+    T.assert_eq(name, "Copper")
+    T.assert_true(lines[1] ~= nil and lines[1]:find("25", 1, true) ~= nil,
+        "loc_vars fill the tooltip line: " .. tostring(lines[1]))
+    local vname = SMODS.center_tooltip("seal", "gold")
+    T.assert_eq(vname, nil, "vanilla centers are not the registry's business")
+
+    wipe_mods()
+    T.assert_eq(next(SMODS.Enhancements), nil, "enhancements unregister on rollback")
+    T.assert_eq(next(SMODS.EnhancementByValue), nil)
+    T.assert_eq(next(SMODS.Seals), nil)
+    T.assert_eq(next(SMODS.SealByValue), nil)
+    T.assert_eq(next(SMODS.Editions), nil)
+    T.assert_eq(next(SMODS.EditionByValue), nil)
+    T.assert_eq(SMODS.enhancement_name("copper"), nil, "the resolver forgets with the registry")
+    T.assert_eq(Joker.normalize_edition("fluoro"), "base", "and normalization falls back to base")
+end)
+
+suite.test("custom centers: add_card creates them and scoring lands", function()
+    local game = install_t3()
+    game.hand = Hand(game)   -- a headless game has no hand until a run starts one
+
+    -- A playing card carrying all three, created the mod way.
+    local view = SMODS.add_card { set = "Playing", rank = 9, suit = "Hearts",
+        enhancement = "copper", seal = "Lime", edition = "fluoro" }
+    T.assert_true(view ~= nil, "add_card accepts the registered centers")
+    local node = game.hand.card_nodes[#game.hand.card_nodes]
+    T.assert_eq(node.card_data.enhancement, "copper")
+    T.assert_eq(node.card_data.seal, "lime", "the seal stores its canonical value")
+    T.assert_eq(node.card_data.modifier.edition, "fluoro")
+
+    -- The enhancement's config lands when the card scores, and its calculate
+    -- return lands on top.
+    local ctx = { chips = 0, mult = 1 }
+    T.assert_true(node:emit_hand_event("card_played", ctx), "the enhancement fires")
+    T.assert_eq(ctx.chips, 25, "config chips")
+    T.assert_eq(ctx.mult, 4, "calculate's +3 Mult on the base 1")
+
+    -- Held in hand, the h_ config lands instead.
+    local held = { chips = 0, mult = 1 }
+    T.assert_true(node:emit_hand_event("held_in_hand", held))
+    T.assert_eq(held.chips, 10, "h_chips while held")
+
+    -- At round end the held dollars land, and the seal's played dollars did too.
+    local money = game.money
+    T.assert_true(node:emit_hand_event("on_round_end", { chips = 0, mult = 1 }))
+    T.assert_eq(game.money, money + 2, "h_dollars at round end")
+    local played = { chips = 0, mult = 1 }
+    node:emit_hand_event("card_played", played)
+    T.assert_eq(game.money, money + 4, "the seal's calculate paid its $2 as well")
+
+    -- The seal hears the discard moment.
+    _G.T3_DISCARDS = 0
+    node:emit_hand_event("on_discard", { discard_reason = "discard" })
+    T.assert_eq(_G.T3_DISCARDS, 1, "the seal's calculate saw the discard")
+    _G.T3_DISCARDS = nil
+
+    -- The seal's retriggers: config's one plus calculate's one.
+    local out = game:collect_retrigger_sources(false, { card_node = node }, {})
+    T.assert_eq(#out, 2, "config retrigger + calculate repetitions")
+
+    -- The edition on a playing card contributes its numbers.
+    local cb, mb, xb = game.hand:get_playing_card_edition_bonus(node.card_data)
+    T.assert_eq(cb, 40); T.assert_eq(mb, 6); T.assert_eq(xb, 2)
+    local c2, m2 = game.hand:apply_playing_card_edition(10, 2, node.card_data)
+    T.assert_eq(c2, 50); T.assert_eq(m2, 16)
+
+    -- The same edition on a Joker: flat numbers before its effect, x_mult after.
+    local joker = add(game, "j_joker")
+    joker.edition = "fluoro"
+    local jctx = { chips = 0, mult = 1 }
+    joker:apply_edition_on_hand_scored(jctx, false)
+    T.assert_eq(jctx.chips, 40, "edition chips before the Joker's effect")
+    T.assert_eq(jctx.mult, 7, "edition mult before")
+    joker:apply_edition_on_hand_scored(jctx, true)
+    T.assert_eq(jctx.mult, 14, "edition x_mult after")
+
+    -- An edition created through add_card keeps its name on the Joker.
+    local made = SMODS.add_card { set = "Joker", key = "j_joker", edition = "e_fluoro" }
+    T.assert_true(made ~= nil)
+    T.assert_eq(Joker.normalize_edition(made.edition), "fluoro")
+
+    -- A slots edition widens the Joker area while held.
+    local plain = add(game, "j_joker")
+    game:refresh_joker_capacity_from_negatives()
+    local base_cap = game.joker_capacity
+    plain.edition = "roomy"
+    game:refresh_joker_capacity_from_negatives()
+    T.assert_eq(game.joker_capacity, base_cap + 1, "joker_slots from the edition's config")
+    plain.edition = "base"
+    game:refresh_joker_capacity_from_negatives()
+    T.assert_eq(game.joker_capacity, base_cap, "and gives it back")
+    wipe_mods()
+end)
+
+suite.test("custom centers: polls reach them, and unloaded polls stay vanilla", function()
+    local game = install_t3(4471)
+    game.ante = 1
+    local enh_seen, seal_seen, ed_seen = {}, {}, {}
+    for _ = 1, 800 do
+        local d = game:_roll_playing_card_data(true, "sta", true)
+        if d.enhancement then enh_seen[d.enhancement] = true end
+        if d.seal then seal_seen[d.seal] = true end
+        if d.modifier then ed_seen[d.modifier.edition] = true end
+    end
+    T.assert_true(enh_seen.copper, "the enhancement polls in Standard-pack rolls")
+    T.assert_true(enh_seen.bonus and enh_seen.stone, "and the vanilla ones still do")
+    T.assert_true(seal_seen.lime, "the seal polls")
+    T.assert_true(seal_seen.red or seal_seen.blue or seal_seen.gold or seal_seen.purple,
+        "and vanilla seals still do")
+    T.assert_true(ed_seen.fluoro, "the edition polls in Standard-pack rolls")
+    T.assert_true(ed_seen.roomy == nil, "a weight-0 edition never polls")
+
+    local shop_seen = {}
+    for _ = 1, 3000 do shop_seen[game:roll_joker_offer_edition("sho")] = true end
+    T.assert_true(shop_seen.fluoro, "the edition polls in the shop ladder")
+    T.assert_true(shop_seen.base and shop_seen.foil, "and the ladder's vanilla answers stand")
+
+    local guar_seen = {}
+    for _ = 1, 1200 do guar_seen[game:poll_guaranteed_edition("t3g")] = true end
+    T.assert_true(guar_seen.fluoro, "the edition polls in guaranteed rolls")
+    T.assert_true(guar_seen.foil and guar_seen.holo and guar_seen.polychrome,
+        "and the guaranteed vanilla three stand")
+
+    -- The seeded invariance: the same seed, no mod, the exact same sequence --
+    -- before the mod ever loads, and again after it is rolled back.
+    local function sequence(g)
+        g.ante = 1
+        local parts = {}
+        for _ = 1, 150 do
+            local d = g:_roll_playing_card_data(true, "sta", true)
+            parts[#parts + 1] = table.concat({ tostring(d.enhancement), tostring(d.seal),
+                tostring(d.modifier and d.modifier.edition) }, "/")
+            parts[#parts + 1] = g:roll_joker_offer_edition("sho")
+            parts[#parts + 1] = g:poll_guaranteed_edition("t3inv")
+        end
+        return table.concat(parts, ",")
+    end
+    wipe_mods()
+    local plain1 = bootstrap.new_game(4472)
+    G = plain1
+    local before = sequence(plain1)
+    local loaded = install_t3(4472)
+    T.assert_true(sequence(loaded) ~= before, "registered centers change the polls")
+    wipe_mods()
+    local plain2 = bootstrap.new_game(4472)
+    G = plain2
+    T.assert_eq(sequence(plain2), before, "rollback restores the vanilla poll sequence exactly")
+end)
+
+suite.test("custom centers: mod_conv converts to a registered enhancement", function()
+    local game = install_t3()
+    game.STATE = game.STATES.SELECTING_HAND
+    local a = Card(0, 0, 1, 1, { rank = 7, suit = "Hearts" })
+    local selected = { a }
+    game.hand = {
+        ordered_selected_nodes = function() return selected end,
+        clear_selection = function() end, layout = function() end,
+        is_scoring_active = function() return false end,
+    }
+    game.consumables, game.consumable_nodes = {}, {}
+    T.assert_true(game:add_consumable("c_t3_brand"))
+    T.assert_true(game:consumable_use_enabled(1))
+    T.assert_true(game:use_consumable(1))
+    T.assert_eq(a.card_data.enhancement, "copper", "mod_conv = 'm_copper' converts to the registered enhancement")
+    wipe_mods()
+end)
+
+suite.test("custom centers: unknown names are errors naming them", function()
+    local game = install_t3()
+    local ok, err = pcall(SMODS.add_card, { set = "Playing", rank = 7, suit = "Hearts", enhancement = "bogus" })
+    T.assert_false(ok, "an unregistered enhancement is an error")
+    T.assert_true(tostring(err):find("bogus", 1, true) ~= nil
+        and tostring(err):find("enhancement", 1, true) ~= nil, tostring(err))
+    ok, err = pcall(SMODS.add_card, { set = "Playing", rank = 7, suit = "Hearts", seal = "bogus" })
+    T.assert_false(ok)
+    T.assert_true(tostring(err):find("bogus", 1, true) ~= nil
+        and tostring(err):find("seal", 1, true) ~= nil, tostring(err))
+    ok, err = pcall(SMODS.add_card, { set = "Playing", rank = 7, suit = "Hearts", edition = "bogus" })
+    T.assert_false(ok)
+    T.assert_true(tostring(err):find("bogus", 1, true) ~= nil
+        and tostring(err):find("edition", 1, true) ~= nil, tostring(err))
+    ok, err = pcall(SMODS.add_card, { set = "Joker", key = "j_joker", edition = "bogus" })
+    T.assert_false(ok, "an unregistered edition on a Joker is an error")
+    T.assert_true(tostring(err):find("bogus", 1, true) ~= nil, tostring(err))
+    wipe_mods()
+
+    -- A consumable converting to an unregistered enhancement fails its load.
+    wipe_mods()
+    write_mod("BadConv", { id = "BadConv", prefix = "bc", main_file = "main.lua", version = "1" }, [[
+SMODS.Consumable {
+    set = "tarot", key = "bad",
+    loc_txt = { name = "Bad" },
+    config = { mod_conv = "m_bogus" },
+    sprite = "bad.png",
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadConv.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadConv.error):find("m_bogus", 1, true) ~= nil,
+        "the load error names the conversion: " .. tostring(ModLoader.by_id.BadConv.error))
+    wipe_mods()
+
+    -- A key that reuses a vanilla center's name is refused at registration.
+    write_mod("Clash", { id = "Clash", prefix = "cl", main_file = "main.lua", version = "1" }, [[
+SMODS.Enhancement { key = "bonus", loc_txt = { name = "Bonus II" } }
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Clash.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.Clash.error):find("bonus", 1, true) ~= nil,
+        tostring(ModLoader.by_id.Clash.error))
+    T.assert_eq(SMODS.EnhancementByValue.bonus, nil, "the vanilla name was not claimed")
+    wipe_mods()
+end)
+
+suite.test("custom centers: an orphaned save value loads and scores nothing", function()
+    wipe_mods()
+    local game = bootstrap.new_game(4473)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 10
+    -- A card restored from a save whose mod is gone: the strings ride along in
+    -- card_data, and every read of them must degrade, never crash.
+    local node = hand_node(game, 7, "Hearts", { enhancement = "copper", seal = "lime" })
+    node.card_data.modifier = { edition = "fluoro" }
+    local ctx = { chips = 0, mult = 1 }
+    T.assert_false(node:emit_hand_event("card_played", ctx), "no enhancement fires")
+    T.assert_eq(ctx.chips, 0); T.assert_eq(ctx.mult, 1)
+    T.assert_false(node:emit_hand_event("held_in_hand", { chips = 0, mult = 1 }))
+    T.assert_false(node:emit_hand_event("on_round_end", { chips = 0, mult = 1 }))
+    T.assert_false(node:emit_hand_event("on_discard", { discard_reason = "discard" }))
+    T.assert_eq(game.money, 10, "no seal paid out")
+    local out = game:collect_retrigger_sources(false, { card_node = node }, {})
+    T.assert_eq(#out, 0, "no seal retriggers")
+    local cb, mb, xb = game.hand:get_playing_card_edition_bonus(node.card_data)
+    T.assert_eq(cb, 0); T.assert_eq(mb, 0); T.assert_eq(xb, 1)
+    T.assert_eq(Joker.normalize_edition("fluoro"), "base", "a Joker's orphaned edition normalizes away")
+end)
+
 return suite

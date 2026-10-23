@@ -2295,6 +2295,11 @@ function Hand:get_playing_card_edition_bonus(card_data)
     if edition == "foil" then return 50, 0, 1 end
     if edition == "holo" then return 0, 10, 1 end
     if edition == "polychrome" then return 0, 0, 1.5 end
+    -- An edition a mod registered (SMODS.Edition) contributes its config's
+    -- numbers; anything else unknown still scores nothing, as before.
+    if type(edition) == "string" and SMODS and SMODS.playing_card_edition_bonus then
+        return SMODS.playing_card_edition_bonus(edition)
+    end
     return 0, 0, 1
 end
 

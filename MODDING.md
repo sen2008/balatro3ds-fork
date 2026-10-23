@@ -435,6 +435,89 @@ cards are still discovered, and their tooltips work wherever they appear) -- and
 nothing, because levelling is the Planet branch of the use flow, not a property of
 the set. Level from `use` if a card must.
 
+## Custom enhancements, seals and editions
+
+The centers a playing card itself carries can be registered too. A center's
+**value** -- the registration key, lowercased (`"copper"` for key `"Copper"`) -- is
+the string cards carry, the way a card carries `"steel"` or `"gold"`. Values are
+global: no two mods may register the same one, and none may reuse a vanilla name
+(`bonus`, `mult`, `wild`, `glass`, `steel`, `stone`, `gold`, `lucky` for
+enhancements; `gold`, `red`, `blue`, `purple` for seals; `foil`, `holo`,
+`polychrome`, `negative`, `base` for editions). Registering one that clashes is a
+load error naming it.
+
+**`SMODS.Enhancement { key, loc_txt, config, calculate, weight }`**
+
+```lua
+SMODS.Enhancement {
+    key = "copper",
+    loc_txt = { name = "Copper", text = { "{C:chips}+#1#{} Chips" } },
+    config = { chips = 25, h_chips = 10, h_dollars = 2 },
+    loc_vars = function(self, info_queue, card) return { vars = { self.config.chips } } end,
+    calculate = function(self, card, context)
+        if context.card_played then return { mult = 3 } end
+    end,
+}
+```
+
+`config` is applied by the engine itself, mirroring the vanilla centers:
+`chips` / `mult` / `x_mult` when the card scores (Bonus / Mult / Glass),
+`h_chips` / `h_mult` / `h_x_mult` while it is held in hand (Steel), and
+`h_dollars` at round end while held (Gold). `calculate(self, card, context)`
+fires at the same three moments -- `context.card_played`, `context.held_in_hand`,
+`context.on_round_end`, with `context.other_card` the card -- and its return's
+`chips` / `mult` / `x_mult` land on the running totals and `dollars` in the
+player's money. A debuffed card's enhancement does nothing, like a vanilla one.
+
+An enhancement value is accepted everywhere a vanilla one is:
+`SMODS.add_card { set = "Playing", enhancement = "copper" }` (or `"m_copper"`,
+Steamodded-style, or `"m_<prefix>_copper"`), and a consumable's
+`mod_conv = "m_copper"` converts selected cards to it. In the random-enhancement
+polls -- Grim / Familiar / Incantation and enhanced Standard-pack or shop cards --
+it takes `weight` slots among the vanilla names (default 1, the vanilla-like
+share; 0 keeps it out of the polls).
+
+**`SMODS.Seal { key, loc_txt, config, calculate, weight }`** -- a seal's behavior
+is its `calculate`, fired at the moments the engine raises for cards:
+`context.card_played` (the Gold Seal's moment), `context.held_in_hand`,
+`context.on_round_end` (the Blue Seal's) and `context.on_discard` (the Purple
+Seal's, with `context.discard_reason`). Returns work as for enhancements.
+Retriggers -- the Red Seal's trick -- come from `config.retrigger` /
+`config.retrigger_held` counts, or from `calculate` returning `repetitions` when
+asked with `context.repetition`. In the Standard-pack seal poll a registered seal
+takes `weight` slots among the four vanilla seals (default 1; 0 keeps it out).
+`SMODS.add_card { set = "Playing", seal = "lime" }` applies one directly.
+
+**`SMODS.Edition { key, loc_txt, config, weight }`** -- `config` is what the
+edition contributes: `chips` / `mult` / `x_mult`. On a playing card all three land
+in its scoring step; on a Joker the flat `chips` / `mult` land before its effect
+and `x_mult` after it, the slots Foil / Holo and Polychrome sit in.
+`config.joker_slots` grants that many extra Joker slots while a Joker carrying
+the edition is held -- Negative's trick, as data. `weight` is in the shop
+ladder's units, percent of the roll (vanilla: Foil 4, Holo 2, Polychrome 0.6;
+default 2); Standard packs roll at double rates, and in guaranteed-edition rolls
+(Aura, Wheel of Fortune, Illusion) a registered edition shares the Foil band by
+weight, Foil itself counting 50. Weight 0 keeps an edition out of every poll
+while leaving it creatable: `SMODS.add_card { set = "Joker", key = "...",
+edition = "fluoro" }` or `edition = "e_fluoro"`.
+
+An unregistered center name in `SMODS.add_card` or a consumable's `mod_conv` is an
+error naming it -- unlike an unknown rank or suit, which only refuses the card.
+
+Three honest limits, all about art:
+
+- **No art for a custom center.** An enhanced card draws the plain card face, a
+  sealed card draws without a seal stamp, and an edition has no shader pass and
+  no reveal sting -- its cards draw plain. (The tooltip does show the center's
+  name and its `loc_txt` lines.)
+- **No price change.** A Joker with a custom edition costs and sells for its
+  base price; the vanilla editions' price deltas are theirs alone.
+- **Saves degrade gracefully, not magically.** A card's center is saved as its
+  value string, like a vanilla one. A run continued without the mod is refused by
+  the run's mod check as usual; but a value that reaches the engine unregistered
+  by any other path simply does nothing -- the card scores as a plain card --
+  rather than crashing the load.
+
 ## Card faces
 
 ```lua
@@ -464,7 +547,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks, editions, seals, enhancements, blinds and booster packs can't be added. (Rarities, suits, poker hands and consumable types can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types).) Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Decks, blinds and booster packs can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals and editions can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types) and [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.

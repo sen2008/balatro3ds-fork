@@ -7192,6 +7192,11 @@ function Game:_apply_consumable_effect(c)
         local ord = ordered_nodes()
         local function random_enhancement()
             local enh = { "bonus", "mult", "wild", "glass", "steel", "gold", "lucky" }
+            -- Registered enhancements (SMODS.Enhancement) join the poll at
+            -- their weight; with none, the helper returns this list itself.
+            if SMODS and SMODS.enhancement_poll_list then
+                enh = SMODS.enhancement_poll_list(enh)
+            end
             return enh[self:random("spe_card", 1, #enh)]
         end
         local function add_generated_card(rank, suit, enhancement)
@@ -10539,12 +10544,16 @@ function Game:joker_base_capacity()
     return base
 end
 
---- `joker_base_capacity` + one slot per owned Joker with Negative edition.
+--- `joker_base_capacity` + one slot per owned Joker with Negative edition
+--- (plus any `joker_slots` a registered edition's config grants).
 function Game:refresh_joker_capacity_from_negatives()
     local bonus = 0
     for _, j in ipairs(self.jokers or {}) do
         if j and Joker.normalize_edition(j.edition) == "negative" then
             bonus = bonus + 1
+        end
+        if j and SMODS and SMODS.edition_extra_slots then
+            bonus = bonus + SMODS.edition_extra_slots(j)
         end
     end
     self.joker_capacity = self:joker_base_capacity() + bonus
@@ -11187,6 +11196,12 @@ function Game:collect_retrigger_sources(held, retrigger_ctx, out)
     local card = retrigger_ctx.card_node or retrigger_ctx.retrigger_card
     if card and card.seal == "red" then
         out[#out + 1] = false
+    end
+    -- A registered seal's retriggers (SMODS.Seal) sit beside the Red Seal's:
+    -- one `false` source per extra pass, the same marker it uses.
+    if card and SMODS and SMODS.seal_retrigger_count then
+        local extra = SMODS.seal_retrigger_count(card, held)
+        for _ = 1, extra do out[#out + 1] = false end
     end
 
     -- Slot order already drops the joker Crimson Heart disabled this round.
@@ -12059,7 +12074,8 @@ function Game:_roll_shop_playing_card_offer()
     if illusion and self:random("illusion") > 0.8 then
         local edition_poll = self:random("illusion")
         local edition = edition_poll > 0.85 and "polychrome"
-            or edition_poll > 0.5 and "holo" or "foil"
+            or edition_poll > 0.5 and "holo"
+            or (SMODS and SMODS.guaranteed_edition_pick and SMODS.guaranteed_edition_pick(edition_poll)) or "foil"
         data.modifier = { edition = edition }
     end
     local rank = data.rank
@@ -12126,6 +12142,11 @@ function Game:_roll_playing_card_data(with_modifiers, append, enhanced)
 
     if with_modifiers and enhanced then
         local enhancements = { "bonus", "mult", "wild", "glass", "steel", "stone", "gold", "lucky" }
+        -- Registered enhancements (SMODS.Enhancement) join the poll at their
+        -- weight; with none, the helper returns this list itself.
+        if SMODS and SMODS.enhancement_poll_list then
+            enhancements = SMODS.enhancement_poll_list(enhancements)
+        end
         data.enhancement = enhancements[self:random("Enhanced" .. append .. ante, 1, #enhancements)]
     end
     if with_modifiers and append == "sta" then
@@ -12135,12 +12156,22 @@ function Game:_roll_playing_card_data(with_modifiers, append, enhanced)
         local edition
         if edition_poll > 1 - rates.polychrome * 2 / 100 then edition = "polychrome"
         elseif edition_poll > 1 - rates.holo * 2 / 100 then edition = "holo"
-        elseif edition_poll > 1 - rates.foil * 2 / 100 then edition = "foil" end
+        elseif edition_poll > 1 - rates.foil * 2 / 100 then edition = "foil"
+        elseif SMODS and SMODS.shop_edition_pick then
+            -- Registered editions (SMODS.Edition) take their slice of the
+            -- no-edition band below Foil, at the same doubled rate.
+            edition = SMODS.shop_edition_pick(edition_poll, 1 - rates.foil * 2 / 100, 2)
+        end
         if edition then data.modifier = { edition = edition } end
 
         if self:random("stdseal" .. ante) > 0.8 then
             local seal_poll = self:random("stdsealtype" .. ante)
-            if seal_poll > 0.75 then data.seal = "red"
+            -- Registered seals (SMODS.Seal) share the type poll by list
+            -- position; with none polling, the threshold chain stands.
+            local seal_list = SMODS and SMODS.seal_poll_list and SMODS.seal_poll_list()
+            if seal_list then
+                data.seal = seal_list[math.min(#seal_list, math.floor(seal_poll * #seal_list) + 1)]
+            elseif seal_poll > 0.75 then data.seal = "red"
             elseif seal_poll > 0.5 then data.seal = "blue"
             elseif seal_poll > 0.25 then data.seal = "gold"
             else data.seal = "purple" end
@@ -12552,6 +12583,14 @@ function Game:roll_joker_offer_edition(append)
     if r > 1 - (tonumber(rates.polychrome) or 0) / 100 then return "polychrome" end
     if r > 1 - (tonumber(rates.holo) or 0) / 100 then return "holo" end
     if r > 1 - (tonumber(rates.foil) or 0) / 100 then return "foil" end
+    -- Registered editions (SMODS.Edition) take their slice of the base band
+    -- below Foil at their weight; the floor is Foil's own threshold, the top
+    -- of what is left once the ladder above has had its checks. Nil when none
+    -- are registered, as before.
+    if SMODS and SMODS.shop_edition_pick then
+        local picked = SMODS.shop_edition_pick(r, 1 - (tonumber(rates.foil) or 0) / 100, 1)
+        if picked then return picked end
+    end
     return "base"
 end
 
@@ -15626,6 +15665,12 @@ function Game:poll_guaranteed_edition(stream)
     local roll = self:random(stream)
     if roll > 1 - 0.006 * 25 then return "polychrome" end
     if roll > 1 - 0.02 * 25 then return "holo" end
+    -- Registered editions (SMODS.Edition) share the Foil band below by
+    -- weight; the helper answers nil when none are registered.
+    if SMODS and SMODS.guaranteed_edition_pick then
+        local picked = SMODS.guaranteed_edition_pick(roll)
+        if picked then return picked end
+    end
     return "foil"
 end
 

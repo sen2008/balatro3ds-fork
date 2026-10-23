@@ -819,6 +819,19 @@ local function build_tooltip_plan(font, rank, suit, enh, edition, seal,
     local enh_name_colour = (G.C.SECONDARY_SET and G.C.SECONDARY_SET.Enhanced) or G.C.PURPLE
     local seal_colours = { gold = G.C.GOLD, red = G.C.RED, blue = G.C.BLUE, purple = G.C.PURPLE }
 
+    --- A badge section's name and lines: the vanilla tables first, then a
+    --- registered center's own name and loc text (SMODS.Enhancement / Seal /
+    --- Edition), so a mod center shows on the tooltip instead of vanishing.
+    local function center_section(kind, value, vanilla_names, vanilla_lines)
+        if not value then return nil, {} end
+        if vanilla_names[value] then
+            return I18N.content_name(kind, value, vanilla_names[value]),
+                translated_lines(kind, value, vanilla_lines(value))
+        end
+        if SMODS and SMODS.center_tooltip then return SMODS.center_tooltip(kind, value) end
+        return nil, {}
+    end
+
     local function bonus_line(n)
         local signed = string.format("%+d", n)
         return I18N.text("card.bonus_chips", { value = signed }, "Bonus " .. signed .. " chips")
@@ -842,15 +855,15 @@ local function build_tooltip_plan(font, rank, suit, enh, edition, seal,
             local signed = string.format("%+d", mult_bonus)
             table.insert(lines, I18N.text("tooltip.mult", { value = signed }, signed .. " mult"))
         end
-        add_named_section(enh and I18N.content_name("enhancement", enh, ENHANCEMENT_NAMES[enh]),
-            enh_name_colour, translated_lines("enhancement", enh, enhancement_tooltip_lines(enh)))
+        local enh_name, enh_lines = center_section("enhancement", enh, ENHANCEMENT_NAMES, enhancement_tooltip_lines)
+        add_named_section(enh_name, enh_name_colour, enh_lines)
     end
     -- Badge order matches the reference's info queue: enhancement, then edition, then seal
     -- (`common_events.lua:2722-2736`).
-    add_named_section(EDITION_NAMES[edition] and I18N.content_name("edition", edition, EDITION_NAMES[edition]),
-        G.C.DARK_EDITION, translated_lines("edition", edition, edition_tooltip_lines(edition)))
-    add_named_section(SEAL_NAMES[seal] and I18N.content_name("seal", seal, SEAL_NAMES[seal]),
-        seal_colours[seal], translated_lines("seal", seal, seal_tooltip_lines(seal)))
+    local ed_name, ed_lines = center_section("edition", edition, EDITION_NAMES, edition_tooltip_lines)
+    add_named_section(ed_name, G.C.DARK_EDITION, ed_lines)
+    local seal_name, seal_lines = center_section("seal", seal, SEAL_NAMES, seal_tooltip_lines)
+    add_named_section(seal_name, seal_colours[seal] or G.C.PURPLE, seal_lines)
 
     local runs, body_max_w = {}, 0
     for i = 1, #lines do
@@ -1320,6 +1333,12 @@ function Card:emit_hand_event(event_name, ctx)
             self:do_seal(ctx)
             trigger = true
         end
+    end
+    -- A registered enhancement or seal (SMODS.Enhancement / SMODS.Seal): its
+    -- names never overlap the vanilla branches above, so this is a no-op for
+    -- every vanilla card and for every card when no mod registered a center.
+    if SMODS and SMODS.card_center_event then
+        if SMODS.card_center_event(self, ev, ctx) then trigger = true end
     end
     if trigger then
         self:juice_up()

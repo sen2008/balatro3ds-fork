@@ -1212,6 +1212,516 @@ end
 SMODS.sync_highlighted = sync_highlighted
 
 --------------------------------------------------------------------------------
+-- Enhancements, seals and editions (Tier 3a)
+--------------------------------------------------------------------------------
+
+--- The third family of registries: the centers a playing card itself carries.
+--- Vanilla's are hardcoded in the engine -- enhancement effects in
+--- `Card:do_enhancement` behind per-name branches in `Card:emit_hand_event`,
+--- seals in `Card:do_seal` plus the Red Seal's line in
+--- `Game:collect_retrigger_sources`, edition bonuses in
+--- `Hand:get_playing_card_edition_bonus` and `Joker:apply_edition_on_hand_scored`,
+--- and every random poll (spectral creation, Standard packs, the shop's edition
+--- ladder, guaranteed-edition rolls) spelling its own list of names. The
+--- registries below are what those places consult once their vanilla names miss,
+--- so with nothing registered every one of them takes exactly the path it took
+--- before -- same lists, same draws, same numbers.
+---
+--- A center's **value** is the string cards carry (`card_data.enhancement`,
+--- `card_data.seal`, a Joker's `edition`, a playing card's `modifier.edition`):
+--- the registration key lowercased, because the engine compares those strings
+--- against lowercase literals everywhere (`"steel"`, `"blue"`, `"foil"`). Values
+--- are global, like consumable kinds: no two mods may register the same one, and
+--- none may reuse a vanilla name. A save stores the value as the plain string,
+--- exactly like a vanilla one; a save loaded without the mod keeps the string and
+--- every engine read of it falls back to no effect (unknown enhancements score
+--- nothing, unknown editions normalize away on Jokers and score nothing on
+--- cards), so an orphaned center never crashes a load.
+
+SMODS.Enhancements = SMODS.Enhancements or {}
+SMODS.EnhancementByValue = SMODS.EnhancementByValue or {}
+SMODS.Seals = SMODS.Seals or {}
+SMODS.SealByValue = SMODS.SealByValue or {}
+SMODS.Editions = SMODS.Editions or {}
+SMODS.EditionByValue = SMODS.EditionByValue or {}
+local next_center_order = 1
+
+local VANILLA_ENHANCEMENTS = { bonus = true, mult = true, wild = true, glass = true,
+    steel = true, stone = true, gold = true, lucky = true }
+local VANILLA_SEALS = { gold = true, red = true, blue = true, purple = true }
+local VANILLA_EDITIONS = { foil = true, holo = true, polychrome = true, negative = true, base = true }
+
+--- Steamodded's enhancement keys onto the port's.
+local ENHANCEMENT = {
+    m_bonus = "bonus", m_mult = "mult", m_wild = "wild", m_glass = "glass",
+    m_steel = "steel", m_stone = "stone", m_gold = "gold", m_lucky = "lucky",
+}
+
+--- A center's display name in the string tables, in the `content_name` shape
+--- (`enhancement.copper.name`), for English and every language its `loc_txt`
+--- carries. Recorded on the mod, so rollback takes the strings away again.
+local function register_center_strings(mod, kind, value, loc)
+    if not (I18N and I18N.add_strings) or type(loc) ~= "table" then return end
+    local function add(code, name)
+        if type(name) ~= "string" then return end
+        local key = kind .. "." .. value .. ".name"
+        I18N.add_strings(code, { [key] = name })
+        mod.registered.strings[#mod.registered.strings + 1] = { language = code, keys = { key } }
+    end
+    local english = loc_for(loc, "en")
+    if english then add("en-us", english.name) end
+    for _, code in ipairs(other_languages(loc)) do
+        local entry = loc[code]
+        if type(entry) == "table" then add(code, entry.name) end
+    end
+end
+
+--- Shared registrar shape for the three centers: validate the key, claim its
+--- value globally, and file the entry in both registries.
+local function register_center(what, t, vanilla, by_id, by_value)
+    local mod = need_mod("SMODS." .. what)
+    check(type(t) == "table", "SMODS." .. what .. " expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
+        "SMODS." .. what .. " needs a 'key' of letters, digits and underscores")
+    check(t.calculate == nil or type(t.calculate) == "function",
+        what .. " '" .. t.key .. "': calculate must be a function")
+    check(t.loc_vars == nil or type(t.loc_vars) == "function",
+        what .. " '" .. t.key .. "': loc_vars must be a function")
+    local value = t.key:lower()
+    check(vanilla[value] == nil, what .. " '" .. t.key .. "' is a vanilla " .. what:lower())
+    local clash = by_value[value]
+    check(clash == nil, what .. " '" .. t.key .. "': the " .. what:lower() .. " '" .. value
+        .. "' is already registered by " .. (clash and clash.mod.id or "?"))
+    local id = mod.prefix .. "_" .. t.key
+    check(by_id[id] == nil, what .. " '" .. t.key .. "' is defined twice (id " .. id .. ")")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, value = value, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        config = deep_copy(type(t.config) == "table" and t.config or {}),
+        calculate = t.calculate, loc_vars = t.loc_vars, loc_txt = t.loc_txt,
+        order = next_center_order,
+    }
+    next_center_order = next_center_order + 1
+    by_id[id] = entry
+    by_value[value] = entry
+    local bucket = what:lower() .. "s"
+    mod.registered[bucket] = mod.registered[bucket] or {}
+    mod.registered[bucket][#mod.registered[bucket] + 1] = id
+    register_center_strings(mod, what:lower(), value, t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    t.value = value
+    return entry
+end
+
+--- `SMODS.Enhancement { key, loc_txt, config, calculate, weight }`: an
+--- enhancement of this mod's own. Its value (the key, lowercased) is a valid
+--- `enhancement` everywhere a vanilla one is: `SMODS.add_card`, a consumable's
+--- `mod_conv` (by value, or Steamodded-style as `m_<key>` / `m_<full id>`), and
+--- the random-enhancement polls (spectral creation and enhanced Standard-pack /
+--- shop cards), where it takes `weight` slots among the vanilla names
+--- (default 1, the vanilla-like share; 0 keeps it out of the polls).
+---
+--- `config` is data the engine applies itself, mirroring the vanilla centers:
+--- `chips` / `mult` / `x_mult` when the card scores (Bonus / Mult / Glass),
+--- `h_chips` / `h_mult` / `h_x_mult` while it is held in hand (Steel), and
+--- `h_dollars` at round end while held (Gold). (`bonus` / `h_bonus` are read
+--- as spellings of `chips` / `h_chips`.) Anything richer is
+--- `calculate(self, card, context)`, fired at the same three moments
+--- (`context.card_played` / `context.held_in_hand` / `context.on_round_end`,
+--- with `context.other_card` the card): its return's `chips` / `mult` /
+--- `x_mult` land on the running totals and `dollars` in the player's money.
+--- There is no art for a mod enhancement: its cards draw the plain card face,
+--- the same fallback as a mod suit's Hearts row.
+function SMODS.Enhancement(t)
+    local entry = register_center("Enhancement", t, VANILLA_ENHANCEMENTS,
+        SMODS.Enhancements, SMODS.EnhancementByValue)
+    local weight = t.weight == nil and 1 or math.floor(tonumber(t.weight) or -1)
+    check(weight >= 0, "Enhancement '" .. t.original_key .. "': weight must be a whole number >= 0")
+    entry.weight = weight
+    return t
+end
+
+--- `SMODS.Seal { key, loc_txt, config, calculate, weight }`: a seal of this
+--- mod's own, valid everywhere a vanilla one is (`SMODS.add_card`, creation)
+--- and in the Standard-pack seal poll, where it takes `weight` slots among
+--- the four vanilla seals (default 1; 0 keeps it out).
+---
+--- A seal's behavior is its `calculate(self, card, context)`, fired at the
+--- moments the engine raises for cards -- `context.card_played` (Gold Seal's
+--- moment), `context.held_in_hand`, `context.on_round_end` (Blue Seal's),
+--- `context.on_discard` (Purple Seal's, with `context.discard_reason`) -- its
+--- return's `dollars` land in the player's money and `chips` / `mult` /
+--- `x_mult` on the running totals, as for enhancements. Retriggers (Red
+--- Seal's trick) come from `config.retrigger` / `config.retrigger_held`
+--- counts, or from `calculate` returning `repetitions` when asked with
+--- `context.repetition`. A mod seal has no overlay art: its cards draw without
+--- a seal stamp, like a card whose seal the atlas has no cell for.
+function SMODS.Seal(t)
+    local entry = register_center("Seal", t, VANILLA_SEALS, SMODS.Seals, SMODS.SealByValue)
+    local weight = t.weight == nil and 1 or math.floor(tonumber(t.weight) or -1)
+    check(weight >= 0, "Seal '" .. t.original_key .. "': weight must be a whole number >= 0")
+    entry.weight = weight
+    return t
+end
+
+--- `SMODS.Edition { key, loc_txt, config, weight }`: an edition of this mod's
+--- own, valid for Jokers and playing cards everywhere a vanilla one is
+--- (creation, `SMODS.add_card { edition = ... }`) and in the random edition
+--- polls at its `weight` -- in the shop ladder's units, percent of the roll
+--- (vanilla: Foil 4, Holo 2, Polychrome 0.6 at base rates; default 2). In
+--- guaranteed-edition rolls (Aura, Wheel of Fortune) it shares the Foil band
+--- by weight, Foil itself counting 50.
+---
+--- `config` is what the edition contributes, mirroring the vanilla three:
+--- `chips` / `mult` / `x_mult`. On a playing card all three land in its
+--- scoring step; on a Joker the flat `chips` / `mult` land before its effect
+--- and `x_mult` after it, the slots Foil / Holo and Polychrome sit in.
+--- `config.joker_slots` grants that many extra Joker slots while a Joker
+--- carrying the edition is held -- Negative's trick, as data. A mod edition
+--- has no shader pass and no reveal sting: its cards draw plain.
+function SMODS.Edition(t)
+    local entry = register_center("Edition", t, VANILLA_EDITIONS,
+        SMODS.Editions, SMODS.EditionByValue)
+    local weight = t.weight == nil and 2 or tonumber(t.weight)
+    check(weight ~= nil and weight >= 0, "Edition '" .. t.original_key .. "': weight must be a number >= 0")
+    entry.weight = weight
+    return t
+end
+
+--- What an enhancement name means, as the canonical value a card carries: a
+--- vanilla port name, a Steamodded `m_` key (vanilla or a mod's own, by bare
+--- key or full id), or a registered value in any case. Nil for anything else.
+local function enhancement_name(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    if ENHANCEMENT[name] then return ENHANCEMENT[name] end
+    if VANILLA_ENHANCEMENTS[name] then return name end
+    local lower = name:lower()
+    if SMODS.EnhancementByValue[lower] then return lower end
+    if lower:sub(1, 2) == "m_" then
+        local rest = lower:sub(3)
+        if SMODS.EnhancementByValue[rest] then return rest end
+        local entry = SMODS.Enhancements[rest]
+        if entry then return entry.value end
+    end
+    return nil
+end
+SMODS.enhancement_name = enhancement_name
+
+--- What a seal name means, as its canonical value: a vanilla seal or a
+--- registered one, in any case. Nil for anything else.
+local function seal_name(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local lower = name:lower()
+    if VANILLA_SEALS[lower] or SMODS.SealByValue[lower] then return lower end
+    return nil
+end
+SMODS.seal_name = seal_name
+
+--- What an edition name means, as its canonical value: a vanilla edition
+--- (any of its spellings), or a registered one by key or `e_<key>`. Nil for
+--- anything else.
+local function edition_value(name)
+    if type(name) == "table" then name = name.key or name.name end
+    if type(name) ~= "string" or name == "" then return nil end
+    local lower = name:lower()
+    if VANILLA_EDITIONS[lower] then return lower end
+    if lower == "holographic" or lower == "e_holo" then return "holo" end
+    if lower:sub(1, 2) == "e_" then
+        local rest = lower:sub(3)
+        if VANILLA_EDITIONS[rest] then return rest end
+        if SMODS.EditionByValue[rest] then return rest end
+    end
+    if SMODS.EditionByValue[lower] then return lower end
+    return nil
+end
+SMODS.edition_value = edition_value
+
+--- Apply one center `calculate` return to a card event: `chips` / `mult` /
+--- `x_mult` onto the running totals the event carries, `dollars` into the
+--- player's money. Returns whether anything landed, so the caller can count
+--- the card as triggered (its juice, its retrigger eligibility).
+local function apply_center_return(ctx, ret)
+    if type(ret) ~= "table" then return false end
+    local fired = ret.message ~= nil
+    local chips = tonumber(ret.chips) or tonumber(ret.chip_mod) or 0
+    local mult = tonumber(ret.mult) or tonumber(ret.mult_mod) or 0
+    local xmult = tonumber(ret.x_mult) or tonumber(ret.xmult) or tonumber(ret.Xmult) or 1
+    local dollars = tonumber(ret.dollars) or tonumber(ret.p_dollars) or 0
+    if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
+    if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
+    if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+    if dollars ~= 0 and G then
+        G.money = (tonumber(G.money) or 0) + dollars
+        fired = true
+    end
+    return fired
+end
+
+--- The moments a card center fires at, as the context a `calculate` sees:
+--- the event's own flag, the card as `other_card`, the raw event as `port`.
+local function center_context(node, event_name, ctx)
+    return {
+        individual = true,
+        event = event_name,
+        [event_name] = true,
+        cardarea = event_name == "card_played" and ((G and G.play) or SMODS.PLAY) or (G and G.hand),
+        other_card = refresh_card_view(node),
+        discard_reason = ctx.discard_reason,
+        port = ctx,
+    }
+end
+
+--- A registered enhancement's and seal's turn at one of the card moments
+--- `Card:emit_hand_event` dispatches (`card.lua` calls this after its vanilla
+--- branches; a card carries at most one of each, and the vanilla and custom
+--- names never overlap, so the two halves cannot both fire). The
+--- enhancement's `config` numbers land first, then either center's
+--- `calculate` return. Returns whether anything fired.
+function SMODS.card_center_event(node, event_name, ctx)
+    if type(node) ~= "table" or type(ctx) ~= "table" then return false end
+    local data = node.card_data or {}
+    local fired = false
+
+    local enh = node.enhancement or data.enhancement
+    local eentry = enh and SMODS.EnhancementByValue[enh]
+    if eentry then
+        local cfg = eentry.config
+        if event_name == "card_played" then
+            local chips = tonumber(cfg.chips) or tonumber(cfg.bonus) or 0
+            local mult = tonumber(cfg.mult) or 0
+            local xmult = tonumber(cfg.x_mult) or 1
+            if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
+            if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
+            if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+        elseif event_name == "held_in_hand" then
+            local chips = tonumber(cfg.h_chips) or tonumber(cfg.h_bonus) or 0
+            local mult = tonumber(cfg.h_mult) or 0
+            local xmult = tonumber(cfg.h_x_mult) or 1
+            if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
+            if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
+            if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+        elseif event_name == "on_round_end" then
+            local dollars = tonumber(cfg.h_dollars) or tonumber(cfg.dollars) or 0
+            if dollars ~= 0 and G then
+                G.money = (tonumber(G.money) or 0) + dollars
+                fired = true
+            end
+        end
+        if type(eentry.calculate) == "function" and event_name ~= "on_discard" then
+            local ret = SMODS.call(eentry.mod, eentry.calculate, eentry,
+                refresh_card_view(node), center_context(node, event_name, ctx))
+            if apply_center_return(ctx, ret) then fired = true end
+        end
+    end
+
+    local seal = node.seal or data.seal
+    local sentry = seal and SMODS.SealByValue[seal]
+    if sentry and type(sentry.calculate) == "function" then
+        local ret = SMODS.call(sentry.mod, sentry.calculate, sentry,
+            refresh_card_view(node), center_context(node, event_name, ctx))
+        if apply_center_return(ctx, ret) then fired = true end
+    end
+    return fired
+end
+
+--- How many retrigger passes a card's registered seal grants, from
+--- `config.retrigger` / `config.retrigger_held` and from `calculate` asked
+--- with `context.repetition`. Called from `Game:collect_retrigger_sources`,
+--- where the Red Seal's own pass comes from.
+function SMODS.seal_retrigger_count(node, held)
+    if type(node) ~= "table" then return 0 end
+    local data = node.card_data or {}
+    local seal = node.seal or data.seal
+    local entry = seal and SMODS.SealByValue[seal]
+    if not entry then return 0 end
+    local n = tonumber(entry.config[held and "retrigger_held" or "retrigger"]) or 0
+    if type(entry.calculate) == "function" then
+        local c = {
+            repetition = true,
+            held = held == true,
+            cardarea = held and (G and G.hand) or ((G and G.play) or SMODS.PLAY),
+            other_card = refresh_card_view(node),
+            port = {},
+        }
+        local ret = SMODS.call(entry.mod, entry.calculate, entry, refresh_card_view(node), c)
+        if type(ret) == "table" then
+            n = n + math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+        end
+    end
+    return math.max(0, math.floor(n))
+end
+
+--- A registered edition's scoring numbers for a playing card
+--- (`Hand:get_playing_card_edition_bonus` asks here once the vanilla three
+--- miss): chips, mult, x_mult, exactly the vanilla return's shape.
+function SMODS.playing_card_edition_bonus(edition)
+    local entry = edition and SMODS.EditionByValue[edition]
+    if not entry then return 0, 0, 1 end
+    local cfg = entry.config
+    return tonumber(cfg.chips) or tonumber(cfg.bonus) or 0,
+        tonumber(cfg.mult) or 0, tonumber(cfg.x_mult) or 1
+end
+
+--- A registered edition's turn in a Joker's scoring, in the slots the vanilla
+--- editions sit in (`Joker:apply_edition_on_hand_scored` calls here for a
+--- non-vanilla edition): flat `chips` / `mult` before the Joker's effect,
+--- `x_mult` after it.
+function SMODS.apply_custom_edition_on_hand_scored(joker, ctx, after_effect)
+    if type(ctx) ~= "table" then return end
+    local ed = Joker and Joker.normalize_edition and Joker.normalize_edition(joker.edition)
+    local entry = ed and SMODS.EditionByValue[ed]
+    if not entry then return end
+    local cfg = entry.config
+    local applied = false
+    if after_effect then
+        local xmult = tonumber(cfg.x_mult) or 1
+        if xmult ~= 1 then
+            ctx.mult = (tonumber(ctx.mult) or 0) * xmult
+            applied = true
+        end
+    else
+        local chips = tonumber(cfg.chips) or tonumber(cfg.bonus) or 0
+        local mult = tonumber(cfg.mult) or 0
+        if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips applied = true end
+        if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 0) + mult applied = true end
+    end
+    if applied then
+        if Sfx and Sfx.play then Sfx.play("foil2", 1, 0.3) end
+        if joker.juice_up then joker:juice_up(0.6, 0.1) end
+    end
+end
+
+--- Extra Joker slots a held Joker's registered edition grants
+--- (`config.joker_slots`, Negative's trick as data). Counted by
+--- `Game:refresh_joker_capacity_from_negatives` beside the Negatives.
+function SMODS.edition_extra_slots(joker)
+    local ed = Joker and Joker.normalize_edition and Joker.normalize_edition(joker and joker.edition)
+    local entry = ed and SMODS.EditionByValue[ed]
+    if not entry then return 0 end
+    return math.max(0, math.floor(tonumber(entry.config.joker_slots) or 0))
+end
+
+local function sorted_centers(by_value)
+    local out = {}
+    for _, entry in pairs(by_value) do out[#out + 1] = entry end
+    table.sort(out, function(a, b) return a.order < b.order end)
+    return out
+end
+
+--- A random-enhancement poll's list, extended: with no custom enhancement
+--- polling, the caller's own list comes back untouched (same table, same
+--- length, same draw). Otherwise each custom takes its `weight` in slots
+--- after the vanilla names, in registration order.
+function SMODS.enhancement_poll_list(base)
+    local customs = {}
+    for _, entry in ipairs(sorted_centers(SMODS.EnhancementByValue)) do
+        if entry.weight > 0 then customs[#customs + 1] = entry end
+    end
+    if #customs == 0 then return base end
+    local out = {}
+    for _, v in ipairs(base) do out[#out + 1] = v end
+    for _, entry in ipairs(customs) do
+        for _ = 1, entry.weight do out[#out + 1] = entry.value end
+    end
+    return out
+end
+
+--- The Standard-pack seal poll's type list when custom seals poll: the
+--- vanilla four in the order the vanilla thresholds lay them (purple, gold,
+--- blue, red, bottom band first) with each custom's `weight` in slots after,
+--- in registration order. Nil when no custom seal polls, so the caller keeps
+--- its threshold chain -- and its exact seeded answers.
+function SMODS.seal_poll_list()
+    local customs = {}
+    for _, entry in ipairs(sorted_centers(SMODS.SealByValue)) do
+        if entry.weight > 0 then customs[#customs + 1] = entry end
+    end
+    if #customs == 0 then return nil end
+    local out = { "purple", "gold", "blue", "red" }
+    for _, entry in ipairs(customs) do
+        for _ = 1, entry.weight do out[#out + 1] = entry.value end
+    end
+    return out
+end
+
+--- A custom edition's slice of an edition ladder (`Game:roll_joker_offer_edition`,
+--- the Standard-pack roll): `floor` is the top of the band still unclaimed
+--- below the vanilla rungs, as a fraction of the roll; each custom takes
+--- `weight * mult / 100` of the roll from there down, in registration order.
+--- Returns the edition a roll in its slice names, or nil -- and nil whenever
+--- no custom edition polls, so the vanilla ladder stands untouched.
+function SMODS.shop_edition_pick(roll, floor, mult)
+    local picked = nil
+    for _, entry in ipairs(sorted_centers(SMODS.EditionByValue)) do
+        if entry.weight > 0 then
+            local band = entry.weight * (mult or 1) / 100
+            if roll > floor - band then picked = entry.value break end
+            floor = floor - band
+        end
+    end
+    return picked
+end
+
+--- The bottom band of a guaranteed-edition roll (Aura, Wheel of Fortune,
+--- Illusion), shared out: Foil counts 50, each custom edition its `weight`,
+--- and the band's 50% is divided in those proportions, Foil's slice on top,
+--- then the customs' in registration order. Returns "foil" or a custom
+--- value; nil when no custom edition polls, so the caller keeps its
+--- vanilla answer.
+function SMODS.guaranteed_edition_pick(roll)
+    local customs = {}
+    local total = 50
+    for _, entry in ipairs(sorted_centers(SMODS.EditionByValue)) do
+        if entry.weight > 0 then
+            customs[#customs + 1] = entry
+            total = total + entry.weight
+        end
+    end
+    if #customs == 0 then return nil end
+    local edge = 0.5
+    local foil_share = 0.5 * 50 / total
+    if roll > edge - foil_share then return "foil" end
+    edge = edge - foil_share
+    for _, entry in ipairs(customs) do
+        local share = 0.5 * entry.weight / total
+        if roll > edge - share then return entry.value end
+        edge = edge - share
+    end
+    return "foil"
+end
+
+--- A registered center's tooltip: its display name and its `loc_txt` lines
+--- as plain text (`#n#` filled from `loc_vars`), for the playing-card
+--- tooltip, whose vanilla name/line tables only know the vanilla centers.
+--- Returns nil name and no lines for anything unregistered.
+function SMODS.center_tooltip(kind, value)
+    local entry = kind == "enhancement" and SMODS.EnhancementByValue[value]
+        or kind == "seal" and SMODS.SealByValue[value]
+        or kind == "edition" and SMODS.EditionByValue[value]
+    if not entry then return nil, {} end
+    local loc = loc_for(entry.loc_txt, I18N and I18N.get_language() or "en") or {}
+    local text = loc.text
+    if type(text) == "string" then text = { text } end
+    if type(text) ~= "table" then return entry.name, {} end
+    local vars = {}
+    if type(entry.loc_vars) == "function" then
+        local ret = SMODS.call(entry.mod, entry.loc_vars, entry, {}, { ability = entry.config })
+        if type(ret) == "table" and type(ret.vars) == "table" then vars = ret.vars end
+    end
+    local lines = {}
+    for _, line in ipairs(text) do
+        local segs = SMODS.format_line(line, vars).segments
+        local parts = {}
+        for _, s in ipairs(segs) do parts[#parts + 1] = s.text end
+        lines[#lines + 1] = table.concat(parts)
+    end
+    return entry.name, lines
+end
+
+--------------------------------------------------------------------------------
 -- Consumables
 --------------------------------------------------------------------------------
 
@@ -1330,12 +1840,6 @@ function SMODS.shop_consumable_kinds()
     return out
 end
 
---- Steamodded's enhancement keys onto the port's.
-local ENHANCEMENT = {
-    m_bonus = "bonus", m_mult = "mult", m_wild = "wild", m_glass = "glass",
-    m_steel = "steel", m_stone = "stone", m_gold = "gold", m_lucky = "lucky",
-}
-
 local consumable_order = 1000
 
 --- `SMODS.Consumable { set, key, loc_txt, config, cost, sprite,
@@ -1366,7 +1870,7 @@ function SMODS.Consumable(t)
     local max_h, min_h = tonumber(config.max_highlighted), tonumber(config.min_highlighted)
     if max_h then select = { min = math.max(1, min_h or 1), max = max_h } end
     if config.mod_conv ~= nil then
-        check(ENHANCEMENT[config.mod_conv] ~= nil, "Consumable '" .. t.key .. "': unknown mod_conv '"
+        check(enhancement_name(config.mod_conv) ~= nil, "Consumable '" .. t.key .. "': unknown mod_conv '"
             .. tostring(config.mod_conv) .. "'")
     end
     if kind == "planet" and config.hand_type ~= nil then
@@ -1429,8 +1933,9 @@ function SMODS.use_consumable(game, c)
         return false
     end
 
-    if config.mod_conv and ENHANCEMENT[config.mod_conv] then
-        game:convert_enhancement_ripple(highlighted, ENHANCEMENT[config.mod_conv],
+    local conv = config.mod_conv and enhancement_name(config.mod_conv) or nil
+    if conv then
+        game:convert_enhancement_ripple(highlighted, conv,
             tonumber(config.max_highlighted) or #highlighted)
     elseif type(config.suit_conv) == "string" then
         game:convert_suit_ripple(highlighted, config.suit_conv)
@@ -1658,9 +2163,17 @@ end
 --- (`Card:get_id`: Jack 11, Queen 12, King 13, Ace 14). Numbers and numeric strings
 --- ("7", "10") are taken as those numbers directly.
 local RANK_BY_NAME = { Ace = 14, King = 13, Queen = 12, Jack = 11, A = 14, K = 13, Q = 12, J = 11, T = 10 }
-local PLAYING_ENHANCEMENTS = { bonus = true, mult = true, wild = true, glass = true,
-    steel = true, stone = true, gold = true, lucky = true }
-local PLAYING_SEALS = { gold = true, red = true, blue = true, purple = true }
+--- A center name the card asks for that nothing registered is an error naming
+--- it, where an unknown rank or suit only makes the ask refuse: a typo'd
+--- enhancement that quietly vanished would cost a mod its whole effect with
+--- nothing to show for it.
+local function center_or_error(resolve, value, what, how)
+    local resolved = resolve(value)
+    if not resolved then
+        error(("SMODS.add_card: unknown %s '%s' (use %s)"):format(what, tostring(value), how), 3)
+    end
+    return resolved
+end
 
 --- The `card_data` for one playing card `SMODS.add_card` was asked for, built the way the
 --- game builds its own (`{ rank, suit, enhancement, seal }`), or nil when the ask is one
@@ -1677,18 +2190,19 @@ local function playing_card_data(t)
     local data = { rank = rank, suit = suit, enhancement = nil, seal = nil }
     local enhancement = src.enhancement or t.enhancement
     if enhancement ~= nil then
-        enhancement = ENHANCEMENT[enhancement] or enhancement
-        if not PLAYING_ENHANCEMENTS[enhancement] then return nil end
-        data.enhancement = enhancement
+        data.enhancement = center_or_error(enhancement_name, enhancement, "enhancement",
+            "a vanilla enhancement, a Steamodded m_ key, or one registered with SMODS.Enhancement")
     end
     local seal = src.seal or t.seal
     if seal ~= nil then
-        seal = tostring(seal):lower()
-        if not PLAYING_SEALS[seal] then return nil end
-        data.seal = seal
+        data.seal = center_or_error(seal_name, seal, "seal",
+            "a vanilla seal or one registered with SMODS.Seal")
     end
     local edition = src.edition or t.edition
-    if edition ~= nil then data.modifier = { edition = edition } end
+    if edition ~= nil then
+        data.modifier = { edition = center_or_error(edition_value, edition, "edition",
+            "foil, holo, polychrome, negative, or one registered with SMODS.Edition") }
+    end
     return data
 end
 
@@ -1707,8 +2221,10 @@ end
 ---     def id. Returns the new consumable, or nil when the consumable slots are full
 ---     (checked with `Game:can_add_consumable`, the shop's own check) or the id is unknown.
 ---   * `"Playing"`: `t.rank` / `t.suit` name the card (see `playing_card_data`), with
----     optional `enhancement` (a port name or a Steamodded `m_` key), `seal` and
----     `edition`. It joins the hand (nil when the hand is full, unless
+---     optional `enhancement`, `seal` and `edition` -- vanilla names, a Steamodded
+---     `m_` key for an enhancement, or a value registered with `SMODS.Enhancement` /
+---     `SMODS.Seal` / `SMODS.Edition`. An unregistered center name is an error naming
+---     it, unlike an unknown rank or suit. It joins the hand (nil when the hand is full, unless
 ---     `t.bypass_limit`), or the deck when `t.area` is `"deck"` (or `G.deck`). A hand
 ---     card returns its node, refreshed as contexts hand cards over; a deck card returns
 ---     the `card_data` now in the deck.
@@ -1720,7 +2236,10 @@ function SMODS.add_card(t)
         if type(t.key) ~= "string" or not (JOKER_DEFS and JOKER_DEFS[t.key]) then return nil end
         local params = {}
         local edition = edition_param(t)
-        if edition ~= nil then params.edition = edition end
+        if edition ~= nil then
+            params.edition = center_or_error(edition_value, edition, "edition",
+                "foil, holo, polychrome, negative, or one registered with SMODS.Edition")
+        end
         if type(t.create_params) == "table" then
             for k, v in pairs(t.create_params) do params[k] = v end
         end
@@ -1733,7 +2252,10 @@ function SMODS.add_card(t)
         if type(t.key) ~= "string" or not (CONSUMABLE_DEFS and CONSUMABLE_DEFS[t.key]) then return nil end
         local params = {}
         local edition = edition_param(t)
-        if edition ~= nil then params.edition = edition end
+        if edition ~= nil then
+            params.edition = center_or_error(edition_value, edition, "edition",
+                "foil, holo, polychrome, negative, or one registered with SMODS.Edition")
+        end
         if not G:can_add_consumable(params) then return nil end
         if not G:add_consumable(t.key, params) then return nil end
         return G.consumables[#G.consumables]
@@ -1928,6 +2450,24 @@ function SMODS.rollback(mod)
         SMODS.ConsumableTypes[id] = nil
     end
     mod.registered.consumable_types = {}
+    for _, id in ipairs(mod.registered.enhancements or {}) do
+        local entry = SMODS.Enhancements[id]
+        if entry then SMODS.EnhancementByValue[entry.value] = nil end
+        SMODS.Enhancements[id] = nil
+    end
+    mod.registered.enhancements = {}
+    for _, id in ipairs(mod.registered.seals or {}) do
+        local entry = SMODS.Seals[id]
+        if entry then SMODS.SealByValue[entry.value] = nil end
+        SMODS.Seals[id] = nil
+    end
+    mod.registered.seals = {}
+    for _, id in ipairs(mod.registered.editions or {}) do
+        local entry = SMODS.Editions[id]
+        if entry then SMODS.EditionByValue[entry.value] = nil end
+        SMODS.Editions[id] = nil
+    end
+    mod.registered.editions = {}
     for _, name in ipairs(mod.registered.suits or {}) do SMODS.Suits[name] = nil end
     mod.registered.suits = {}
     for _, name in ipairs(mod.registered.poker_hands or {}) do
