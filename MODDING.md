@@ -518,6 +518,58 @@ Three honest limits, all about art:
   by any other path simply does nothing -- the card scores as a plain card --
   rather than crashing the load.
 
+## Custom tags
+
+**`SMODS.Tag { key, loc_txt, config, apply, weight, min_ante, in_pool }`**
+
+```lua
+SMODS.Tag {
+    key = "windfall",
+    loc_txt = { name = "Windfall Tag", text = { "Gain {C:money}$#1#{}" } },
+    config = { type = "immediate", dollars = 7 },
+    loc_vars = function(self, info_queue, tag) return { vars = { self.config.dollars } } end,
+    apply = function(self, tag, context)
+        G.money = G.money + tag.ability.dollars
+        return true
+    end,
+}
+```
+
+A tag's **type** -- the bare key, as written -- is the string a held tag carries
+(`tag.type`), the way a consumable kind is its set's key. Types are global: no
+two mods may register the same one, and none may reuse a vanilla tag's name.
+Registering a clash is a load error naming it.
+
+A registered tag is gained exactly like a vanilla one: `G:addTag("windfall")`
+or `G:addTag("tg_windfall")` (bare key or full id), the skip poll, a Double Tag
+copy. Naming a tag that is neither vanilla nor registered is an error naming
+it. The held tag's `ability` is a copy of the def's `config`.
+
+- **Moments.** `config.type` says when the tag's `apply(self, tag, context)`
+  runs (`context.type` names the moment, `context.tag` is the held tag):
+  `immediate` (as the tag is gained -- the default), `new_blind_choice` (at
+  blind select, one tag per screen, like the pack tags), `shop_start` and
+  `shop_final_pass` (bracketing the shop roll as the shop is entered),
+  `round_start_bonus` (as a blind starts, Juggle Tag's seat), and `eval` (in
+  the Boss payout, Investment Tag's seat; the context carries the payout's
+  `add_round_win_payout(name, dollars)`). Returning true consumes the tag;
+  returning false -- or having no `apply` -- leaves it held. The vanilla
+  `store_joker_create` / `store_joker_modify` / `voucher_add` / `tag_add`
+  types cannot be registered: they are not moments a tag's own effect runs at,
+  they are effects the shop and Double Tag read off the tray.
+- **The skip poll.** A registered tag joins the poll at its `weight`, where
+  every vanilla tag weighs 1: default 1, 0 keeps it out (it can still be
+  created directly). `min_ante` gates it like a vanilla tag's, and
+  `in_pool(self, game)` may veto it. The custom draw runs on its own random
+  stream, so the vanilla picks are exactly what they would be with no tags
+  registered.
+- **Art and collection.** A mod tag has no art: it draws as a plain outline,
+  and it has no collection entry. Its tooltip -- on the blind-select skip
+  reward -- does show its name and `loc_txt` lines.
+- **Saves.** A held tag saves as its type string, like a vanilla one, and a
+  tag whose mod is gone loads harmlessly: it never fires, and a fresh restore
+  skips its type rather than failing.
+
 ## Card faces
 
 ```lua
@@ -547,7 +599,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks, blinds and booster packs can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals and editions can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types) and [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions).) Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Decks, blinds and booster packs can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals, editions and tags can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types), [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions) and [Custom tags](#custom-tags).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.

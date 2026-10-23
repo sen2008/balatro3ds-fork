@@ -2160,4 +2160,245 @@ suite.test("custom centers: an orphaned save value loads and scores nothing", fu
     T.assert_eq(Joker.normalize_edition("fluoro"), "base", "a Joker's orphaned edition normalizes away")
 end)
 
+--------------------------------------------------------------------------------
+-- Custom tags (SMODS.Tag)
+--------------------------------------------------------------------------------
+
+local TAGS = [[
+SMODS.Tag {
+    key = "windfall",
+    loc_txt = { name = "Windfall Tag", text = { "Gain {C:money}$#1#{}" } },
+    config = { type = "immediate", dollars = 7 },
+    loc_vars = function(self, info_queue, tag) return { vars = { self.config.dollars } } end,
+    apply = function(self, tag, context)
+        G.money = G.money + tag.ability.dollars
+        return true
+    end,
+}
+SMODS.Tag {
+    key = "stash",
+    loc_txt = { name = "Stash Tag", text = { "Create a {C:tarot}Fool{}" } },
+    config = { type = "new_blind_choice" },
+    apply = function(self, tag, context)
+        return SMODS.add_card { set = "Tarot", key = "tarot_fool" } ~= nil
+    end,
+}
+SMODS.Tag {
+    key = "kickback",
+    loc_txt = { name = "Kickback Tag", text = { "Gain {C:money}$3{}" } },
+    config = { type = "shop_start" },
+    apply = function(self, tag, context)
+        G.money = G.money + 3
+        return true
+    end,
+}
+SMODS.Tag {
+    key = "tithe",
+    loc_txt = { name = "Tithe Tag", text = { "Earn {C:money}$5{}" } },
+    config = { type = "eval" },
+    apply = function(self, tag, context)
+        if context.add_round_win_payout then
+            context.add_round_win_payout("Tithe Tag", 5)
+            return true
+        end
+    end,
+}
+SMODS.Tag {
+    key = "dud",
+    loc_txt = { name = "Dud Tag", text = { "Does nothing, stays held" } },
+    config = { type = "immediate" },
+    apply = function(self, tag, context) return false end,
+}
+SMODS.Tag {
+    key = "ghost",
+    loc_txt = { name = "Ghost Tag", text = { "Never polled" } },
+    config = { type = "immediate" },
+    weight = 0,
+    apply = function(self, tag, context) return true end,
+}
+]]
+
+local function install_tags(seed)
+    wipe_mods()
+    write_mod("Tags", { id = "Tags", prefix = "tg", main_file = "main.lua", version = "1" }, TAGS)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Tags.status, "loaded", tostring(ModLoader.by_id.Tags.error))
+    local game = bootstrap.new_game(seed or 4480)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 10
+    return game
+end
+
+suite.test("custom tags: registration, addTag by key and full id, immediate use", function()
+    local game = install_tags()
+    local entry = SMODS.Tags["tg_windfall"]
+    T.assert_true(entry ~= nil, "the tag registers under its full id")
+    T.assert_eq(entry.type, "windfall")
+    T.assert_eq(entry.moment, "immediate")
+    T.assert_eq(entry.weight, 1, "default weight is vanilla's 1")
+    T.assert_eq(SMODS.TagByType["windfall"], entry)
+    T.assert_true(SMODS.tag_entry_for("tg_windfall") == entry, "resolved by full id")
+    T.assert_true(SMODS.tag_entry_for("Windfall") == entry, "resolved by key, any case")
+
+    -- A held tag carries its def's config as its ability.
+    game:addTag("dud")
+    T.assert_eq(#game.tags, 1, "an apply that returns false stays held")
+    T.assert_eq(game.tags[1].type, "dud")
+    game:removeTag(1)
+
+    -- Immediate tags fire as they are gained and are not stored.
+    game:addTag("windfall")
+    T.assert_eq(game.money, 17, "the immediate apply paid out")
+    T.assert_eq(#game.tags, 0, "a fired tag is consumed, not held")
+    T.assert_eq(game:hasTag("windfall"), -1)
+    game:addTag("tg_windfall")
+    T.assert_eq(game.money, 24, "the full id names the same tag")
+
+    -- Tooltips come from the registration.
+    local name, lines = SMODS.tag_tooltip("windfall")
+    T.assert_eq(name, "Windfall Tag")
+    T.assert_eq(#lines, 1)
+    T.assert_true(lines[1]:find("$7", 1, true) ~= nil, "loc_vars fill the text: " .. lines[1])
+    local tip = game:get_skip_tag_tooltip(entry.skip_id, nil)
+    T.assert_eq(tip.name, "Windfall Tag")
+    T.assert_eq(tip.type, "windfall")
+    T.assert_true(tip.description:find("$7", 1, true) ~= nil, tip.description)
+    wipe_mods()
+end)
+
+suite.test("custom tags: blind-choice tags wait for their moment, then fire", function()
+    local game = install_tags()
+    game.consumables, game.consumable_nodes = {}, {}
+    game:addTag("stash")
+    T.assert_eq(#game.tags, 1, "a blind-choice tag does not fire as it is gained")
+    T.assert_eq(#game.consumables, 0)
+    T.assert_true(game:apply_new_blind_choice_tags(), "it fires at blind select")
+    T.assert_eq(#game.tags, 0, "and is consumed")
+    T.assert_eq(#game.consumables, 1, "its apply created the Fool")
+    T.assert_eq(game.consumables[1].id, "tarot_fool")
+    wipe_mods()
+end)
+
+suite.test("custom tags: shop_start and eval moments dispatch and consume", function()
+    local game = install_tags()
+    game:addTag("kickback")
+    game:addTag("tithe")
+    T.assert_eq(#game.tags, 2, "neither fires as it is gained")
+    T.assert_eq(SMODS.tag_moment(game, "shop_start"), 1, "the shop_start tag fires")
+    T.assert_eq(game.money, 13)
+    T.assert_eq(#game.tags, 1, "and is consumed; the eval tag still waits")
+    local paid = {}
+    local ctx = { add_round_win_payout = function(name, n) paid[#paid + 1] = n end }
+    T.assert_eq(SMODS.tag_moment(game, "eval", ctx), 1, "the eval tag fires")
+    T.assert_eq(paid[1], 5, "through the payout context the engine hands it")
+    T.assert_eq(#game.tags, 0)
+    wipe_mods()
+end)
+
+suite.test("custom tags: the skip poll deals them at weight, and never weight 0", function()
+    local game = install_tags(5190)
+    local saw, slots = {}, 0
+    for ante = 1, 300 do
+        game.ante = ante
+        game:roll_skips()
+        for slot = 1, 2 do
+            local type_name = game:tag_type_for_id(game.skips[slot])
+            if type_name then saw[type_name] = true end
+            slots = slots + 1
+        end
+    end
+    T.assert_eq(slots, 600)
+    T.assert_true(saw["windfall"], "the weight-1 tag is dealt by the poll")
+    T.assert_true(saw["ghost"] == nil, "a weight-0 tag is never dealt")
+    wipe_mods()
+end)
+
+suite.test("custom tags: seeded vanilla skip sequence is untouched by registration", function()
+    local function sequence(seed)
+        local game = bootstrap.new_game(seed)
+        G = game
+        local ids = {}
+        for ante = 1, 40 do
+            game.ante = ante
+            game:roll_skips()
+            ids[#ids + 1] = game.skips[1]
+            ids[#ids + 1] = game.skips[2]
+        end
+        return ids
+    end
+    wipe_mods()
+    local vanilla = sequence(5191)
+    install_tags(5191)
+    local with_mod = sequence(5191)
+    for i = 1, #vanilla do
+        T.assert_true(with_mod[i] == vanilla[i] or (with_mod[i] or 0) >= 100,
+            "slot " .. i .. ": the vanilla pick stands or a custom tag replaces it")
+    end
+    wipe_mods()
+    local after = sequence(5191)
+    for i = 1, #vanilla do
+        T.assert_eq(after[i], vanilla[i], "rollback restores the exact sequence")
+    end
+end)
+
+suite.test("custom tags: unknown names and bad registrations are errors naming them", function()
+    local game = install_tags()
+    local ok, err = pcall(function() game:addTag("nope") end)
+    T.assert_false(ok, "an unknown tag name is an error")
+    T.assert_true(tostring(err):find("nope", 1, true) ~= nil, tostring(err))
+    T.assert_true(tostring(err):find("unknown tag", 1, true) ~= nil, tostring(err))
+    T.assert_true(pcall(function() game:addTag("handy") end), "vanilla names still work")
+    wipe_mods()
+
+    write_mod("VanillaTag", { id = "VanillaTag", prefix = "vt", main_file = "main.lua", version = "1" }, [[
+SMODS.Tag { key = "double", loc_txt = { name = "Double Ganger" } }
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.VanillaTag.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.VanillaTag.error):find("vanilla", 1, true) ~= nil,
+        tostring(ModLoader.by_id.VanillaTag.error))
+    wipe_mods()
+
+    write_mod("BadMoment", { id = "BadMoment", prefix = "bm", main_file = "main.lua", version = "1" }, [[
+SMODS.Tag { key = "shopkeep", loc_txt = { name = "Shopkeep" }, config = { type = "store_joker_create" } }
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadMoment.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadMoment.error):find("store_joker_create", 1, true) ~= nil,
+        "the error names the moment: " .. tostring(ModLoader.by_id.BadMoment.error))
+    wipe_mods()
+end)
+
+suite.test("custom tags: saves round-trip, and an orphaned held tag is a no-op", function()
+    local game = install_tags()
+    game:addTag("stash")
+    local snap = game:build_run_snapshot()
+    T.assert_eq(snap.tags[1], "stash", "the held tag serializes as its type string")
+
+    local restored = bootstrap.new_game(4481)
+    G = restored
+    T.assert_true(restored:load_run_snapshot(snap))
+    T.assert_eq(#restored.tags, 1, "the tag is held again after a load")
+    T.assert_eq(restored.tags[1].type, "stash")
+
+    -- The mod goes away: registries empty, and the held orphan neither
+    -- fires nor crashes at any dispatch.
+    wipe_mods()
+    T.assert_eq(next(SMODS.Tags), nil, "tags unregister on rollback")
+    T.assert_eq(next(SMODS.TagByType), nil)
+    T.assert_false(restored:apply_new_blind_choice_tags(), "an orphan does not fire")
+    local orphan = restored.tags[1]
+    T.assert_true(orphan ~= nil, "the orphan itself stays held and harmless")
+    T.assert_false(orphan:Use("new_blind_choice"), "its Use is a no-op")
+
+    -- A fresh load of the same snapshot skips the orphan silently.
+    local fresh = bootstrap.new_game(4482)
+    G = fresh
+    T.assert_true(fresh:load_run_snapshot(snap))
+    T.assert_eq(#fresh.tags, 0, "the orphaned type is skipped on restore")
+    wipe_mods()
+end)
+
 return suite

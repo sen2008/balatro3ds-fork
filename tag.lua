@@ -97,6 +97,18 @@ function Tag:init(type, x, y)
     self.atlas_name = "tags"
     self.atlas = resolve_atlas(self.atlas_name)
     self.quad, self.w, self.h = compute_quad(self.atlas, self.id)
+
+    -- A mod tag (SMODS.Tag) has no cell in the vanilla sheet: it keeps its
+    -- poll id, drops the atlas so `draw` uses the plain outline fallback,
+    -- and carries a copy of its def's config as its ability.
+    if SMODS and SMODS.TagByType and SMODS.TagByType[self.type] then
+        local entry = SMODS.TagByType[self.type]
+        self.id = entry.skip_id or self.id
+        self.atlas = nil
+        self.atlas_name = nil
+        self.quad = nil
+        self.ability = copy_table and copy_table(entry.config) or {}
+    end
 end
 
 function Tag:draw()
@@ -160,6 +172,12 @@ end
 
 ---@param context string|nil
 function Tag:apply(context)
+    -- Mod tags (SMODS.Tag) dispatch to their registered apply first; a type
+    -- with no registration falls through to the vanilla chain untouched.
+    if SMODS and SMODS.tag_apply then
+        local handled, fired = SMODS.tag_apply(self, context)
+        if handled then return fired end
+    end
     --Tags that are used should fire and return true
     -- Pack and Boss Tags wait for a blind-select screen; until then they sit in the tray.
     if Tag.NEW_BLIND_CHOICE_TYPES[self.type] and context ~= "new_blind_choice" then

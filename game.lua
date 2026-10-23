@@ -1829,6 +1829,20 @@ function Game:addPopup(node)
 end
 
 function Game:addTag(tag_type, opts)
+    -- A mod tag (SMODS.Tag) may be named by its bare key or its full id. A
+    -- name that is neither a vanilla tag nor a registered one is an error
+    -- naming it -- except on a save restore (opts.from_restore), where an
+    -- orphaned type is skipped silently instead of failing the load.
+    if SMODS and SMODS.tag_entry_for then
+        local entry = SMODS.tag_entry_for(tag_type)
+        if entry then
+            tag_type = entry.type
+        elseif not SMODS.is_vanilla_tag_type(tag_type) then
+            if opts and opts.from_restore then return end
+            error("unknown tag '" .. tostring(tag_type)
+                .. "' (not a vanilla tag, and no mod registered it with SMODS.Tag)", 2)
+        end
+    end
     local double_count = 0
     if tag_type ~= "double" then
         for i = #self.tags, 1, -1 do
@@ -5223,7 +5237,7 @@ function Game:load_run_snapshot(snapshot)
     self.tags = {}
     for _, tag_type in ipairs(snapshot.tags or {}) do
         if type(tag_type) == "string" and tag_type ~= "" then
-            self:addTag(tag_type)
+            self:addTag(tag_type, { from_restore = true })
         end
     end
     self.shop_offer_queue = copy_table(snapshot.shop_offer_queue or {})
@@ -7856,6 +7870,9 @@ function Game:tag_type_for_id(tag_id)
     if id == 21 then return "ethereal" end
     if id == 22 then return "economy" end
     if id == 23 then return "d6" end
+    if id and id >= 100 and SMODS and SMODS.tag_type_for_skip_id then
+        return SMODS.tag_type_for_skip_id(id)
+    end
     return nil
 end
 
@@ -7920,6 +7937,14 @@ function Game:get_skip_tag_tooltip(skip_id, blind_index)
             description = Tag.get_description(type_name, hand_name)
         end
     end
+    -- A mod tag's name and text come from its registration (SMODS.Tag).
+    if SMODS and SMODS.tag_tooltip then
+        local tname, lines = SMODS.tag_tooltip(type_name)
+        if tname then
+            name = tname
+            if #lines > 0 then description = table.concat(lines, " ") end
+        end
+    end
     return { name = name, description = description, type = type_name }
 end
 
@@ -7976,7 +8001,8 @@ end
 function Game:apply_new_blind_choice_tags()
     if type(self.tags) ~= "table" then return false end
     for i, tag in ipairs(self.tags) do
-        if tag and Tag.NEW_BLIND_CHOICE_TYPES[tag.type] then
+        if tag and (Tag.NEW_BLIND_CHOICE_TYPES[tag.type]
+            or (SMODS and SMODS.tag_is_blind_choice and SMODS.tag_is_blind_choice(tag.type))) then
             -- Removed before firing: the tag opens a pack, which changes state, and a tag
             -- still in the tray at that point would draw over the pack and fire again.
             self:removeTag(i)
@@ -11916,6 +11942,7 @@ function Game:_commit_selected_blind()
     if juggle_bonus > 0 then
         self.hand_size_delta_juggle = (tonumber(self.hand_size_delta_juggle) or 0) + juggle_bonus
     end
+    if SMODS and SMODS.tag_moment then SMODS.tag_moment(self, "round_start_bonus") end
     self.hands = self:get_effective_hands_per_round()
     self.discards = self:get_effective_discards_per_round()
     self.blind_hand_play_counts = {}
@@ -13401,7 +13428,15 @@ function Game:roll_skips()
                 attempt = attempt + 1
             end
         end
-        self.skips[slot] = tag_key_to_id(tag_key)
+        local stored_id = tag_key_to_id(tag_key)
+        -- Registered tags (SMODS.Tag) join the poll at their weight, drawn
+        -- on a separate stream, so the vanilla pick above stands untouched
+        -- whenever the custom draw does not replace it.
+        if SMODS and SMODS.tag_poll_candidate then
+            local custom = SMODS.tag_poll_candidate(self, ante, slot, available)
+            if custom then stored_id = custom end
+        end
+        self.skips[slot] = stored_id
         if self.skips[slot] == 17 then
             self.skip_tag_orbital_hand[slot] = self:roll_orbital_hand_index()
         end
@@ -14589,6 +14624,7 @@ function Game:_finish_round_win_eval(ctx, hands_left)
                 self:removeTag(i)
             end
         end
+        if SMODS and SMODS.tag_moment then SMODS.tag_moment(self, "eval", ctx) end
 
         -- If Anaglyph Deck - Add Double Tag
         if (G._deck_special or nil) == "anaglyph" then
@@ -15497,11 +15533,13 @@ function Game:enter_shop_after_blind()
             self:removeTag(i)
         end
     end
+    if SMODS and SMODS.tag_moment then SMODS.tag_moment(self, "shop_start") end
     self:roll_shop_offers()
     self:roll_shop_boosters()
     if self:hasTag("coupon") ~= -1 then -- Coupon effect is added when calculating prices so its safe to remove after shop is rolled
         self:removeTag(self:hasTag("coupon"))
     end
+    if SMODS and SMODS.tag_moment then SMODS.tag_moment(self, "shop_final_pass") end
     self:maybe_roll_shop_voucher_on_shop_enter()
     self:sync_shop_booster_nodes()
     self:sync_shop_voucher_nodes()

@@ -2418,6 +2418,250 @@ function SMODS.mod_environment(mod)
 end
 
 --------------------------------------------------------------------------------
+-- Tags (SMODS.Tag)
+--------------------------------------------------------------------------------
+
+--- Custom tags by full id (`<prefix>_<key>`), by the type string a held tag
+--- carries (`tag.type`, the bare key as the mod wrote it), and by the numeric
+--- id the skip poll stores. Types are global, the way consumable kinds are:
+--- two mods cannot register the same type, and a type may not reuse a vanilla
+--- tag's name. A held tag serializes as its type string, exactly like a
+--- vanilla one; a save loaded without the mod keeps the string and every
+--- dispatch for it finds no entry and does nothing, so an orphaned tag never
+--- crashes a load (the run's mod check refuses a changed mod set anyway).
+SMODS.Tags = SMODS.Tags or {}
+SMODS.TagByType = SMODS.TagByType or {}
+SMODS.TagBySkipId = SMODS.TagBySkipId or {}
+local next_tag_order = 1
+local next_tag_skip_id = 100
+
+--- The type strings `Tag()` and `Game:addTag` know in vanilla: the tray types
+--- plus the `P_TAGS` key spellings (`d_six`, `top_up`, `skip`) that name the
+--- same three tags in the catalog.
+local VANILLA_TAG_TYPES = { uncommon = true, rare = true, negative = true, foil = true,
+    holo = true, polychrome = true, investment = true, voucher = true, boss = true,
+    standard = true, charm = true, meteor = true, buffoon = true, handy = true,
+    garbage = true, ethereal = true, coupon = true, double = true, juggle = true,
+    d6 = true, topup = true, speed = true, orbital = true, economy = true,
+    d_six = true, top_up = true, skip = true }
+
+--- The moments the engine actually applies tags at, and so the only ones a
+--- registered tag may declare (as its `config.type`, Steamodded-style):
+--- `immediate` fires in `Game:addTag` as the tag is gained; `new_blind_choice`
+--- at blind-select, one tag per screen; `shop_start` and `shop_final_pass`
+--- bracket the shop roll in `Game:enter_shop_after_blind`;
+--- `round_start_bonus` as a blind starts (Juggle Tag's seat); `eval` in the
+--- Boss payout (Investment Tag's seat). The vanilla `store_joker_create` /
+--- `store_joker_modify` / `voucher_add` / `tag_add` types are not moments a
+--- tag's own effect runs at -- they are read off the tray by the shop and
+--- Double Tag code -- so they cannot be registered.
+local TAG_MOMENTS = { immediate = true, new_blind_choice = true, shop_start = true,
+    shop_final_pass = true, round_start_bonus = true, eval = true }
+
+function SMODS.is_vanilla_tag_type(name)
+    return type(name) == "string" and VANILLA_TAG_TYPES[name:lower()] == true
+end
+
+--- The registered tag a name means, or nil: the full id ("tg_windfall"), the
+--- bare type ("windfall"), in any case.
+function SMODS.tag_entry_for(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    local entry = SMODS.Tags[name] or SMODS.TagByType[name]
+    if entry then return entry end
+    local lower = name:lower()
+    for _, e in pairs(SMODS.TagByType) do
+        if e.type:lower() == lower then return e end
+    end
+    return nil
+end
+
+--- `SMODS.Tag { key, loc_txt, config, apply, weight, min_ante, in_pool }`: a
+--- tag of this mod's own. It is gained exactly like a vanilla one --
+--- `G:addTag("<key>")` or `G:addTag("<full id>")`, the skip poll, Double Tag
+--- copies -- and the engine calls `apply(self, tag, context)` at the tag's
+--- moment (`config.type`, default `"immediate"`; `context.type` names the
+--- moment, `context.tag` is the held tag, whose `ability` is a copy of
+--- `config`). Returning true consumes the tag, the way vanilla one-shot tags
+--- are consumed; returning false (or having no `apply`) leaves it held.
+---
+--- `weight` is the tag's share of the skip poll, where every vanilla tag
+--- weighs 1: the default 1 makes it as likely as any vanilla tag, 0 keeps it
+--- out of the poll (it can still be created directly). `min_ante` gates the
+--- poll like a vanilla tag's. `in_pool(self, game)` may veto the poll.
+--- A mod tag has no art: it draws as a plain outline, and it has no
+--- collection entry.
+function SMODS.Tag(t)
+    local mod = need_mod("SMODS.Tag")
+    check(type(t) == "table", "SMODS.Tag expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$") ~= nil,
+        "SMODS.Tag needs a 'key' of letters, digits and underscores")
+    check(VANILLA_TAG_TYPES[t.key:lower()] == nil,
+        "Tag '" .. t.key .. "' reuses a vanilla tag type")
+    check(t.apply == nil or type(t.apply) == "function",
+        "Tag '" .. t.key .. "': apply must be a function")
+    check(t.in_pool == nil or type(t.in_pool) == "function",
+        "Tag '" .. t.key .. "': in_pool must be a function")
+    check(t.loc_vars == nil or type(t.loc_vars) == "function",
+        "Tag '" .. t.key .. "': loc_vars must be a function")
+    check(t.config == nil or type(t.config) == "table",
+        "Tag '" .. t.key .. "': config must be a table")
+    local id = mod.prefix .. "_" .. t.key
+    check(SMODS.Tags[id] == nil,
+        "Tag '" .. t.key .. "' is defined twice (id " .. id .. ")")
+    for _, entry in pairs(SMODS.TagByType) do
+        check(entry.type:lower() ~= t.key:lower(),
+            "Tag '" .. t.key .. "': the type '" .. entry.type
+            .. "' is already registered by " .. entry.mod.id)
+    end
+    local moment = (type(t.config) == "table" and t.config.type) or "immediate"
+    check(TAG_MOMENTS[moment] == true,
+        "Tag '" .. t.key .. "': moment '" .. tostring(moment)
+        .. "' is not one the engine raises for mod tags (immediate, "
+        .. "new_blind_choice, shop_start, shop_final_pass, round_start_bonus, eval)")
+    local weight = t.weight == nil and 1 or tonumber(t.weight)
+    check(weight ~= nil and weight >= 0,
+        "Tag '" .. t.key .. "': weight must be a number >= 0")
+    local min_ante = t.min_ante == nil and nil or tonumber(t.min_ante)
+    check(t.min_ante == nil or min_ante ~= nil,
+        "Tag '" .. t.key .. "': min_ante must be a number")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, type = t.key, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        config = deep_copy(type(t.config) == "table" and t.config or {}),
+        apply = t.apply, loc_vars = t.loc_vars, loc_txt = t.loc_txt,
+        moment = moment, weight = weight, min_ante = min_ante,
+        in_pool = t.in_pool,
+        order = next_tag_order, skip_id = next_tag_skip_id,
+    }
+    next_tag_order = next_tag_order + 1
+    next_tag_skip_id = next_tag_skip_id + 1
+    SMODS.Tags[id] = entry
+    SMODS.TagByType[entry.type] = entry
+    SMODS.TagBySkipId[entry.skip_id] = entry
+    mod.registered.tags = mod.registered.tags or {}
+    mod.registered.tags[#mod.registered.tags + 1] = id
+    register_center_strings(mod, "tag", entry.type, t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    return t
+end
+
+--- Run one registered tag's `apply` for a moment. `extra` fields (the eval
+--- payout context, say) are merged into the context the apply sees.
+--- Returns whether the tag fired (and so should be consumed).
+function SMODS.tag_fire(entry, tag, moment, extra)
+    if type(entry.apply) ~= "function" then return false end
+    local ctx = {}
+    if type(extra) == "table" then for k, v in pairs(extra) do ctx[k] = v end end
+    ctx.type = moment
+    ctx.tag = tag
+    ctx.game = G
+    local ret = SMODS.call(entry.mod, entry.apply, entry, tag, ctx)
+    return ret and true or false
+end
+
+--- `Tag:apply`'s dispatch for a held tag: returns (handled, fired). A type
+--- with no entry is not handled, and the vanilla chain runs untouched. A
+--- registered tag called at any moment but its own is handled and does not
+--- fire -- the pack tags' wait, applied to every moment.
+function SMODS.tag_apply(tag, context)
+    local entry = tag and SMODS.TagByType[tag.type]
+    if not entry then return false end
+    local moment = type(context) == "string" and context or "immediate"
+    if entry.moment ~= moment then return true, false end
+    return true, SMODS.tag_fire(entry, tag, moment, nil)
+end
+
+--- Whether a held tag of this type waits for the blind-select screen.
+function SMODS.tag_is_blind_choice(type_name)
+    local entry = SMODS.TagByType[type_name]
+    return entry ~= nil and entry.moment == "new_blind_choice"
+end
+
+--- Fire every held registered tag whose moment this is, consuming the ones
+--- that fire -- the shape of the vanilla scans (Juggle at blind start, D6 in
+--- the shop, Investment in the Boss payout). Returns how many fired.
+function SMODS.tag_moment(game, moment, extra)
+    if next(SMODS.TagByType) == nil then return 0 end
+    if type(game) ~= "table" or type(game.tags) ~= "table" then return 0 end
+    local fired = 0
+    for i = #game.tags, 1, -1 do
+        local tag = game.tags[i]
+        local entry = tag and SMODS.TagByType[tag.type]
+        if entry and entry.moment == moment
+            and SMODS.tag_fire(entry, tag, moment, extra) then
+            game:removeTag(i)
+            fired = fired + 1
+        end
+    end
+    return fired
+end
+
+--- The skip poll's custom half: with probability weight/(vanilla + weight)
+--- the slot's vanilla pick is replaced by a registered tag, chosen by
+--- weight. Drawn on its own stream ("SMODS_tag_poll<ante>_<slot>"), so the
+--- vanilla "Tag<ante>" sequence -- and every candidate it picks -- is
+--- exactly what it would be with no tags registered. Returns the winning
+--- tag's skip id, or nil when the vanilla pick stands (or none is pooled).
+function SMODS.tag_poll_candidate(game, ante, slot, vanilla_available)
+    local customs, total_custom = {}, 0
+    for _, entry in pairs(SMODS.TagByType) do
+        if entry.weight > 0 and (entry.min_ante == nil or ante >= entry.min_ante)
+            and (entry.in_pool == nil
+                or SMODS.call(entry.mod, entry.in_pool, entry, game)) then
+            customs[#customs + 1] = entry
+            total_custom = total_custom + entry.weight
+        end
+    end
+    if #customs == 0 then return nil end
+    table.sort(customs, function(a, b) return a.order < b.order end)
+    local vanilla = tonumber(vanilla_available) or 0
+    local roll = game:random("SMODS_tag_poll" .. tostring(ante) .. "_" .. tostring(slot),
+        1, 100000) / 100000 * (vanilla + total_custom)
+    if roll <= vanilla then return nil end
+    local edge = vanilla
+    for _, entry in ipairs(customs) do
+        edge = edge + entry.weight
+        if roll <= edge then return entry.skip_id end
+    end
+    return customs[#customs].skip_id
+end
+
+--- The type string a skip-poll id means, for `Game:tag_type_for_id`.
+function SMODS.tag_type_for_skip_id(id)
+    local entry = SMODS.TagBySkipId[tonumber(id) or -1]
+    return entry and entry.type or nil
+end
+
+--- A registered tag's tooltip: its display name and its `loc_txt` lines as
+--- plain text (`#n#` filled from `loc_vars`), for the skip-tag tooltip,
+--- whose vanilla tables only know the vanilla tags. Returns nil name and
+--- no lines for anything unregistered.
+function SMODS.tag_tooltip(type_name)
+    local entry = SMODS.TagByType[type_name]
+    if not entry then return nil, {} end
+    local loc = loc_for(entry.loc_txt, I18N and I18N.get_language() or "en") or {}
+    local text = loc.text
+    if type(text) == "string" then text = { text } end
+    if type(text) ~= "table" then return entry.name, {} end
+    local vars = {}
+    if type(entry.loc_vars) == "function" then
+        local ret = SMODS.call(entry.mod, entry.loc_vars, entry, {}, { ability = entry.config })
+        if type(ret) == "table" and type(ret.vars) == "table" then vars = ret.vars end
+    end
+    local lines = {}
+    for _, line in ipairs(text) do
+        local segs = SMODS.format_line(line, vars).segments
+        local parts = {}
+        for _, s in ipairs(segs) do parts[#parts + 1] = s.text end
+        lines[#lines + 1] = table.concat(parts)
+    end
+    return entry.name, lines
+end
+
+--------------------------------------------------------------------------------
 -- Rollback
 --------------------------------------------------------------------------------
 
@@ -2450,6 +2694,15 @@ function SMODS.rollback(mod)
         SMODS.ConsumableTypes[id] = nil
     end
     mod.registered.consumable_types = {}
+    for _, id in ipairs(mod.registered.tags or {}) do
+        local entry = SMODS.Tags[id]
+        if entry then
+            SMODS.TagByType[entry.type] = nil
+            SMODS.TagBySkipId[entry.skip_id] = nil
+        end
+        SMODS.Tags[id] = nil
+    end
+    mod.registered.tags = {}
     for _, id in ipairs(mod.registered.enhancements or {}) do
         local entry = SMODS.Enhancements[id]
         if entry then SMODS.EnhancementByValue[entry.value] = nil end
