@@ -3,6 +3,8 @@
 local GameOverUI = {}
 local DynaText = require("dyna_text")
 local NumberFormat = require("number_format")
+local Big = require("big")
+local Totals = Big.Totals
 local TicketStrip = require("ticket_strip")
 local LOSS_QUIPS = {
     "Maybe Go Fish is more our speed...", "We folded like a cheap suit!",
@@ -27,7 +29,7 @@ local GAME_OVER_TITLE_TEXT = DynaText.new({
 --- any additional run tracking here.
 function GameOverUI.populate_summary(game, out)
     out = out or {}
-    out.best_hand_score = math.max(0, math.floor(tonumber(game.run_best_hand_score) or 0))
+    out.best_hand_score = Totals.max_plain(Totals.floor(Totals.read(game.run_best_hand_score, 0)), 0)
     if game.get_most_played_hand_name then
         out.most_played_hand = game:get_most_played_hand_name()
     else
@@ -112,8 +114,10 @@ function GameOverUI.draw_bottom(game)
         love.graphics.translate(0, game:get_game_over_slide_dy())
     end
     local blind_label = game._game_over_blind_label or I18N.text("hud.blind", nil, "Blind")
-    local final_score = tonumber(game._game_over_score) or tonumber(game.round_score) or 0
-    local target = tonumber(game._game_over_target) or tonumber(game.current_blind_target) or 0
+    local final_score = Totals.read(game._game_over_score, nil)
+    if final_score == nil then final_score = Totals.read(game.round_score, 0) end
+    local target = Totals.read(game._game_over_target, nil)
+    if target == nil then target = tonumber(game.current_blind_target) or 0 end
     local ante = tonumber(game._game_over_ante) or tonumber(game.ante) or 1
     local round_n = tonumber(game._game_over_round) or tonumber(game.round) or 1
 
@@ -136,8 +140,8 @@ function GameOverUI.draw_bottom(game)
     love.graphics.print(blind_label, panel_x + 8, panel_y + 30)
 
     love.graphics.setColor(game.C.GREY)
-    love.graphics.print(I18N.text("game_over.score_prefix", nil, "Score ") .. NumberFormat.format(math.floor(final_score))
-        .. " / " .. NumberFormat.format(math.floor(target)), panel_x + 8, panel_y + 44)
+    love.graphics.print(I18N.text("game_over.score_prefix", nil, "Score ") .. NumberFormat.format(Totals.floor(final_score))
+        .. " / " .. NumberFormat.format(Totals.floor(target)), panel_x + 8, panel_y + 44)
     love.graphics.print(string.format(I18N.text("game_over.ante_round", nil, "Ante %d  ·  Round %d"), ante, round_n), panel_x + 8, panel_y + 58)
 
     love.graphics.setColor(game.C.WHITE)

@@ -357,6 +357,113 @@ suite.test("return readers: level_up levels the scored hand and adds its delta",
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Big numbers (Tier 3e): return values past the double range.
+--------------------------------------------------------------------------------
+
+local BIGNUM = [[
+SMODS.Joker {
+    key = "facile", rarity = 1, cost = 2, sprite = "facile.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { e_mult = 3 } end
+    end,
+}
+SMODS.Joker {
+    key = "googol", rarity = 1, cost = 2, sprite = "googol.png",
+    config = { extra = { x_mult = 1e100 } },
+    calculate = function(self, card, context)
+        if context.joker_main then return { x_mult = card.ability.extra.x_mult } end
+    end,
+}
+SMODS.Joker {
+    key = "bigchips", rarity = 1, cost = 2, sprite = "bigchips.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { chips = SMODS.big(5, 350) } end
+    end,
+}
+SMODS.Joker {
+    key = "bothpow", rarity = 1, cost = 2, sprite = "bothpow.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { e_chips = 2, e_mult = 2 } end
+    end,
+}
+]]
+
+local function install_bignum()
+    wipe_mods()
+    write_mod("BigNum", {
+        id = "BigNumMod", name = "BigNum", prefix = "bg", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, BIGNUM)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(4403)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("big numbers: e_mult past the double ceiling promotes instead of inf", function()
+    local game = install_bignum()
+    local Big = require("big")
+    -- mult 1e200, cubed by the return: 1e600. Plain doubles would be inf.
+    local ctx = scored(add(game, "j_bg_facile"), { mult = 1e200 })
+    T.assert_true(Big.is_big(ctx.mult), "the total promoted to Big")
+    T.assert_eq(ctx.mult.m, 1)
+    T.assert_eq(ctx.mult.e, 600)
+    -- And the promoted total keeps scoring: a flat +4 after it is absorbed,
+    -- a second pow raises the exponent again.
+    local ctx2 = scored(add(game, "j_bg_facile"), { mult = ctx.mult })
+    T.assert_true(Big.is_big(ctx2.mult))
+    T.assert_eq(ctx2.mult.e, 1800)
+    wipe_mods()
+end)
+
+suite.test("big numbers: a 1e100 x_mult config multiplies a plain total plainly", function()
+    local game = install_bignum()
+    local Big = require("big")
+    local ctx = scored(add(game, "j_bg_googol"))
+    T.assert_false(Big.is_big(ctx.mult), "2 x 1e100 fits a double: no promotion")
+    T.assert_eq(ctx.mult, 2e100)
+    wipe_mods()
+end)
+
+suite.test("big numbers: a Big chips return passes through apply_return", function()
+    local game = install_bignum()
+    local Big = require("big")
+    local ctx = scored(add(game, "j_bg_bigchips"))
+    T.assert_true(Big.is_big(ctx.chips), "the Big return was not dropped by the reader")
+    T.assert_eq(ctx.chips.m, 5)
+    T.assert_eq(ctx.chips.e, 350)
+    T.assert_eq(ctx.mult, 2)
+    wipe_mods()
+end)
+
+suite.test("big numbers: e_chips and e_mult in one return both land", function()
+    local game = install_bignum()
+    local Big = require("big")
+    local ctx = scored(add(game, "j_bg_bothpow"), { chips = 1e200, mult = 1e200 })
+    T.assert_true(Big.is_big(ctx.chips))
+    T.assert_true(Big.is_big(ctx.mult))
+    T.assert_eq(ctx.chips.e, 400)
+    T.assert_eq(ctx.mult.e, 400)
+    wipe_mods()
+end)
+
+suite.test("big numbers: the SMODS.big surface round-trips", function()
+    local game = install_bignum()
+    local b = SMODS.big(1.5, 500)
+    T.assert_true(SMODS.is_big(b))
+    T.assert_eq(SMODS.big_to_number(b), math.huge)
+    T.assert_eq(SMODS.big_format(b), "1.500e500")
+    T.assert_eq(SMODS.big_cmp(b, 1e308), 1)
+    T.assert_eq(SMODS.big_cmp(10, SMODS.big(1, 1)), 0)
+    local p = SMODS.big_pow(1e200, 2)
+    T.assert_true(SMODS.is_big(p))
+    T.assert_eq(p.e, 400)
+    wipe_mods()
+end)
+
 suite.test("individual contexts see the scored card", function()
     local game = install_example()
     local j = add(game, "j_ex_sevens")

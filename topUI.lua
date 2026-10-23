@@ -2,6 +2,8 @@ local GameOverUI = require("game_over_ui")
 local DynaText = require("dyna_text")
 local Fonts = require("fonts")
 local NumberFormat = require("number_format")
+local Big = require("big")
+local Totals = Big.Totals
 -- Static labels are shaped once and redrawn; see text_cache.lua for why that is the
 -- largest saving on this screen.
 local TextCache = require("text_cache")
@@ -289,7 +291,7 @@ function TopUI:draw(screen)
     end
     local blind_name = (G.get_blind_display_name and G:get_blind_display_name(blind_index)) or ((blind_def and blind_def.name) or (G.current_blind_name or I18N.text("hud.blind", nil, "Blind")))
     
-    local blind_target = tonumber(G.current_blind_target) or 0
+    local blind_target = Totals.read(G.current_blind_target, 0)
     if G.STATE == G.STATES.BLIND_SELECT and G.get_blind_target then
         blind_target = G:get_blind_target(G.selected_blind_index or G.current_blind_index or 1, G.ante)
     end
@@ -405,7 +407,7 @@ function TopUI:draw(screen)
             local small = G.FONTS.PIXEL.SMALL
             local label = I18N.text("hud.score", nil, "Score")
             local label_w = small:getWidth(label) + 3
-            local bossReq = NumberFormat.format(math.floor(blind_target))
+            local bossReq = NumberFormat.format(Totals.floor(blind_target))
             local row_h = small:getHeight()
             local row_y = iy + ih - row_h
             love.graphics.setFont(small)
@@ -449,7 +451,7 @@ function TopUI:draw(screen)
             TextCache.print(I18N.text("hud.score_at_least", nil, "Score at least"), ix - sysDepth * textHeight, iy - 2)
 
             love.graphics.setColor(G.C.RED)
-            local scoreReq = NumberFormat.format(math.floor(blind_target))
+            local scoreReq = NumberFormat.format(Totals.floor(blind_target))
             love.graphics.setFont(Fonts.fit(G, G.FONTS.PIXEL.MEDIUM, scoreReq, iw))
             local scoreReqY = iy + math.floor(G.FONTS.PIXEL.SMALL_HEIGHT/2) + 5
             TextCache.printf(scoreReq, ix - sysDepth * textHeight, scoreReqY, iw, "center")
@@ -561,7 +563,7 @@ function TopUI:draw(screen)
     -- operands carry nothing: collapse the pair into one panel and give the number the full width,
     -- which is also what the arithmetic means. `fit` is the backstop for a run with a huge product.
     local total_value = self.chip_total_value
-    local showing_total = total_value and total_value > 0
+    local showing_total = total_value and Totals.cmp(total_value, 0) > 0
 
     if not showing_total then
         love.graphics.setFont(G.FONTS.PIXEL.MEDIUM)
@@ -582,7 +584,7 @@ function TopUI:draw(screen)
         -- a coloured panel spanning the row reads as one of them having grown.
         draw_rect_with_shadow(ChipX, ChipY, totalW, ChipHeight, 4, 2,
             G.C.BLOCK.BACK, G.C.BLOCK.SHADOW, 2, depthOffset)
-        local total_text = NumberFormat.format(math.floor(total_value))
+        local total_text = NumberFormat.format(Totals.floor(total_value))
         love.graphics.setFont(Fonts.fit(G, G.FONTS.PIXEL.MEDIUM, total_text, totalW - 8))
         love.graphics.setColor(G.C.WHITE)
         TopUI.center_text_juiced(total_text, ChipX - sysDepth * textHeight, ChipY - 1,
@@ -951,9 +953,19 @@ end
 function TopUI:update_flames(dt)
     local target = 0
     if G and G.STATE ~= (G.STATES and G.STATES.OPEN_BOOSTER) then
-        local chips = tonumber(G.selectedHandChips) or 0
-        local mult = tonumber(G.selectedHandMult) or 0
-        target = Fx.flame_target(chips * mult, G.current_blind_target)
+        local chips = Totals.read(G.selectedHandChips, 0)
+        local mult = Totals.read(G.selectedHandMult, 0)
+        if Big.is_big(chips) or Big.is_big(mult) then
+            -- Past the double range the product is past any plain target; the
+            -- flame height is a log of the product, computable in log space.
+            local product = Big.mul_values(chips, mult)
+            local required = tonumber(G.current_blind_target) or 0
+            if required > 0 and Totals.cmp(product, required) >= 0 then
+                target = math.max(0, Big.log10_of(product) / (math.log(5) / math.log(10)) - 2)
+            end
+        else
+            target = Fx.flame_target(chips * mult, G.current_blind_target)
+        end
     end
     Fx.update_flame(self.chip_flame, target, dt)
     Fx.update_flame(self.mult_flame, target, dt)
@@ -967,8 +979,8 @@ function TopUI:update_flames(dt)
         local organ = 0
         local required = tonumber(G and G.current_blind_target) or 0
         if required > 0 then
-            local chips = tonumber(G and G.selectedHandChips) or 0
-            local mult = tonumber(G and G.selectedHandMult) or 0
+            local chips = Totals.plain(G and G.selectedHandChips) or 0
+            local mult = Totals.plain(G and G.selectedHandMult) or 0
             local earned = chips * mult
             if earned > 0 then
                 organ = math.max(0, math.min(0.4, 0.1 * math.log(earned / (required + 1)) / math.log(5)))
@@ -981,7 +993,20 @@ end
 --- Ease the round score toward `G.round_score`. See the SCORE_EASE_ constants above.
 --- @param dt number
 function TopUI:update_score(dt)
-    local target = math.floor(tonumber(G and G.round_score) or 0)
+    -- A Big round score (or a tween already holding one) snaps: the count-up is
+    -- a log-space interpolation between doubles and has no Big form (design §4.3).
+    local raw_target = Totals.read(G and G.round_score, 0)
+    if Big.is_big(raw_target) or Big.is_big(self.score_value) or Big.is_big(self.score_target) then
+        self.score_target = raw_target
+        self.score_value = raw_target
+        self.score_time = nil
+        if self.score_value ~= self.score_shown or not self.score_text then
+            self.score_shown = self.score_value
+            self.score_text = NumberFormat.format(self.score_value)
+        end
+        return
+    end
+    local target = math.floor(raw_target)
     if target < 0 then target = 0 end
 
     if target ~= self.score_target then
@@ -1029,7 +1054,7 @@ end
 --- drains into the score (`reference/Balatro/functions/state_events.lua:1029-1062`).
 --- @param dt number
 function TopUI:update_chip_total(dt)
-    local total = G and tonumber(G.chip_total_display)
+    local total = G and Totals.read(G.chip_total_display)
     if not total then
         self.chip_total_value = nil
         self.chip_total_seen = nil
@@ -1039,6 +1064,22 @@ function TopUI:update_chip_total(dt)
         self.chip_total_seen = total
         self.chip_total_value = total
         self.total_juice_state = begin_juice(self.total_juice_state)
+    end
+    if Big.is_big(total) then
+        -- No drain arithmetic exists for a Big: hold the product for the same
+        -- 0.5 s the drain would take, then clear it (design §4.3).
+        if G.chip_total_drain and self.chip_total_value then
+            self._chip_total_big_time = (self._chip_total_big_time or 0) + dt
+            if self._chip_total_big_time >= 0.5 then
+                self.chip_total_value = nil
+                self.chip_total_seen = nil
+                self._chip_total_big_time = nil
+                G.chip_total_display = nil
+                G.chip_total_drain = nil
+            end
+        end
+        self.total_juice = step_juice(self.total_juice_state, dt)
+        return
     end
     if G.chip_total_drain and self.chip_total_value then
         -- Linear drain over the reference's 0.5 s, synchronized with the score count-up
@@ -1189,7 +1230,8 @@ end
 function TopUI:score_readout()
     local text = self.score_text
     if text then return text end
-    return NumberFormat.format(math.floor(tonumber(G and G.round_score) or 0))
+    local v = Totals.read(G and G.round_score, 0)
+    return NumberFormat.format(Big.is_big(v) and v or math.floor(v))
 end
 
 --- Cached counter strings, rebuilt only when the value changes, so the common frame formats

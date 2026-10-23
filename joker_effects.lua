@@ -1,5 +1,17 @@
 JokerEffects = {}
 
+--- Score totals may be Big past the double range (Tier 3e): the mutators below are
+--- the choke point every scoring effect lands through, so they are Big-aware.
+local Big = require("big")
+local Totals = Big.Totals
+
+--- What a scoring popup shows for an operand: a Big operand is its formatted
+--- string (popups concatenate their amount into text, and a table would error).
+local function popup_amount(n)
+    if Big.is_big(n) then return Big.format(n) end
+    return n
+end
+
 --- Randomness for pitch jitter, 0..1. Deliberately not `math.random`: the run reseeds that
 --- stream for reproducibility, and a sound must never advance it.
 local function sfx_jitter()
@@ -61,36 +73,36 @@ local function card_center_y(node)
 end
 
 local function add_mult(ctx, n)
-    ctx.mult = (tonumber(ctx.mult) or 0) + (tonumber(n) or 0)
-    if(n > 0) then 
+    ctx.mult = Big.add_values(Totals.read(ctx.mult, 0), Totals.read(n, 0))
+    if Totals.cmp(n, 0) > 0 then 
         mark_effect_applied(ctx)
 
         local p = Popup()
-        p:spawn(n, "mult", card_center_x(ctx.VT), card_center_y(ctx.VT))
+        p:spawn(popup_amount(n), "mult", card_center_x(ctx.VT), card_center_y(ctx.VT))
         Top:addPopup(p)
 
         Sfx.play_mult(scoring_pitch())
     end
 end
 local function add_chips(ctx, n)
-    ctx.chips = (tonumber(ctx.chips) or 0) + (tonumber(n) or 0)
-    if(n > 0) then 
+    ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), Totals.read(n, 0))
+    if Totals.cmp(n, 0) > 0 then 
         mark_effect_applied(ctx) 
 
         local p = Popup()
-        p:spawn(n, "chips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+        p:spawn(popup_amount(n), "chips", card_center_x(ctx.VT), card_center_y(ctx.VT))
         Top:addPopup(p)
 
         Sfx.play_chips(scoring_pitch())
     end
 end
 local function mul_mult(ctx, n)
-    ctx.mult = (tonumber(ctx.mult) or 1) * (tonumber(n) or 1)
-    if(n > 1) then
+    ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), Totals.read(n, 1))
+    if Totals.cmp(n, 1) > 0 then
         mark_effect_applied(ctx)
 
         local p = Popup()
-        p:spawn(n, "xmult", card_center_x(ctx.VT), card_center_y(ctx.VT))
+        p:spawn(popup_amount(n), "xmult", card_center_x(ctx.VT), card_center_y(ctx.VT))
         Top:addPopup(p)
 
         -- xmult sits under the other scoring cues in the reference mix (vol 0.7).
@@ -105,11 +117,11 @@ end
 local function mul_chips(ctx, n)
     n = tonumber(n) or 1
     if n == 1 then return end
-    ctx.chips = (tonumber(ctx.chips) or 0) * n
+    ctx.chips = Big.mul_values(Totals.read(ctx.chips, 0), n)
     mark_effect_applied(ctx)
 
     local p = Popup()
-    p:spawn(n, "xchips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    p:spawn(popup_amount(n), "xchips", card_center_x(ctx.VT), card_center_y(ctx.VT))
     Top:addPopup(p)
 
     Sfx.play_chips(scoring_pitch())
@@ -117,14 +129,14 @@ end
 local function pow_mult(ctx, n)
     n = tonumber(n) or 1
     if n == 1 then return end
-    local base = tonumber(ctx.mult) or 1
-    local r = base ^ n
+    local base = Totals.read(ctx.mult, 1)
+    local r = Big.pow_values(base, n)
     if r ~= r then r = base end -- a negative base to a fractional power is NaN; keep the base
     ctx.mult = r
     mark_effect_applied(ctx)
 
     local p = Popup()
-    p:spawn(n, "emult", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    p:spawn(popup_amount(n), "emult", card_center_x(ctx.VT), card_center_y(ctx.VT))
     Top:addPopup(p)
 
     Sfx.play_mult2(scoring_pitch(), 0.7)
@@ -132,28 +144,28 @@ end
 local function pow_chips(ctx, n)
     n = tonumber(n) or 1
     if n == 1 then return end
-    local base = tonumber(ctx.chips) or 0
-    local r = base ^ n
+    local base = Totals.read(ctx.chips, 0)
+    local r = Big.pow_values(base, n)
     if r ~= r then r = base end
     ctx.chips = r
     mark_effect_applied(ctx)
 
     local p = Popup()
-    p:spawn(n, "echips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    p:spawn(popup_amount(n), "echips", card_center_x(ctx.VT), card_center_y(ctx.VT))
     Top:addPopup(p)
 
     Sfx.play_chips(scoring_pitch())
 end
 local function swap_totals(ctx)
-    local chips, mult = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
-    if chips == mult then return end
+    local chips, mult = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
+    if Totals.eq(chips, mult) then return end
     ctx.chips, ctx.mult = mult, chips
     mark_effect_applied(ctx)
 end
 local function balance_totals(ctx)
-    local chips, mult = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
-    local best = math.max(chips, mult)
-    if chips == best and mult == best then return end
+    local chips, mult = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
+    local best = Totals.cmp(chips, mult) >= 0 and chips or mult
+    if Totals.eq(chips, best) and Totals.eq(mult, best) then return end
     ctx.chips, ctx.mult = best, best
     mark_effect_applied(ctx)
 end

@@ -23,6 +23,9 @@
 SMODS = SMODS or {}
 
 local CardArt = require("card_art")
+--- Scoring totals may be Big past the double range (Tier 3e).
+local Big = require("big")
+local Totals = Big.Totals
 
 --- Every mod image, by sprite key (`mod:<prefix>:<file>`): `{ path, mod }`.
 SMODS.Sprites = SMODS.Sprites or {}
@@ -338,6 +341,19 @@ local function first_number(t, ...)
     return nil
 end
 
+--- Like `first_number`, but a Big value counts as present and passes through
+--- untouched (Tier 3e): the score fields of a return may carry one, and
+--- `tonumber(Big)` is nil, so the number-only reader would silently drop it.
+local function first_value(t, ...)
+    for i = 1, select("#", ...) do
+        local raw = t[select(i, ...)]
+        if type(raw) == "number" or Big.is_big(raw) then return raw end
+        local v = tonumber(raw)
+        if v then return v end
+    end
+    return nil
+end
+
 --- `level_up` in a return: level the hand being scored, Steamodded semantics. The stored
 --- level rises through the game's own upgrade path (`Game:upgrade_hand_level_at_index`, what
 --- a Planet walks); when the levelled hand is the one on the table, the running totals also
@@ -356,8 +372,8 @@ local function apply_return_level_up(ctx, value)
     idx = idx or tonumber(G.selectedHand)
     if not idx then return false end
     local current = tonumber(G.selectedHand) == idx and ctx.chips ~= nil and ctx.mult ~= nil
-    local before_chips = current and (tonumber(G.selectedHandChips) or 0) or 0
-    local before_mult = current and (tonumber(G.selectedHandMult) or 1) or 1
+    local before_chips = current and Totals.read(G.selectedHandChips, 0) or 0
+    local before_mult = current and Totals.read(G.selectedHandMult, 1) or 1
     local leveled = false
     for _ = 1, n do
         if G:upgrade_hand_level_at_index(idx) then leveled = true end
@@ -365,8 +381,14 @@ local function apply_return_level_up(ctx, value)
     if not leveled then return false end
     JokerEffects.mark_effect_applied(ctx)
     if current then
-        ctx.chips = (tonumber(ctx.chips) or 0) + ((tonumber(G.selectedHandChips) or 0) - before_chips)
-        ctx.mult = (tonumber(ctx.mult) or 0) + ((tonumber(G.selectedHandMult) or 1) - before_mult)
+        local after_chips = Totals.read(G.selectedHandChips, 0)
+        local after_mult = Totals.read(G.selectedHandMult, 1)
+        local d_chips = (Big.is_big(after_chips) or Big.is_big(before_chips))
+            and Big.sub(after_chips, before_chips) or (after_chips - before_chips)
+        local d_mult = (Big.is_big(after_mult) or Big.is_big(before_mult))
+            and Big.sub(after_mult, before_mult) or (after_mult - before_mult)
+        ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), d_chips)
+        ctx.mult = Big.add_values(Totals.read(ctx.mult, 0), d_mult)
     end
     return true
 end
@@ -376,21 +398,39 @@ SMODS.apply_return_level_up = apply_return_level_up
 --- sound and the trigger bookkeeping that paces scoring all come for free. The total fields
 --- land in Steamodded's order: chips, mult, x_mult, e_mult, e_chips, x_chips, swap, balance,
 --- level_up, dollars.
+--- Big values for mods (Tier 3e; see MODDING.md "Big numbers"). Totals promote
+--- on their own when an effect overflows the double range; these exist so a mod
+--- can construct, test, convert and print a Big it holds itself.
+SMODS.big = function(m, e) return Big.from(m, e) end
+SMODS.big_pow = function(base, exponent) return Big.pow_values(base, exponent) end
+SMODS.is_big = function(v) return Big.is_big(v) end
+--- The value as a plain double — explicitly lossy: past the double range this
+--- is ±inf, the value the run would have had without Big.
+SMODS.big_to_number = function(v) return Big.to_number(v) end
+SMODS.big_format = function(v)
+    if Big.is_big(v) then return Big.format(v) end
+    return tostring(v)
+end
+--- Three-way compare across the plain/Big boundary (-1/0/1). Lua 5.1 never
+--- fires comparison metamethods between a table and a number, so a mod
+--- comparing `context.port.chips` against a plain threshold needs this.
+SMODS.big_cmp = function(a, b) return Totals.cmp(a, b) end
+
 function SMODS.apply_return(joker, ctx, ret, kind)
     if type(ret) ~= "table" then return end
-    local chips = first_number(ret, "chips", "chip_mod", "h_chips")
-    local mult = first_number(ret, "mult", "mult_mod", "h_mult")
-    local xmult = first_number(ret, "xmult", "x_mult", "Xmult", "Xmult_mod", "x_mult_mod")
-    local emult = first_number(ret, "emult", "e_mult", "Emult")
-    local echips = first_number(ret, "echips", "e_chips", "Echips")
-    local xchips = first_number(ret, "xchips", "x_chips", "Xchips")
+    local chips = first_value(ret, "chips", "chip_mod", "h_chips")
+    local mult = first_value(ret, "mult", "mult_mod", "h_mult")
+    local xmult = first_value(ret, "xmult", "x_mult", "Xmult", "Xmult_mod", "x_mult_mod")
+    local emult = first_value(ret, "emult", "e_mult", "Emult")
+    local echips = first_value(ret, "echips", "e_chips", "Echips")
+    local xchips = first_value(ret, "xchips", "x_chips", "Xchips")
     local dollars = first_number(ret, "dollars", "p_dollars")
-    if chips and chips ~= 0 then JokerEffects.add_chips(ctx, chips) end
-    if mult and mult ~= 0 then JokerEffects.add_mult(ctx, mult) end
-    if xmult and xmult ~= 1 then JokerEffects.mul_mult(ctx, xmult) end
-    if emult and emult ~= 1 then JokerEffects.pow_mult(ctx, emult) end
-    if echips and echips ~= 1 then JokerEffects.pow_chips(ctx, echips) end
-    if xchips and xchips ~= 1 then JokerEffects.mul_chips(ctx, xchips) end
+    if chips and Totals.cmp(chips, 0) ~= 0 then JokerEffects.add_chips(ctx, chips) end
+    if mult and Totals.cmp(mult, 0) ~= 0 then JokerEffects.add_mult(ctx, mult) end
+    if xmult and Totals.cmp(xmult, 1) ~= 0 then JokerEffects.mul_mult(ctx, xmult) end
+    if emult and Totals.cmp(emult, 1) ~= 0 then JokerEffects.pow_mult(ctx, emult) end
+    if echips and Totals.cmp(echips, 1) ~= 0 then JokerEffects.pow_chips(ctx, echips) end
+    if xchips and Totals.cmp(xchips, 1) ~= 0 then JokerEffects.mul_chips(ctx, xchips) end
     if ret.swap then JokerEffects.swap_totals(ctx) end
     if ret.balance then JokerEffects.balance_totals(ctx) end
     if ret.level_up then apply_return_level_up(ctx, ret.level_up) end
@@ -1517,35 +1557,35 @@ SMODS.edition_value = edition_value
 local function apply_center_return(ctx, ret)
     if type(ret) ~= "table" then return false end
     local fired = ret.message ~= nil
-    local chips = tonumber(ret.chips) or tonumber(ret.chip_mod) or 0
-    local mult = tonumber(ret.mult) or tonumber(ret.mult_mod) or 0
-    local xmult = tonumber(ret.x_mult) or tonumber(ret.xmult) or tonumber(ret.Xmult) or 1
-    local emult = tonumber(ret.emult) or tonumber(ret.e_mult) or tonumber(ret.Emult)
-    local echips = tonumber(ret.echips) or tonumber(ret.e_chips) or tonumber(ret.Echips)
-    local xchips = tonumber(ret.xchips) or tonumber(ret.x_chips) or tonumber(ret.Xchips)
+    local chips = first_value(ret, "chips", "chip_mod") or 0
+    local mult = first_value(ret, "mult", "mult_mod") or 0
+    local xmult = first_value(ret, "x_mult", "xmult", "Xmult") or 1
+    local emult = first_value(ret, "emult", "e_mult", "Emult")
+    local echips = first_value(ret, "echips", "e_chips", "Echips")
+    local xchips = first_value(ret, "xchips", "x_chips", "Xchips")
     local dollars = tonumber(ret.dollars) or tonumber(ret.p_dollars) or 0
-    if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
-    if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
-    if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
-    if emult and emult ~= 1 then
-        local base = tonumber(ctx.mult) or 1
-        local r = base ^ emult
+    if Totals.cmp(chips, 0) ~= 0 then ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), chips) fired = true end
+    if Totals.cmp(mult, 0) ~= 0 then ctx.mult = Big.add_values(Totals.read(ctx.mult, 1), mult) fired = true end
+    if Totals.cmp(xmult, 1) ~= 0 then ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), xmult) fired = true end
+    if emult and Totals.cmp(emult, 1) ~= 0 then
+        local base = Totals.read(ctx.mult, 1)
+        local r = Big.pow_values(base, tonumber(emult) or 1)
         if r == r then ctx.mult = r fired = true end
     end
-    if echips and echips ~= 1 then
-        local base = tonumber(ctx.chips) or 0
-        local r = base ^ echips
+    if echips and Totals.cmp(echips, 1) ~= 0 then
+        local base = Totals.read(ctx.chips, 0)
+        local r = Big.pow_values(base, tonumber(echips) or 1)
         if r == r then ctx.chips = r fired = true end
     end
-    if xchips and xchips ~= 1 then ctx.chips = (tonumber(ctx.chips) or 0) * xchips fired = true end
+    if xchips and Totals.cmp(xchips, 1) ~= 0 then ctx.chips = Big.mul_values(Totals.read(ctx.chips, 0), xchips) fired = true end
     if ret.swap then
-        local c, m = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
-        if c ~= m then ctx.chips, ctx.mult = m, c fired = true end
+        local c, m = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
+        if not Totals.eq(c, m) then ctx.chips, ctx.mult = m, c fired = true end
     end
     if ret.balance then
-        local c, m = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
-        local best = math.max(c, m)
-        if c ~= best or m ~= best then ctx.chips, ctx.mult = best, best fired = true end
+        local c, m = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
+        local best = Totals.cmp(c, m) >= 0 and c or m
+        if not Totals.eq(c, best) or not Totals.eq(m, best) then ctx.chips, ctx.mult = best, best fired = true end
     end
     if ret.level_up and apply_return_level_up(ctx, ret.level_up) then fired = true end
     if dollars ~= 0 and G then
@@ -1589,16 +1629,16 @@ function SMODS.card_center_event(node, event_name, ctx)
             local chips = tonumber(cfg.chips) or tonumber(cfg.bonus) or 0
             local mult = tonumber(cfg.mult) or 0
             local xmult = tonumber(cfg.x_mult) or 1
-            if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
-            if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
-            if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+            if chips ~= 0 then ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), chips) fired = true end
+            if mult ~= 0 then ctx.mult = Big.add_values(Totals.read(ctx.mult, 1), mult) fired = true end
+            if xmult ~= 1 then ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), xmult) fired = true end
         elseif event_name == "held_in_hand" then
             local chips = tonumber(cfg.h_chips) or tonumber(cfg.h_bonus) or 0
             local mult = tonumber(cfg.h_mult) or 0
             local xmult = tonumber(cfg.h_x_mult) or 1
-            if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
-            if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
-            if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+            if chips ~= 0 then ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), chips) fired = true end
+            if mult ~= 0 then ctx.mult = Big.add_values(Totals.read(ctx.mult, 1), mult) fired = true end
+            if xmult ~= 1 then ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), xmult) fired = true end
         elseif event_name == "on_round_end" then
             local dollars = tonumber(cfg.h_dollars) or tonumber(cfg.dollars) or 0
             if dollars ~= 0 and G then
@@ -1676,14 +1716,14 @@ function SMODS.apply_custom_edition_on_hand_scored(joker, ctx, after_effect)
     if after_effect then
         local xmult = tonumber(cfg.x_mult) or 1
         if xmult ~= 1 then
-            ctx.mult = (tonumber(ctx.mult) or 0) * xmult
+            ctx.mult = Big.mul_values(Totals.read(ctx.mult, 0), xmult)
             applied = true
         end
     else
         local chips = tonumber(cfg.chips) or tonumber(cfg.bonus) or 0
         local mult = tonumber(cfg.mult) or 0
-        if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips applied = true end
-        if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 0) + mult applied = true end
+        if chips ~= 0 then ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), chips) applied = true end
+        if mult ~= 0 then ctx.mult = Big.add_values(Totals.read(ctx.mult, 0), mult) applied = true end
     end
     if applied then
         if Sfx and Sfx.play then Sfx.play("foil2", 1, 0.3) end

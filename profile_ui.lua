@@ -1,6 +1,7 @@
 --- Main-menu Profile screen: slot tabs, renaming, progress readout, and slot actions.
 local ProfileUI = {}
 local NumberFormat = require("number_format")
+local Big = require("big")
 
 local SCREEN_W, SCREEN_H = 320, 240
 local NAME_MAX_LENGTH = 14
@@ -280,6 +281,7 @@ end
 ---@param n number
 ---@return string
 local function fmt_num(n)
+    if Big.is_big(n) then return NumberFormat.format(n) end
     return NumberFormat.format(math.floor(tonumber(n) or 0))
 end
 

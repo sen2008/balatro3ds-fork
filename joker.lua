@@ -3,6 +3,10 @@ Joker = Moveable:extend()
 require "joker_effects"
 local TooltipDraw = require("tooltip_draw")
 
+--- Scoring totals may be Big past the double range (Tier 3e).
+local Big = require("big")
+local Totals = Big.Totals
+
 -- Basic 2-layer joker: back sprite (centers atlas) and front sprite (individual PNG).
 
 local JOKER_STICKER_ATLAS_NAME = "stickers"
@@ -1380,11 +1384,11 @@ function Joker:apply_edition_on_hand_scored(ctx, after_effect)
     end
     if (ed == "polychrome") ~= (after_effect == true) then return end
     if ed == "foil" then
-        ctx.chips = (tonumber(ctx.chips) or 0) + 50
+        ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), 50)
     elseif ed == "holo" then
-        ctx.mult = (tonumber(ctx.mult) or 0) + 10
+        ctx.mult = Big.add_values(Totals.read(ctx.mult, 0), 10)
     elseif ed == "polychrome" then
-        ctx.mult = (tonumber(ctx.mult) or 0) * 1.5
+        ctx.mult = Big.mul_values(Totals.read(ctx.mult, 0), 1.5)
     else
         return
     end
@@ -1401,8 +1405,8 @@ function Joker:apply_effect(ctx)
     ctx = ctx or {}
     ctx.VT = self.VT
     local before = capture_joker_runtime_snapshot(self)
-    local before_chips = tonumber(ctx.chips)
-    local before_mult = tonumber(ctx.mult)
+    local before_chips = Totals.read(ctx.chips)
+    local before_mult = Totals.read(ctx.mult)
     if JokerEffects and JokerEffects.begin_apply_context then
         JokerEffects.begin_apply_context(ctx)
     end
@@ -1411,8 +1415,8 @@ function Joker:apply_effect(ctx)
     end
     local after = capture_joker_runtime_snapshot(self)
     local state_changed, created = runtime_snapshot_delta(before, after)
-    local after_chips = tonumber(ctx.chips)
-    local after_mult = tonumber(ctx.mult)
+    local after_chips = Totals.read(ctx.chips)
+    local after_mult = Totals.read(ctx.mult)
     -- An effect that changed runtime state without announcing it (Yorick counting a
     -- discarded card) opts out here: the snapshot heuristic cannot tell a silent tick from a
     -- payoff, but the effect can, and a false trigger costs a beat of the staggered emit queue.

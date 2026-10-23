@@ -1,5 +1,6 @@
 local YouWinUI = {}
 local NumberFormat = require("number_format")
+local Big = require("big")
 local TicketStrip = require("ticket_strip")
 
 local WIN_QUIPS = {
@@ -15,6 +16,7 @@ function YouWinUI.quip(game)
 end
 
 local function fmt_num(n)
+    if Big.is_big(n) then return NumberFormat.format(n) end
     return NumberFormat.format(math.floor(tonumber(n) or 0))
 end
 

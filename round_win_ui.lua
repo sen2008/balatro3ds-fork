@@ -7,6 +7,8 @@
 local Particles = require("particles")
 local DynaText = require("dyna_text")
 local NumberFormat = require("number_format")
+local Big = require("big")
+local Totals = Big.Totals
 
 local RoundWinUI = {}
 
@@ -250,7 +252,7 @@ function RoundWinUI.draw_bottom(game, payout_lines)
     love.graphics.print(I18N.text("hud.score_at_least", nil, "Score at least"), text_x, y + 3)
     love.graphics.setFont(P.MEDIUM)
     love.graphics.setColor(game.C.RED)
-    love.graphics.print(NumberFormat.format(math.floor(tonumber(game.current_blind_target) or 0)), text_x, y + 15)
+    love.graphics.print(NumberFormat.format(Totals.floor(Totals.read(game.current_blind_target, 0))), text_x, y + 15)
     if blind_row and revealed >= 1 then
         -- The header has its own 34px band, so it never takes the squeezed row treatment.
         local blind_reveal_index

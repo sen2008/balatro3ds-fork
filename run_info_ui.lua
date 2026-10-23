@@ -12,6 +12,8 @@
 --- This module is where all four of the reference's tabs now live.
 local RunInfoUI = {}
 local NumberFormat = require("number_format")
+local Big = require("big")
+local Totals = Big.Totals
 local TextCache = require("text_cache")
 local Fonts = require("fonts")
 
@@ -139,7 +141,7 @@ function RunInfoUI.blinds(game)
         out[i] = {
             index = i,
             name = (game.get_blind_display_name and game:get_blind_display_name(i)) or I18N.text("hud.blind", nil, "Blind"),
-            target = math.floor(tonumber(target) or 0),
+            target = Totals.floor(Totals.read(target, 0)),
             reward = (game.get_blind_reward and game:get_blind_reward(i)) or 0,
             state = RunInfoUI.blind_state(game, i),
             sprite_row = (game.get_blind_sprite_index and game:get_blind_sprite_index(i)) or 0,

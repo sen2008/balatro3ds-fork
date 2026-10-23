@@ -13,6 +13,8 @@
 --- none above), so an x-mult of 1.25 does not print as `1`.
 local NumberFormat = {}
 
+local Big = require("big")
+
 --- Where grouped digits give way to `1.234e11`. The reference keeps this on `G` so a mod can
 --- move it (`misc_functions.lua:957`); nothing here does, so it is a plain constant.
 NumberFormat.E_SWITCH_POINT = 100000000000
@@ -25,6 +27,17 @@ local LOG10 = math.log(10)
 --- @param num number|nil
 --- @return string
 function NumberFormat.format(num)
+    -- A Big (Tier 3e) at or past the switch point prints in the same scientific
+    -- shape as a large double; a Big small enough to demote exactly formats as
+    -- the plain value it equals, so a mod-constructed small Big reads normally.
+    if Big.is_big(num) then
+        if Big.cmp(num, NumberFormat.E_SWITCH_POINT) < 0
+            and Big.cmp(num, -NumberFormat.E_SWITCH_POINT) > 0 then
+            num = Big.to_number(num)
+        else
+            return Big.format(num)
+        end
+    end
     if type(num) ~= "number" then return tostring(num or "") end
 
     -- A long enough x-mult chain overflows to inf, and `%.4g` renders that as "inf", which

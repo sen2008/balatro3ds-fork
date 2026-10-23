@@ -24,6 +24,9 @@ local Particles = require("particles")
 local Fonts = require("fonts")
 local Localization = require("localization")
 local NumberFormat = require("number_format")
+--- Scoring totals may be Big past the double range (Tier 3e).
+local Big = require("big")
+local Totals = Big.Totals
 local Tilt = require("tilt")
 local ScreenWipe = require("screen_wipe")
 local JokerDisplay = require("joker_display")
@@ -561,8 +564,8 @@ end
 
 --- Highest single-hand score this run.
 function Game:record_hand_score(score)
-    local s = math.floor(tonumber(score) or 0)
-    if s > (tonumber(self.run_best_hand_score) or 0) then
+    local s = Totals.floor(Totals.read(score, 0))
+    if Totals.cmp(s, Totals.read(self.run_best_hand_score, 0)) > 0 then
         self.run_best_hand_score = s
     end
     self:record_career_best("c_best_hand_chips", s)
@@ -1258,7 +1261,7 @@ end
 function Game:_boss_disable_reduce_target(boss_id)
     local div = (boss_id == "bl_wall" and 2) or (boss_id == "bl_final_vessel" and 3) or nil
     if not div then return end
-    self.current_blind_target = math.floor((tonumber(self.current_blind_target) or 0) / div)
+    self.current_blind_target = Totals.floor(Big.div_values(Totals.read(self.current_blind_target, 0), div))
 end
 
 --- Disable the live boss mid-round and undo what it already did, as the reference's
@@ -2512,8 +2515,10 @@ function Game:normalize_career_stats(data)
     local out = self:build_career_stats()
     if type(data) ~= "table" then return out end
     for _, name in ipairs(JokerUnlocks.CAREER_STATS) do
-        local v = tonumber(data[name])
-        if v and v > 0 then out[name] = math.floor(v) end
+        local v = Totals.revive(data[name], nil)
+        if v ~= nil and Totals.cmp(v, 0) > 0 then
+            out[name] = Big.is_big(v) and v or math.floor(v)
+        end
     end
     return out
 end
@@ -2579,7 +2584,8 @@ end
 function Game:get_career_stat(name)
     local stats = self.career_stats
     if type(stats) ~= "table" then return 0 end
-    return tonumber(stats[name]) or 0
+    -- A best-hand score may be Big (Tier 3e); every other stat is a plain count.
+    return Totals.read(stats[name], 0)
 end
 
 ---@param name string
@@ -2598,8 +2604,8 @@ end
 function Game:record_career_best(name, value)
     if type(name) ~= "string" then return end
     if type(self.career_stats) ~= "table" then self.career_stats = {} end
-    local v = tonumber(value) or 0
-    if v > (tonumber(self.career_stats[name]) or 0) then
+    local v = Totals.read(value, 0)
+    if Totals.cmp(v, Totals.read(self.career_stats[name], 0)) > 0 then
         self.career_stats[name] = v
         self._run_record_flags = self._run_record_flags or {}
         self._run_record_flags[name] = true
@@ -5010,17 +5016,17 @@ function Game:build_run_snapshot()
         money = tonumber(self.money) or 0,
         hands = tonumber(self.hands) or 0,
         discards = tonumber(self.discards) or 0,
-        round_score = tonumber(self.round_score) or 0,
-        last_hand_score = tonumber(self.last_hand_score) or 0,
+        round_score = Totals.encode(Totals.read(self.round_score, 0)),
+        last_hand_score = Totals.encode(Totals.read(self.last_hand_score, 0)),
         selectedHand = tonumber(self.selectedHand) or -1,
         selectedHandHidden = self.selectedHandHidden == true,
         selectedHandLevel = tonumber(self.selectedHandLevel) or 1,
-        selectedHandChips = tonumber(self.selectedHandChips) or 0,
-        selectedHandMult = tonumber(self.selectedHandMult) or 0,
+        selectedHandChips = Totals.encode(Totals.read(self.selectedHandChips, 0)),
+        selectedHandMult = Totals.encode(Totals.read(self.selectedHandMult, 0)),
         _next_card_uid = tonumber(self._next_card_uid) or 1,
         current_blind_index = tonumber(self.current_blind_index) or 1,
         selected_blind_index = tonumber(self.selected_blind_index) or 1,
-        current_blind_target = tonumber(self.current_blind_target) or 0,
+        current_blind_target = Totals.encode(Totals.read(self.current_blind_target, 0)),
         current_blind_reward = tonumber(self.current_blind_reward) or 0,
         current_blind_name = tostring(self.current_blind_name or "Small Blind"),
         current_boss_blind_id = self.current_boss_blind_id,
@@ -5081,7 +5087,7 @@ function Game:build_run_snapshot()
         discardsUnused = self.discardsUnused,
         skipsTaken = self.skipsTaken,
         ectoplasm_used = self.ectoplasm_used,
-        run_best_hand_score = tonumber(self.run_best_hand_score) or 0,
+        run_best_hand_score = Totals.encode(Totals.read(self.run_best_hand_score, 0)),
         run_cards_played = tonumber(self.run_cards_played) or 0,
         run_cards_discarded = tonumber(self.run_cards_discarded) or 0,
         run_cards_purchased = tonumber(self.run_cards_purchased) or 0,
@@ -5206,18 +5212,18 @@ function Game:load_run_snapshot(snapshot)
     self.money = tonumber(snapshot.money) or 0
     self.hands = tonumber(snapshot.hands) or self:get_effective_hands_per_round()
     self.discards = tonumber(snapshot.discards) or self:get_effective_discards_per_round()
-    self.round_score = tonumber(snapshot.round_score) or 0
-    self.last_hand_score = tonumber(snapshot.last_hand_score) or 0
+    self.round_score = Totals.revive(snapshot.round_score, 0)
+    self.last_hand_score = Totals.revive(snapshot.last_hand_score, 0)
     self.selectedHand = tonumber(snapshot.selectedHand) or -1
     self.selectedHandHidden = snapshot.selectedHandHidden == true
     self.selectedHandLevel = tonumber(snapshot.selectedHandLevel) or 1
-    self.selectedHandChips = tonumber(snapshot.selectedHandChips) or 0
-    self.selectedHandMult = tonumber(snapshot.selectedHandMult) or 0
+    self.selectedHandChips = Totals.revive(snapshot.selectedHandChips, 0)
+    self.selectedHandMult = Totals.revive(snapshot.selectedHandMult, 0)
     self._next_card_uid = tonumber(snapshot._next_card_uid) or 1
     self._next_joker_sort_id = 1
     self.current_blind_index = tonumber(snapshot.current_blind_index) or 1
     self.selected_blind_index = tonumber(snapshot.selected_blind_index) or self.current_blind_index
-    self.current_blind_target = tonumber(snapshot.current_blind_target) or 0
+    self.current_blind_target = Totals.revive(snapshot.current_blind_target, 0)
     self.current_blind_reward = tonumber(snapshot.current_blind_reward) or 0
     self.current_blind_name = snapshot.current_blind_name or "Small Blind"
     self.current_boss_blind_id = snapshot.current_boss_blind_id
@@ -5287,7 +5293,7 @@ function Game:load_run_snapshot(snapshot)
     self.discardsUnused = snapshot.discardsUnused
     self.skipsTaken = snapshot.skipsTaken
     self.ectoplasm_used = snapshot.ectoplasm_used
-    self.run_best_hand_score = tonumber(snapshot.run_best_hand_score) or 0
+    self.run_best_hand_score = Totals.revive(snapshot.run_best_hand_score, 0)
     self.run_cards_played = tonumber(snapshot.run_cards_played) or 0
     self.run_cards_discarded = tonumber(snapshot.run_cards_discarded) or 0
     self.run_cards_purchased = tonumber(snapshot.run_cards_purchased) or 0
@@ -5598,9 +5604,30 @@ function Game:get_base_requirement_for_ante(ante)
     local overflow = math.max(0, requested_ante - max_ante)
     local raw_result = last_base * (1.6 + (0.75 * overflow)^(1 + (0.2 * overflow)))^(overflow)
     -- Cap to two significant figures, rounded down
-    local magnitude = math.floor(math.log10(raw_result))
-    local two_sig_fig = math.floor(raw_result / (10^(magnitude - 1))) * (10^(magnitude - 1))
-    return two_sig_fig
+    if raw_result == raw_result and raw_result ~= math.huge then
+        -- math.log10 is 5.1-only (the harness's newer Lua lacks it); divide out.
+        local magnitude = math.floor(math.log(raw_result) / math.log(10))
+        local two_sig_fig = math.floor(raw_result / (10^(magnitude - 1))) * (10^(magnitude - 1))
+        return two_sig_fig
+    end
+    -- Past the double range (around Ante 40) the formula is recomputed in log
+    -- space and returns a Big (Tier 3e phase 2b): log10(raw) = log10(last_base)
+    -- + overflow * log10(1.6 + (0.75*overflow)^(1 + 0.2*overflow)), with the same
+    -- two-significant-figure cap applied to the leading digits.
+    local LOG10 = math.log(10)
+    local inner_log = (1 + 0.2 * overflow) * (math.log(0.75 * overflow) / LOG10)
+    local log_term
+    if inner_log > 15 then
+        log_term = inner_log -- 1.6 is far below the power term's first digit
+    else
+        log_term = math.log(1.6 + 10 ^ inner_log) / LOG10
+    end
+    local l = math.log(last_base) / LOG10 + overflow * log_term
+    local magnitude = math.floor(l)
+    local lead = math.floor(10 ^ (l - magnitude + 1))
+    if lead > 99 then lead = 99 end
+    if lead < 10 then lead = 10 end
+    return Big.from(lead, magnitude - 1)
 end
 
 function Game:get_blind_def(index)
@@ -5815,8 +5842,8 @@ function Game:get_blind_description(index)
         return I18N.t("term.boss_effect")
     end
     local target = self:get_blind_target(index, self.ante)
-    if target and target > 0 then
-        return I18N.t("term.score_chips", { score = NumberFormat.format(math.floor(target)) })
+    if target and Totals.cmp(target, 0) > 0 then
+        return I18N.t("term.score_chips", { score = NumberFormat.format(Totals.floor(target)) })
     end
     return def.name or "Blind"
 end
@@ -5870,7 +5897,7 @@ function Game:get_blind_target(index, ante)
         local proto = self:get_boss_blind_prototype()
         mult = tonumber(proto and proto.mult) or mult
     end
-    return math.floor(base * mult)
+    return Totals.floor(Big.mul_values(Totals.read(base, 0), mult))
 end
 
 function Game:get_preview_blind()
@@ -8201,7 +8228,7 @@ function Game:draw_bottom_blind_select()
         TopUI.center_text_juiced(I18N.text("blind.score_at_least", nil, "Score at Least"),
             tx + 2, ty, scoreWidth - 4, text_font:getHeight())
         love.graphics.setColor(self.C.RED)
-        local req = NumberFormat.format(math.floor(tonumber(target) or 0))
+        local req = NumberFormat.format(Totals.floor(Totals.read(target, 0)))
         love.graphics.setFont(Fonts.fit(self, text_font, req, scoreWidth - 4))
         TopUI.center_text_juiced(req, tx + 2, ty + line_step, scoreWidth - 4, text_font:getHeight())
         love.graphics.setFont(text_font)
@@ -11483,8 +11510,8 @@ end
 
 function Game:_sync_joker_ctx(ctx)
     if type(ctx) ~= "table" then return end
-    self.selectedHandChips = tonumber(ctx.chips) or self.selectedHandChips
-    self.selectedHandMult = tonumber(ctx.mult) or self.selectedHandMult
+    self.selectedHandChips = Totals.read(ctx.chips, self.selectedHandChips)
+    self.selectedHandMult = Totals.read(ctx.mult, self.selectedHandMult)
 end
 
 function Game:_planet_consumable_id_for_most_played_hand()
@@ -11524,7 +11551,7 @@ function Game:_apply_observatory_voucher_to_hand_scored_ctx(ctx)
         local def = id and CONSUMABLE_DEFS[id]
         if type(def) == "table" and def.kind == "planet" and def.hand == hand_type then
             -- Each matching held Planet is independently scored (reference card.lua:1630-1638).
-            ctx.mult = (tonumber(ctx.mult) or 1) * 1.5
+            ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), 1.5)
             self:_sync_joker_ctx(ctx)
         end
     end
@@ -14769,7 +14796,7 @@ function Game:enter_round_win_after_blind()
     local ctx = self:prepare_joker_event_ctx("on_round_end", {
         hands_left = hands_left,
         is_boss_blind = (tonumber(self.current_blind_index) == 3),
-        round_score = tonumber(self.round_score) or 0,
+        round_score = Totals.read(self.round_score, 0),
         blind_name = self.current_blind_name,
         last_played_hand_index = tonumber(self.last_played_hand_index) or nil,
     })
@@ -15378,7 +15405,7 @@ function Game:readout_chips_mult()
     -- the base chips and mult would give the hand away (`get_poker_hand_info`, `'?'`). Playing
     -- the hand turns the cards over and re-evaluates it, which clears the flag.
     if self.selectedHandHidden == true then return "?", "?" end
-    return tonumber(self.selectedHandChips) or 0, tonumber(self.selectedHandMult) or 0
+    return Totals.read(self.selectedHandChips, 0), Totals.read(self.selectedHandMult, 0)
 end
 
 --- Level the top readout should show, or nil for a blank level slot.
@@ -16194,15 +16221,15 @@ function Game:evaluate_blind_progress()
     if self._blind_resolution_pending then
         return
     end
-    local target = tonumber(self.current_blind_target) or 0
-    local score = tonumber(self.round_score) or 0
-    if score >= target and target > 0 then
+    local target = Totals.read(self.current_blind_target, 0)
+    local score = Totals.read(self.round_score, 0)
+    if Totals.cmp(score, target) >= 0 and Totals.cmp(target, 0) > 0 then
         self._blind_resolution_pending = true
         self._last_completed_blind_was_boss = (self.current_blind_index == 3)
         self:enter_round_win_after_blind()
         return
     end
-    if (tonumber(self.hands) or 0) <= 0 and score < target then
+    if (tonumber(self.hands) or 0) <= 0 and Totals.cmp(score, target) < 0 then
         self._blind_resolution_pending = true
         self:handle_failed_blind_reset()
     end
@@ -16213,9 +16240,9 @@ function Game:handle_failed_blind_reset()
     -- runs on both paths in the reference (`blind.lua:338`).
     self:restore_joker_facing()
     local mr_bones_index = nil
-    local goal = (tonumber(self.current_blind_target) or 0) * 0.25
-    local score = tonumber(self.round_score) or 0
-    if type(self.jokers) == "table" and score >= goal then
+    local goal = Big.mul_values(Totals.read(self.current_blind_target, 0), 0.25)
+    local score = Totals.read(self.round_score, 0)
+    if type(self.jokers) == "table" and Totals.cmp(score, goal) >= 0 then
         for i, j in ipairs(self.jokers) do
             if j and j.def and j.def.id == "j_mr_bones" then
                 mr_bones_index = i
@@ -16243,8 +16270,8 @@ function Game:handle_failed_blind_reset()
     end
 
     self._game_over_blind_label = self:get_blind_display_name(self.current_blind_index) or "Blind"
-    self._game_over_score = tonumber(self.round_score) or 0
-    self._game_over_target = tonumber(self.current_blind_target) or 0
+    self._game_over_score = Totals.read(self.round_score, 0)
+    self._game_over_target = Totals.read(self.current_blind_target, 0)
     self._game_over_ante = tonumber(self.ante) or 1
     self._game_over_round = tonumber(self.round) or 1
     self.active_tooltip_card = nil

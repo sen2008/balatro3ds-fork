@@ -4,6 +4,12 @@ Hand = Object:extend()
 local Particles = require("particles")
 local JokerDisplay = require("joker_display")
 
+--- Scoring totals may be Big past the double range (Tier 3e): every hop between
+--- `G.selectedHandChips/Mult` and an event ctx goes through Totals.read, because
+--- `tonumber(Big)` is nil and would silently drop the total (design §1.2).
+local Big = require("big")
+local Totals = Big.Totals
+
 local SCREEN_W = 320
 local SCREEN_H = 240
 local CARD_W = 72
@@ -1594,8 +1600,8 @@ function Hand:_update_play_sequence(dt)
                 else
                     if G and G.emit_joker_event then
                         G:emit_joker_event("card_played", jctx)
-                        G.selectedHandChips = tonumber(jctx.chips) or G.selectedHandChips
-                        G.selectedHandMult = tonumber(jctx.mult) or G.selectedHandMult
+                        G.selectedHandChips = Totals.read(jctx.chips, G.selectedHandChips)
+                        G.selectedHandMult = Totals.read(jctx.mult, G.selectedHandMult)
                     end
                     hand_advance_play_trigger(seq, false)
                 end
@@ -1670,11 +1676,11 @@ function Hand:_update_play_sequence(dt)
                     -- Effect boundaries for the beat count below; see PLAY_EFFECT_INTERVAL.
                     -- Sampled rather than restructured: the scoring math is untouched, the
                     -- sequencer just notices how many separate things this card did.
-                    local chips_before = tonumber(G.selectedHandChips) or 0
-                    local mult_before = tonumber(G.selectedHandMult) or 1
+                    local chips_before = Totals.read(G.selectedHandChips, 0)
+                    local mult_before = Totals.read(G.selectedHandMult, 1)
                     local chips, mult = self:accumulate_card_score(
-                        tonumber(G.selectedHandChips) or 0,
-                        tonumber(G.selectedHandMult) or 1,
+                        Totals.read(G.selectedHandChips, 0),
+                        Totals.read(G.selectedHandMult, 1),
                         node,
                         false
                     )
@@ -1684,8 +1690,8 @@ function Hand:_update_play_sequence(dt)
                     local chips_after_own, mult_after_own = chips, mult
 
                     local data = (node and node.card_data) or {}
-                    chips = tonumber(G.selectedHandChips) or 0
-                    mult = tonumber(G.selectedHandMult) or 1
+                    chips = Totals.read(G.selectedHandChips, 0)
+                    mult = Totals.read(G.selectedHandMult, 1)
                     local card_ctx = {
                         event = "card_played",
                         rank = data.rank,
@@ -1701,8 +1707,8 @@ function Hand:_update_play_sequence(dt)
                     if node.emit_hand_event then
                         node:emit_hand_event("card_played", card_ctx)
                     end
-                    chips = tonumber(card_ctx.chips) or chips
-                    mult = tonumber(card_ctx.mult) or mult
+                    chips = Totals.read(card_ctx.chips, chips)
+                    mult = Totals.read(card_ctx.mult, mult)
                     -- Anything a listener hung on this card is a third.
                     local chips_after_listeners, mult_after_listeners = chips, mult
                     -- `accumulate_card_score` above was told to skip this, so the edition lands
@@ -1719,8 +1725,8 @@ function Hand:_update_play_sequence(dt)
                         event_name = "card_played",
                         rank = data.rank,
                         suit = data.suit,
-                        chips = tonumber(G.selectedHandChips) or 0,
-                        mult = tonumber(G.selectedHandMult) or 1,
+                        chips = Totals.read(G.selectedHandChips, 0),
+                        mult = Totals.read(G.selectedHandMult, 1),
                         hand_index = G.selectedHand,
                         hand_level = G.selectedHandLevel,
                         card_node = node,
@@ -1874,16 +1880,16 @@ function Hand:_update_play_sequence(dt)
             event = "inhand_trigger",
             hand_index = G and G.selectedHand,
             hand_level = G and G.selectedHandLevel,
-            chips = tonumber(G and G.selectedHandChips) or 0,
-            mult = tonumber(G and G.selectedHandMult) or 1,
+            chips = Totals.read(G and G.selectedHandChips, 0),
+            mult = Totals.read(G and G.selectedHandMult, 1),
             played_cards = seq.cards,
         }
         local triggered = false
         if node and node.emit_hand_event then
             triggered = node:emit_hand_event("held_in_hand", ctx) == true
         end
-        G.selectedHandChips = tonumber(ctx.chips) or G.selectedHandChips
-        G.selectedHandMult = tonumber(ctx.mult) or G.selectedHandMult
+        G.selectedHandChips = Totals.read(ctx.chips, G.selectedHandChips)
+        G.selectedHandMult = Totals.read(ctx.mult, G.selectedHandMult)
 
         local data = (node and node.card_data) or {}
         local jctx = {
@@ -1893,8 +1899,8 @@ function Hand:_update_play_sequence(dt)
             shake_card_node = node,
             rank = data.rank,
             suit = data.suit,
-            chips = tonumber(G.selectedHandChips) or 0,
-            mult = tonumber(G.selectedHandMult) or 1,
+            chips = Totals.read(G.selectedHandChips, 0),
+            mult = Totals.read(G.selectedHandMult, 1),
             played_cards = seq.cards,
         }
         local function append_held_retriggers(first_pass_effect_applied)
@@ -1930,8 +1936,8 @@ function Hand:_update_play_sequence(dt)
             append_held_retriggers(triggered)
         end
     elseif seq.phase == "finalize" then
-        local chips = tonumber(G.selectedHandChips) or 0
-        local mult = tonumber(G.selectedHandMult) or 1
+        local chips = Totals.read(G.selectedHandChips, 0)
+        local mult = Totals.read(G.selectedHandMult, 1)
 
         if seq.finalize_step == nil then
             seq.finalize_step = 1
@@ -1993,8 +1999,8 @@ function Hand:_update_play_sequence(dt)
                 local fctx = {
                     event = "on_hand_final",
                     event_name = "on_hand_final",
-                    chips = tonumber(G.selectedHandChips) or 0,
-                    mult = tonumber(G.selectedHandMult) or 1,
+                    chips = Totals.read(G.selectedHandChips, 0),
+                    mult = Totals.read(G.selectedHandMult, 1),
                     hand_index = G.selectedHand,
                     hand_type = G.handlist and G.handlist[G.selectedHand] or nil,
                     cards = seq.cards,
@@ -2013,15 +2019,15 @@ function Hand:_update_play_sequence(dt)
         -- the button thunk (`state_events.lua:1029`), then a further 0.8 s before the chip
         -- commit sting (`state_events.lua:1038`) — "thunk … ka-ching", never one frame.
         if seq.finalize_step == 2 and seq.timer >= 0.4 then
-            chips = math.max(tonumber(G.selectedHandChips) or 0, 0)
-            mult = math.max(tonumber(G.selectedHandMult) or 1, 0)
+            chips = Totals.max_plain(Totals.read(G.selectedHandChips, 0), 0)
+            mult = Totals.max_plain(Totals.read(G.selectedHandMult, 1), 0)
 
             if G.challenge_modifiers and G.challenge_modifiers.chips_dollar_cap == true then
-                chips = math.min(chips, math.max(0, tonumber(G.money) or 0))
+                chips = Totals.min_plain(chips, math.max(0, tonumber(G.money) or 0))
             end
 
             if (G._deck_special or nil) == "plasma" and not seq.voided then
-                local avg = math.floor((chips + mult)/2)
+                local avg = Totals.floor(Big.half_sum(chips, mult))
                 chips = avg
                 mult = avg
                 -- Three layers, not one full-volume gong (`back.lua:134-136`).
@@ -2034,12 +2040,12 @@ function Hand:_update_play_sequence(dt)
             G.selectedHandMult = mult
 
             Sfx.play_button(0.9, 0.6)
-            seq.final_score = math.floor(chips * mult)
+            seq.final_score = Totals.floor(Big.mul_values(chips, mult))
             -- The panels zero out and the product moves to the total readout with the thunk
             -- (`state_events.lua:1029-1032`); TopUI pulses and later drains it.
             G.selectedHandChips = 0
             G.selectedHandMult = 0
-            G.chip_total_display = seq.final_score > 0 and seq.final_score or nil
+            G.chip_total_display = Totals.cmp(seq.final_score, 0) > 0 and seq.final_score or nil
             seq.finalize_step = 3
             seq.timer = 0
         end
@@ -2047,13 +2053,13 @@ function Hand:_update_play_sequence(dt)
         -- Step 3: chip commit, after the reference's 0.8 s hold.
         if seq.finalize_step == 3 and seq.timer >= 0.8 then
             local final_score = seq.final_score or 0
-            if final_score > 0 then
+            if Totals.cmp(final_score, 0) > 0 then
                 Sfx.play("chips2")
                 -- Start the total's 0.5 s drain in step with the score count-up.
                 G.chip_total_drain = true
             end
             G.last_hand_score = final_score
-            G.round_score = (G.round_score or 0) + final_score
+            G.round_score = Big.add_values(Totals.read(G.round_score, 0), final_score)
             if G.record_hand_score then
                 G:record_hand_score(final_score)
             end
@@ -2414,11 +2420,11 @@ end
 function Hand:score_selected_hand()
     if #self.selected == 0 then return nil end
 
-    local chips = tonumber(G.selectedHandChips) or 0
-    local mult = tonumber(G.selectedHandMult) or 1
+    local chips = Totals.read(G.selectedHandChips, 0)
+    local mult = Totals.read(G.selectedHandMult, 1)
     local ordered = self:ordered_selected_nodes()
 
-    print(string.format("Scoring hand start: chips=%d mult=%d", chips, mult))
+    print(string.format("Scoring hand start: chips=%s mult=%s", tostring(chips), tostring(mult)))
 
     for i, node in ipairs(ordered) do
         local score_this = node.counts_for_play_score == true
@@ -2433,23 +2439,24 @@ function Hand:score_selected_hand()
         end
 
         print(string.format(
-            "Card %d [%s of %s]: +%d chips, modifier +%d chips / +%d mult -> chips=%d mult=%d%s",
-            i, tostring(rank), tostring(suit), card_chips, mod_chip_bonus, mod_mult_bonus, chips, mult,
+            "Card %d [%s of %s]: +%d chips, modifier +%d chips / +%d mult -> chips=%s mult=%s%s",
+            i, tostring(rank), tostring(suit), card_chips, mod_chip_bonus, mod_mult_bonus,
+            tostring(chips), tostring(mult),
             score_this and "" or " (kicker - not scored)"
         ))
     end
 
     if G and G.challenge_modifiers and G.challenge_modifiers.chips_dollar_cap == true then
-        chips = math.min(chips, math.max(0, tonumber(G.money) or 0))
+        chips = Totals.min_plain(chips, math.max(0, tonumber(G.money) or 0))
     end
-    local final_score = math.floor(chips * mult)
+    local final_score = Totals.floor(Big.mul_values(chips, mult))
     G.selectedHandChips = chips
     G.selectedHandMult = mult
     G.last_hand_score = final_score
-    G.round_score = (G.round_score or 0) + final_score
+    G.round_score = Big.add_values(Totals.read(G.round_score, 0), final_score)
 
-    print(string.format("Hand result: %d x %d = %d", chips, mult, final_score))
-    print(string.format("Round score: %d", G.round_score))
+    print(string.format("Hand result: %s x %s = %s", tostring(chips), tostring(mult), tostring(final_score)))
+    print(string.format("Round score: %s", tostring(G.round_score)))
 
     return { chips = chips, mult = mult, score = final_score }
 end

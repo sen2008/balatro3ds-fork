@@ -165,15 +165,22 @@ end
 
 --- Evaluators, one per condition type. Each returns true when the condition is met.
 --- `data` is whatever the trigger site passed.
+--- Score values read here may be Big past the double range (Tier 3e).
+local Big = require("big")
+local Totals = Big.Totals
+
 local EVALUATORS = {}
 
 EVALUATORS.career_stat = function(game, cond)
-    return (tonumber(game:get_career_stat(cond.stat)) or 0) >= (tonumber(cond.amount) or 0)
+    return Totals.cmp(Totals.read(game:get_career_stat(cond.stat), 0), tonumber(cond.amount) or 0) >= 0
 end
 
 EVALUATORS.chip_score = function(game, cond, data)
-    local chips = tonumber(data and data.chips) or tonumber(game:get_career_stat("c_best_hand_chips")) or 0
-    return chips >= (tonumber(cond.chips) or 0)
+    -- The hand's chips (or the stored career best) may be Big past 1e308 — the
+    -- Googol Play Card unlock ("score 1e100 chips in one hand") reads here.
+    local chips = Totals.read(data and data.chips, nil)
+    if chips == nil then chips = Totals.read(game:get_career_stat("c_best_hand_chips"), 0) end
+    return Totals.cmp(chips, tonumber(cond.chips) or 0) >= 0
 end
 
 EVALUATORS.ante_up = function(_, cond, data)

@@ -1,6 +1,10 @@
 ---@class Card : Moveable
 Card = Moveable:extend()
 
+--- Scoring totals may be Big past the double range (Tier 3e).
+local Big = require("big")
+local Totals = Big.Totals
+
 --- Stone cards retain their former face only as dormant restoration data. Their rank and
 --- suit must be absent from gameplay data, matching reference/Balatro/card.lua:957-981.
 ---@param data table|nil
@@ -1371,8 +1375,8 @@ end
 
 function Card:do_enhancement(ctx)
     if type(ctx) ~= "table" then return end
-    local chips = tonumber(ctx.chips) or 0
-    local mult = tonumber(ctx.mult) or 1
+    local chips = Totals.read(ctx.chips, 0)
+    local mult = Totals.read(ctx.mult, 1)
     ctx.chips = chips
     ctx.mult = mult
     p = Popup()
@@ -1381,7 +1385,7 @@ function Card:do_enhancement(ctx)
     
     if self.enhancement == "bonus" then
         --+30 chips
-        ctx.chips = chips + 30   
+        ctx.chips = Big.add_values(chips, 30)
         p:spawn(30, "chips", card_center_x, card_center_y)
         G:addPopup(p)
         Sfx.play_chips(scoring_pitch())
@@ -1389,25 +1393,25 @@ function Card:do_enhancement(ctx)
         --+4 mult
         p:spawn(4, "mult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = mult + 4
+        ctx.mult = Big.add_values(mult, 4)
         -- reference/Balatro/functions/common_events.lua:821 — flat mult plays multhit1.
         Sfx.play_mult(scoring_pitch())
     elseif self.enhancement == "glass" then
         -- x2 mult, 1 in 4 chance to break
         p:spawn(2, "xmult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = mult * 2
+        ctx.mult = Big.mul_values(mult, 2)
         -- reference/Balatro/functions/common_events.lua:828 — x_mult plays multhit2 at 0.7.
         Sfx.play_mult2(scoring_pitch(), 0.7)
     elseif self.enhancement == "steel" then
         p:spawn(1.5, "xmult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = (tonumber(ctx.mult) or 1) * 1.5
+        ctx.mult = Big.mul_values(mult, 1.5)
         -- reference/Balatro/functions/common_events.lua:828 — x_mult plays multhit2 at 0.7.
         Sfx.play_mult2(scoring_pitch(), 0.7)
     elseif self.enhancement == "stone" then
         -- +50 chip
-        ctx.chips = (tonumber(ctx.chips) or 0) + 50
+        ctx.chips = Big.add_values(chips, 50)
         p:spawn(50, "chips", card_center_x, card_center_y)
         G:addPopup(p)
         Sfx.play_chips(scoring_pitch())
@@ -1426,7 +1430,7 @@ function Card:do_enhancement(ctx)
         if mult_n > 0 then
             p:spawn(20 * mult_n, "mult", card_center_x, card_center_y)
             G:addPopup(p)
-            ctx.mult = (tonumber(ctx.mult) or 1) + 20 * mult_n
+            ctx.mult = Big.add_values(mult, 20 * mult_n)
             Sfx.play_mult(scoring_pitch())
         end
         -- 1 in 15 to give +$20
