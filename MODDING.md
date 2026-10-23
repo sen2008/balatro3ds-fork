@@ -145,6 +145,13 @@ SMODS.Joker {
 | `context.starting_shop`, `context.ending_shop` | The shop opens; the player leaves it. |
 | `context.reroll_shop`, `context.buying_card`, `context.open_booster`, `context.skipping_booster`, `context.using_consumeable` | Shop and pack events. |
 | `context.playing_card_added`, `context.remove_playing_cards` | Cards added to or destroyed from the deck. |
+| `context.joker_type_destroyed` | A Joker was destroyed (an effect, self-destruction, Mr. Bones spending itself -- never a sale, and never run teardown or a save restore). `context.card` is the destroyed Joker; it hears about its own destruction too, so compare `context.card == card` to exclude it, as the PC mods do. |
+| `context.money_altered` | Money changed. `context.amount` is the signed change and `context.from_shop` is true when a shop purchase, reroll or voucher caused it. Fires for Joker and consumable dollars, shop spends, selling, round-end payout rows and interest, Tag payouts, rental charges, Hermit/Temperance/Immolate/Wraith, and the boss money effects (The Tooth, The Ox). Run setup, save restores and challenge seeding set money directly and do not fire it. A Joker that gains money because money changed nests at most 8 deep; past that the money still lands but raises no further context. |
+| `context.debuff_card` | A debuff was applied to a playing card through the canonical setter (`card:set_debuff(true)` or `SMODS.set_debuff(card, true)`). `context.card` is the card and `context.permanent` is true: the debuff is the persistent kind the boss predicate reads under any Blind. Boss-Blind debuffs themselves are predicates over the active Blind, not applications, so they do not fire this -- a card under The Goad is debuffed, but nothing ever "applies" it. Clearing a debuff fires nothing. |
+| `context.press_play` | The Play button committed a hand, before the `before` context. `context.full_hand` is the played cards. |
+| `context.blind_disabled` | A Boss Blind was disabled (Chicot, Luchador, an effect). `context.blind.id` is the Blind's id. |
+| `context.setting_ability` | A card's enhancement or seal changed through its canonical setters (`Card:set_enhancement` / `Card:set_seal` -- every Tarot, effect and `mod_conv` conversion walks through them). `context.other_card` is the card, `context.old` the previous enhancement or seal (nil when there was none), and `context.unchanged` is true when the new value equals the old. Editions on playing cards have no node setter in this engine and do not fire it. |
+| `context.destroying_card` | Asked before a playing card is destroyed: `context.destroying_card` is the card, and returning `{ remove = false }` keeps it alive. Any other answer lets the destruction proceed. Cards destroyed from the discard pile or deck (no node) are asked about too, with a view over their data. |
 
 Also available on `context`:
 - `blueprint` and `blueprint_card`: set when Blueprint or Brainstorm is copying this Joker.
@@ -157,6 +164,8 @@ Playing cards support `:get_id()` (2 to 14, where Jack is 11 and Ace is 14), `:i
 ### Return values
 
 `chips`, `mult`, `xmult` (also `x_mult` and `Xmult`), `dollars` and `message`, plus `extra` to chain another table. They score exactly like a vanilla Joker's, with the same popups, sounds and timing. A return with only a `message` (such as `"Upgrade!"`) shows it and counts as the Joker triggering.
+
+The extended total fields Steamodded added are here too, applied to the running totals in this order, after the fields above: `x_chips` (also `xchips`: Chips x n), `e_mult` (also `emult`: Mult = Mult ^ n) and `e_chips` (also `echips`: Chips = Chips ^ n) -- the exponent fields land between them, in Steamodded's order chips, mult, x_mult, e_mult, e_chips, x_chips. Then `swap = true` exchanges Chips and Mult, `balance = true` sets both to the larger of the two, and `level_up = n` (or `true` for 1) levels the hand being scored: the stored level rises as a Planet would raise it, and the running totals gain the level's Chips/Mult delta, so earlier contributions are kept. Outside a scoring context `level_up` still raises the level and moves no totals. Enhancement, seal and edition `calculate` returns accept the same fields. All of it is plain double math -- there are no Talisman big numbers behind these readers.
 
 A return may also ask for retriggers, as in Steamodded: `repetitions = n` runs this Joker's effect `n` more times, and `retrigger_joker = <a held Joker>` (or `true`, for this Joker) runs that Joker's effect again -- once, or `repetitions` times when both are given. The extra passes see `context.retrigger_joker`, are announced with "Again!", and run on the spot inside this Joker's own beat rather than being queued for a beat of their own. A pass that is itself a retrigger never retriggers, and one return buys at most 100 extra passes, so a Joker that always asks cannot loop forever.
 
@@ -187,6 +196,8 @@ SMODS.destroy_card(n)    -- true when the card is gone
 - **`set = "Playing"`:** `rank` is a number (2-14, Ace is 14), a numeric string, or `"Ace"`, `"King"`, `"Queen"`, `"Jack"`; `suit` is `"Hearts"`, `"Clubs"`, `"Diamonds"` or `"Spades"`, or a suit registered with `SMODS.Suit`. `enhancement` takes a port name (`"gold"`) or a Steamodded key (`"m_gold"`); `seal` is `"gold"`, `"red"`, `"blue"` or `"purple"`; `edition` sets the card's edition. The card joins the hand -- `nil` when the hand is full, unless `bypass_limit = true` -- and the return is its node, the same object contexts hand over. With `area = "deck"` it joins the deck instead and the return is the `card_data` now in the deck.
 
 `SMODS.destroy_joker(joker)` removes a held Joker for good: a mod Joker's `remove_from_deck` runs and its art frees, exactly as when the game itself removes one. It forces past the eternal sticker -- destroying means it, where selling an eternal Joker is refused. `SMODS.destroy_card(card)` destroys a playing card: it leaves the game entirely and never reaches the discard pile. `card` may be a hand card's node, its `card_data`, or a `card_data` in the deck or discard pile. Both return whether anything was actually removed. Steamodded's batch `SMODS.destroy_cards` is not here; destroy one card at a time.
+
+`SMODS.set_debuff(card, true)` debuffs a playing card through the same canonical setter the game's effects use (see `context.debuff_card` above); pass `false` to clear it. On a bare `card_data` the flag is set with no context, since there is no card to show the other Jokers.
 
 ## Negative art
 
@@ -273,6 +284,12 @@ They appear in packs and the shop alongside the vanilla cards of their set, and 
 - **Selection:** `G.hand.highlighted` is the list of selected cards, in order, while either function runs.
 - **State:** `card.ability` is this copy's own copy of `config` and is saved with the run.
 - **Other fields:** `cost` (defaults to the set's price) and `negative_sprite`.
+
+**Targeting a Joker.** Declare `target_joker = true` on the consumable (or in its `config`) and it acts on one chosen Joker instead of selected cards:
+
+- **`can_use(self, card, target)`** receives the chosen Joker (or nil) as its last argument; with no `can_use` of your own, the consumable can only be used when a target resolves.
+- **`use(self, card, area, copier, target)`** receives it as its last argument, and `G.jokers.highlighted` holds `{ target }` while `can_use` and `use` run, as Steamodded mods expect.
+- The choice resolves in this order: a target handed to the use directly (`Game:use_consumable(index, joker)`), the Joker under the gamepad focus while the focus layer is the Joker row, then the Joker whose tooltip is open. A target that is not currently held never counts. There is no separate pick-a-Joker screen: on touch, the player opens the Joker's tooltip first, then uses the consumable.
 
 Using a mod consumable counts toward The Fool, consumable stats, and Jokers that react to consumables being used.
 
@@ -484,7 +501,10 @@ SMODS.Enhancement {
 fires at the same three moments -- `context.card_played`, `context.held_in_hand`,
 `context.on_round_end`, with `context.other_card` the card -- and its return's
 `chips` / `mult` / `x_mult` land on the running totals and `dollars` in the
-player's money. A debuffed card's enhancement does nothing, like a vanilla one.
+player's money. Its returns accept the extended total fields too (`x_chips`,
+`e_mult`, `e_chips`, `swap`, `balance`, `level_up`), in the order the
+"Return values" section gives. A debuffed card's enhancement does nothing,
+like a vanilla one.
 
 An enhancement value is accepted everywhere a vanilla one is:
 `SMODS.add_card { set = "Playing", enhancement = "copper" }` (or `"m_copper"`,
@@ -620,7 +640,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.
-- **Contexts not raised yet:** `blind_disabled`, `debuff_card`, `debuff_hand`, `destroy_card` (`destroying_card`), `modify_scoring_hand`, `evaluate_poker_hand`, `check_enhancement`, `money_altered`, `initial_scoring_step`, `playing_card_end_of_round`, `change_rank` and `change_suit`. These need deeper changes to the port's scoring and deck code.
+- **Contexts not raised yet:** `debuff_hand`, `modify_scoring_hand`, `evaluate_poker_hand`, `check_enhancement`, `initial_scoring_step`, `playing_card_end_of_round`, `change_rank` and `change_suit`. The scoring set is computed in one pass with the Blind rules interleaved, and rank/suit changes are direct writes with no setter to hang a context on, so these need deeper changes to the port's scoring and deck code rather than a dispatch point.
 
 ## Debugging
 

@@ -188,7 +188,7 @@ function Tag:apply(context)
             -- Doubles the balance, capped at a $40 gain: the reference adds
             -- `min(config.max, max(0, dollars))` (`tag.lua:184`, `max = 40`). Adding
             -- `min(money*2, 40)` tripled it, and went the wrong way while in debt.
-            G.money = G.money + math.min(math.max(0, G.money), 40)
+            G:ease_dollars(math.min(math.max(0, G.money), 40))
         end
         return true
     
@@ -302,18 +302,18 @@ function Tag:apply(context)
         return true
     elseif self.type == "handy" then
         if G and G.handsPlayed and G.money then
-            G.money = G.money + G.handsPlayed
+            G:ease_dollars(G.handsPlayed)
         end
         return true
     elseif self.type == "garbage" then
         if G and type(G.money) == "number" then
             -- Garbage pays for all prior unused discards immediately (reference tag.lua:158-165).
-            G.money = G.money + math.max(0, tonumber(G.discardsUnused) or 0)
+            G:ease_dollars(math.max(0, tonumber(G.discardsUnused) or 0))
         end
         return true
     elseif self.type == "speed" then
         if G and G.skipsTaken and G.money then
-            G.money = G.money + G.skipsTaken * 5
+            G:ease_dollars(G.skipsTaken * 5)
         end
         return true
     elseif self.type == "boss" then

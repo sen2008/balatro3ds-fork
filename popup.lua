@@ -64,6 +64,15 @@ function Popup:checkType(type)
     elseif type == "xmult" then
         self.text = "x" .. self.text
         self.Color = G.C.XMULT
+    elseif type == "xchips" then
+        self.text = "x" .. self.text
+        self.Color = G.C.CHIPS
+    elseif type == "emult" then
+        self.text = "^" .. self.text
+        self.Color = G.C.XMULT
+    elseif type == "echips" then
+        self.text = "^" .. self.text
+        self.Color = G.C.CHIPS
     elseif type == "Nope" then
         self.Color = G.C.BOOSTER
         if self.scale == 1 then self.scale = 2 end

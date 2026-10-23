@@ -97,10 +97,73 @@ local function mul_mult(ctx, n)
         Sfx.play_mult2(scoring_pitch(), 0.7)
     end
 end
+
+--- The readers Steamodded added past the vanilla four, for mod returns (`x_chips`, `e_mult`,
+--- `e_chips`, `swap`, `balance`). Unlike `mul_mult` above, these announce at any non-identity
+--- value: a 0.5x is a real effect and beats are paced by what fired, so an unmarked landing
+--- would read as the Joker doing nothing.
+local function mul_chips(ctx, n)
+    n = tonumber(n) or 1
+    if n == 1 then return end
+    ctx.chips = (tonumber(ctx.chips) or 0) * n
+    mark_effect_applied(ctx)
+
+    local p = Popup()
+    p:spawn(n, "xchips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    Top:addPopup(p)
+
+    Sfx.play_chips(scoring_pitch())
+end
+local function pow_mult(ctx, n)
+    n = tonumber(n) or 1
+    if n == 1 then return end
+    local base = tonumber(ctx.mult) or 1
+    local r = base ^ n
+    if r ~= r then r = base end -- a negative base to a fractional power is NaN; keep the base
+    ctx.mult = r
+    mark_effect_applied(ctx)
+
+    local p = Popup()
+    p:spawn(n, "emult", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    Top:addPopup(p)
+
+    Sfx.play_mult2(scoring_pitch(), 0.7)
+end
+local function pow_chips(ctx, n)
+    n = tonumber(n) or 1
+    if n == 1 then return end
+    local base = tonumber(ctx.chips) or 0
+    local r = base ^ n
+    if r ~= r then r = base end
+    ctx.chips = r
+    mark_effect_applied(ctx)
+
+    local p = Popup()
+    p:spawn(n, "echips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    Top:addPopup(p)
+
+    Sfx.play_chips(scoring_pitch())
+end
+local function swap_totals(ctx)
+    local chips, mult = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
+    if chips == mult then return end
+    ctx.chips, ctx.mult = mult, chips
+    mark_effect_applied(ctx)
+end
+local function balance_totals(ctx)
+    local chips, mult = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
+    local best = math.max(chips, mult)
+    if chips == best and mult == best then return end
+    ctx.chips, ctx.mult = best, best
+    mark_effect_applied(ctx)
+end
 local function add_money(ctx, n)
     if G and G.money ~= nil then
         G.money = (tonumber(G.money) or 0) + (tonumber(n) or 0)
-        if(n > 0) then 
+        -- Every Joker dollar lands here, vanilla and mod alike: the one place
+        -- `money_altered` can hear them all.
+        if G._emit_money_altered then G:_emit_money_altered(tonumber(n) or 0) end
+        if(n > 0) then
             mark_effect_applied(ctx) 
 
             local p = Popup()
@@ -2075,6 +2138,11 @@ end
 JokerEffects.add_mult = add_mult
 JokerEffects.add_chips = add_chips
 JokerEffects.mul_mult = mul_mult
+JokerEffects.mul_chips = mul_chips
+JokerEffects.pow_mult = pow_mult
+JokerEffects.pow_chips = pow_chips
+JokerEffects.swap_totals = swap_totals
+JokerEffects.balance_totals = balance_totals
 JokerEffects.add_money = add_money
 JokerEffects.add_round_win_money = add_round_win_money
 JokerEffects.rank_is_face = rank_is_face

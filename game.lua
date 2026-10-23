@@ -1128,6 +1128,7 @@ function Game:boss_apply_on_hand_submitted(selected_nodes)
         self.money = tonumber(self.money) or 0 - n
         if (tonumber(self.money) or 0) < before then
             self:notify_boss_effect_triggered({ reason = "tooth_money_loss", amount = before - (tonumber(self.money) or 0) })
+            self:_emit_money_altered((tonumber(self.money) or 0) - before)
         end
     elseif boss_id == "bl_ox" then
         local target_idx = self:most_played_hand_index()
@@ -1136,6 +1137,7 @@ function Game:boss_apply_on_hand_submitted(selected_nodes)
             self.money = 0
             if before ~= 0 then
                 self:notify_boss_effect_triggered({ reason = "ox_zero_money", amount = before })
+                self:_emit_money_altered(-before)
             end
         end
     elseif boss_id == "bl_arm" then
@@ -1285,6 +1287,9 @@ function Game:disable_boss_blind()
         if self.hand and self.hand.calculate_play then self.hand:calculate_play() end
     end
     self:_boss_disable_reduce_target(boss_id)
+    -- Every disable funnels through here (Chicot, Luchador's sale, effects), so
+    -- this is the one moment `blind_disabled` fires.
+    self:emit_joker_event("on_blind_disabled", { blind = { id = boss_id, boss = true } })
 end
 
 function Game:notify_boss_effect_triggered(meta)
@@ -7310,7 +7315,9 @@ function Game:_apply_consumable_effect(c)
             if jid and self:joker_has_room_for_new("base") then
                 self:add_joker_by_def(jid)
             end
+            local wraith_before = tonumber(self.money) or 0
             self.money = 0
+            self:_emit_money_altered(-wraith_before)
         elseif id == "spectral_soul" then
             local jid = self:_pick_joker_id_shop_rarity_distribution(
                 function() return 1 end, "sou", nil, 4, true)
@@ -7366,7 +7373,7 @@ function Game:_apply_consumable_effect(c)
                     if hand.destroy_card_node then hand:destroy_card_node(candidates[i]) end
                 end
             end
-            self.money = (tonumber(self.money) or 0) + 20
+            self:ease_dollars(20)
         elseif id == "spectral_ankh" then
             if self.jokers and #self.jokers > 0 then
                 local src = self.jokers[self:random("ankh_choice", 1, #self.jokers)]
@@ -7520,7 +7527,7 @@ function Game:_apply_consumable_effect(c)
         local m = tonumber(self.money) or 0
         -- Never negative: in debt it simply pays nothing (`card.lua`, The Hermit).
         local gain = math.max(0, math.min(m, 20))
-        self.money = m + gain
+        self:ease_dollars(gain)
         if Sfx and Sfx.play_money then Sfx.play_money() end
     elseif id == "tarot_wheel_of_fortune" then
         -- `do_random` includes Oops! All 6s; Wheel is normal/4 (reference card.lua:1467-1485).
@@ -7570,7 +7577,7 @@ function Game:_apply_consumable_effect(c)
             end
         end
     elseif id == "tarot_temperance" then
-        self.money = (tonumber(self.money) or 0) + self:temperance_payout()
+        self:ease_dollars(self:temperance_payout())
         if Sfx and Sfx.play_money then Sfx.play_money() end
     elseif id == "tarot_devil" then
         self:convert_enhancement_ripple(ord, "gold", 1)
@@ -7644,8 +7651,16 @@ end
 --- Use (consume) a Consumable at the given index.
 ---@param index integer
 ---@return boolean
-function Game:use_consumable(index)
-    if not self:consumable_use_enabled(index) then return false end
+function Game:use_consumable(index, joker_target)
+    -- A Joker chosen for a Joker-targeting consumable rides on the held copy:
+    -- the usability check resolves it (`SMODS.joker_target_for`), and the same
+    -- table reaches `SMODS.use_consumable` once the copy is removed.
+    local held_c = joker_target and self.consumables and self.consumables[index]
+    if held_c then held_c._smods_joker_target = joker_target end
+    if not self:consumable_use_enabled(index) then
+        if held_c then held_c._smods_joker_target = nil end
+        return false
+    end
     -- The node is retained so it can fly out and dissolve; the effect below still resolves on
     -- this frame (see `Game:begin_consumable_use_flight`).
     local c, node = self:remove_consumable_at(index, true)
@@ -7779,7 +7794,7 @@ function Game:perform_sell_for_target(sell_target)
         if freed then self:retain_dissolving_node(freed, self.C and self.C.GOLD) end
         if c then
             local value = self:consumable_sell_value(c)
-            self.money = (tonumber(self.money) or 0) + value
+            self:ease_dollars(value)
             if self.active_tooltip_consumable_index == idx then
                 self.active_tooltip_consumable_index = nil
             end
@@ -9061,6 +9076,7 @@ end
 
 --- Tear down run objects and textures before returning to the main menu.
 function Game:clear_run_assets_for_main_menu()
+    self._clearing_run = true
     self.dragging = nil
     self:clear_bottom_tooltips()
 
@@ -9088,6 +9104,7 @@ function Game:clear_run_assets_for_main_menu()
         end
     end
     self.jokers = {}
+    self._clearing_run = nil
     self:clear_joker_shared_picks()
 
     if type(self.consumables) == "table" then
@@ -9227,11 +9244,14 @@ end
 --- Clearing the previous run and seeding the new one.
 function Game:_run_start_reset_objects()
     -- Starting a new run should always clear any existing run objects (especially owned jokers).
+    -- Clearing a previous run's Jokers is teardown, not destruction: no context fires.
+    self._clearing_run = true
     if type(self.jokers) == "table" then
         for i = #self.jokers, 1, -1 do
             self:remove_owned_joker_at(i,true)
         end
     end
+    self._clearing_run = nil
     if type(self.consumables) == "table" then
         for i = #self.consumables, 1, -1 do
             self:remove_consumable_at(i)
@@ -11360,6 +11380,85 @@ function Game:emit_joker_event(event_name, ctx)
             sold:apply_effect(ctx)
         end
     end
+
+    -- The destroyed Joker hears about its own destruction too, like the sold one
+    -- above: it is already out of `self.jokers` when the event fires, and the mods
+    -- that count destructions guard on `context.card == card` to exclude their own.
+    if event_name == "on_joker_type_destroyed" and type(ctx) == "table" then
+        local gone = ctx.joker
+        if gone and gone.matches_trigger and gone:matches_trigger(event_name, ctx) and gone.apply_effect then
+            gone:apply_effect(ctx)
+        end
+    end
+end
+
+--- The one money choke point. Steamodded mods and the game's own flows change
+--- money in dozens of places; the flows that represent a real gain or spend
+--- route through here (or call `_emit_money_altered` beside arithmetic that
+--- must stay as it is), so mod Jokers can hear `money_altered` with the signed
+--- `amount` and whether the change came from the shop (`from_shop`). Run
+--- setup, snapshot restore and challenge seeding write `self.money` directly
+--- and never fire it: no run is live to hear them.
+function Game:ease_dollars(amount, opts)
+    amount = tonumber(amount) or 0
+    if amount == 0 then return self.money end
+    self.money = (tonumber(self.money) or 0) + amount
+    self:_emit_money_altered(amount, opts and opts.from_shop)
+    return self.money
+end
+
+--- Fire `money_altered` for a change of `delta` that already happened (or is
+--- happening through `ease_dollars`). Re-entrant changes -- a Joker gaining
+--- money because money changed -- nest only so deep, so two Jokers feeding
+--- each other cannot loop forever; the nested change still lands, it just
+--- raises no further context past the cap.
+function Game:_emit_money_altered(delta, from_shop)
+    delta = tonumber(delta) or 0
+    if delta == 0 or self._restoring_run_snapshot then return end
+    local depth = self._money_altered_depth or 0
+    if depth >= 8 then return end
+    self._money_altered_depth = depth + 1
+    pcall(function()
+        self:emit_joker_event("on_money_altered", { amount = delta, from_shop = from_shop == true })
+    end)
+    self._money_altered_depth = depth
+end
+
+--- The canonical way to debuff a playing card: the persistent `perma_debuff`
+--- flag on its data, the same channel the Double or Nothing challenge writes
+--- (and the boss predicate reads for every blind). Applying a debuff raises
+--- the `debuff_card` context with the card; clearing one raises nothing.
+--- Boss debuffs are predicates over the active blind, not applications, so
+--- they never pass through here -- see MODDING.md.
+function Game:set_card_debuff(node, debuffed, source)
+    if not node or not node.card_data then return false end
+    local data = node.card_data
+    local now = debuffed and true or false
+    if (data.perma_debuff == true) == now then return true end
+    if now then data.perma_debuff = true else data.perma_debuff = nil end
+    if now and not self._restoring_run_snapshot then
+        self:emit_joker_event("on_card_debuffed", {
+            card_node = node, permanent = true, source = source,
+        })
+    end
+    return true
+end
+
+--- Raise `setting_ability` for a card whose enhancement or seal just changed
+--- through its canonical setters (`Card:set_enhancement` / `Card:set_seal`).
+--- A Joker reacting by setting another card's ability nests only so deep.
+function Game:_emit_setting_ability(node, kind, old_key, new_key)
+    if self._restoring_run_snapshot then return end
+    local depth = self._setting_ability_depth or 0
+    if depth >= 8 then return end
+    self._setting_ability_depth = depth + 1
+    pcall(function()
+        self:emit_joker_event("on_setting_ability", {
+            card_node = node, ability_kind = kind,
+            old = old_key, new = new_key, unchanged = old_key == new_key,
+        })
+    end)
+    self._setting_ability_depth = depth
 end
 
 --- Playing cards removed from the run (destroyed, not sent to discard). `destroyed_cards` is an array of logical card data tables.
@@ -12412,7 +12511,7 @@ function Game:buy_shop_voucher(slot_index)
 
     local voucher_id = offer.id
     local voucher_price = self:get_shop_voucher_price(offer)
-    self.money = (tonumber(self.money) or 0) - voucher_price
+    self:ease_dollars(-voucher_price, { from_shop = true })
     self:add_career_stat("c_shop_dollars_spent", math.max(0, voucher_price))
     self:increment_challenge_inflation()
     if not self.vouchers then self.vouchers = {} end
@@ -12578,7 +12677,7 @@ function Game:try_boss_reroll_press(x, y)
     if self:has_voucher("v_directors_cut") and not self:has_voucher("v_retcon") then
         if (tonumber(self.boss_rerolls_used_this_ante) or 0) >= 1 then return true end
     end
-    self.money = (tonumber(self.money) or 0) - 10
+    self:ease_dollars(-10)
     self.boss_rerolls_used_this_ante = (tonumber(self.boss_rerolls_used_this_ante) or 0) + 1
     self:roll_boss_blind({ exclude_current = true })
     return true
@@ -13328,7 +13427,7 @@ function Game:reroll_shop_offers()
         return false
     end
     local chaos_free = (math.floor(tonumber(self.shop_free_rerolls_used) or 0) < 1) and self:hasJoker("j_chaos")
-    self.money = (tonumber(self.money) or 0) - cost
+    self:ease_dollars(-cost, { from_shop = true })
     self.shop_reroll_count = (tonumber(self.shop_reroll_count) or 0) + 1
     if chaos_free then
         self.shop_free_rerolls_used = (tonumber(self.shop_free_rerolls_used) or 0) + 1
@@ -13618,7 +13717,7 @@ function Game:buy_shop_booster(slot_index)
             w = opening_origin.w, h = opening_origin.h,
         }
     end
-    self.money = (tonumber(self.money) or 0) - price
+    self:ease_dollars(-price, { from_shop = true })
     self:add_career_stat("c_shop_dollars_spent", math.max(0, price))
     self:increment_challenge_inflation()
     self:_play_shop_buy_sfx()
@@ -14597,7 +14696,7 @@ function Game:apply_joker_sticker_round_end()
                 end
             end
             if joker.rental == true then
-                self.money = (tonumber(self.money) or 0) - 3
+                self:ease_dollars(-3)
             end
         end
     end
@@ -15575,7 +15674,7 @@ function Game:flush_round_win_pending_payouts()
         if row[3] == "pending" then
             local amt = math.floor(tonumber(row[2]) or 0)
             if amt ~= 0 then
-                self.money = (tonumber(self.money) or 0) + amt
+                self:ease_dollars(amt)
             end
         end
     end
@@ -15849,6 +15948,14 @@ function Game:remove_owned_joker_at(index, force, dissolve, dissolve_colour)
     if joker.def and joker.def.smods and not self._restoring_run_snapshot then
         SMODS.on_joker_removed(joker)
     end
+    -- Every other removal is a destruction the remaining Jokers hear about
+    -- (`joker_type_destroyed`): effects that destroy Jokers, self-destruction,
+    -- Mr. Bones spending itself. A sale is not a destruction -- the sell path
+    -- marks itself -- and run teardown / snapshot restore stay silent.
+    if not self._restoring_run_snapshot and not self._clearing_run
+        and self._joker_removal_kind ~= "sold" then
+        self:emit_joker_event("on_joker_type_destroyed", { joker = joker })
+    end
     if dissolve then
         -- Already out of run state, so nothing reads it any more; the node just plays out.
         self:retain_dissolving_node(joker, dissolve_colour)
@@ -15925,7 +16032,7 @@ function Game:buy_shop_joker(slot_index)
 
     if not ok then return false end
 
-    self.money = (tonumber(self.money) or 0) - price
+    self:ease_dollars(-price, { from_shop = true })
     self:add_career_stat("c_shop_dollars_spent", math.max(0, price))
     if k == "tarot" then
         self:add_career_stat("c_tarots_bought", 1)
@@ -15980,7 +16087,7 @@ function Game:buy_and_use_shop_consumable(slot_index)
     -- `add_consumable`), so the def copy this path applies gets one too.
     if def.mod_id and c.ability == nil then c.ability = copy_table(def.config or {}) end
 
-    self.money = (tonumber(self.money) or 0) - price
+    self:ease_dollars(-price, { from_shop = true })
     self:add_career_stat("c_shop_dollars_spent", math.max(0, price))
     if kind == "tarot" then
         self:add_career_stat("c_tarots_bought", 1)
@@ -16033,10 +16140,14 @@ function Game:sell_owned_joker(index)
     -- The reference sells a joker with a pop and a gold dissolve, not an instant removal
     -- (`card.lua:1590-1612`). The sale is the point of the shop loop; it should have weight.
     if joker and joker.juice_up then joker:juice_up(0.3, 0.4) end
+    -- A sale is not a destruction: `remove_owned_joker_at` stays silent about
+    -- `joker_type_destroyed` for this one call (the sale has its own context).
+    self._joker_removal_kind = "sold"
     joker = self:remove_owned_joker_at(index, false, true, self.C and self.C.GOLD)
+    self._joker_removal_kind = nil
     if not joker then return false end
     local value = tonumber(joker.sell_cost) or 0
-    self.money = (tonumber(self.money) or 0) + value
+    self:ease_dollars(value)
     local duplicated_from_invisible = false
     if invisible_ready and type(self.jokers) == "table" and #self.jokers > 0 then
         local src = self.jokers[self:random("invisible", 1, #self.jokers)]
@@ -16126,7 +16237,7 @@ function Game:handle_failed_blind_reset()
         local interest_count_cap = cap_dollars * 5
         local interest = math.floor(math.min(math.max(0, self.money), interest_count_cap) / 5)
         interest = math.min(interest, cap_dollars)
-        self.money = (tonumber(self.money) or 0) + interest
+        self:ease_dollars(interest)
         self:enter_shop_after_blind()
         return
     end
@@ -17940,7 +18051,7 @@ function Game:try_gamepad_boss_reroll()
     if self:has_voucher("v_directors_cut") and not self:has_voucher("v_retcon") then
         if (tonumber(self.boss_rerolls_used_this_ante) or 0) >= 1 then return false end
     end
-    self.money = (tonumber(self.money) or 0) - 10
+    self:ease_dollars(-10)
     self.boss_rerolls_used_this_ante = (tonumber(self.boss_rerolls_used_this_ante) or 0) + 1
     self:roll_boss_blind({ exclude_current = true })
     return true

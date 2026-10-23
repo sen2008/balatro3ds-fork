@@ -772,7 +772,7 @@ function Hand:discard_selected()
     if discard_cost and discard_cost > 0 then
         -- The cost is allowed to take the player below zero; Credit Card follows
         -- the same affordability rule for shop purchases (reference state_events.lua:433-434).
-        G.money = (tonumber(G.money) or 0) - discard_cost
+        G:ease_dollars(-discard_cost)
     end
     G.discards = G.discards - 1
     -- `ease_discard` rings a chip as the counter moves (`common_events.lua:137`).
@@ -1047,6 +1047,12 @@ end
 function Hand:destroy_card_at_index(index, silent)
     local node = self.card_nodes and self.card_nodes[index]
     local cd = node and node.card_data or (self.cards and self.cards[index])
+    -- Steamodded's `destroying_card` pass: a mod Joker may answer
+    -- `{ remove = false }` and keep this card alive. Every destruction of a
+    -- hand or played card funnels through here, so this is the only gate.
+    if node and SMODS and SMODS.card_destroy_vetoed and SMODS.card_destroy_vetoed(node) then
+        return false
+    end
     local runtime = self.game and self.game.boss_runtime
     if runtime and runtime.forced_card_uid ~= nil and cd and cd.uid == runtime.forced_card_uid then
         -- Cerulean Bell: destroying the forced card frees selection for this hand (no re-pick until refill).
@@ -2482,6 +2488,19 @@ function Hand:play_selected()
         cards = self:ordered_selected_nodes()
     end
 
+    -- The play is committed: `press_play` fires here, the single funnel every
+    -- input path walks (both call sites call `play_selected`), before the
+    -- `before` context the play sequence dispatches.
+    if self.game and self.game.emit_joker_event and #cards > 0 then
+        self.game:emit_joker_event("on_press_play", {
+            cards = cards,
+            full_hand = cards,
+            hand_index = G and G.selectedHand,
+            hand_level = G and G.selectedHandLevel,
+            hand_type = (G and G.handlist and G.selectedHand and G.handlist[G.selectedHand]) or nil,
+        })
+    end
+
     -- Cleared the moment the hand is played, so Matador only sees abilities that fired
     -- during this hand (`reference/Balatro/functions/state_events.lua:454`).
     if self.game then self.game.blind_triggered_this_hand = false end
@@ -2558,10 +2577,15 @@ function Hand:play_selected()
     if self.game and self.game.challenge_modifiers
         and self.game.challenge_modifiers.debuff_played_cards == true then
         -- Only the scoring subset is marked, matching the reference's post-score
-        -- event (reference/Balatro/functions/state_events.lua:1080-1084).
+        -- event (reference/Balatro/functions/state_events.lua:1080-1084). Routed
+        -- through the canonical setter so the application raises `debuff_card`.
         for _, n in ipairs(cards) do
             if n and n.counts_for_play_score == true and n.card_data then
-                n.card_data.perma_debuff = true
+                if self.game and self.game.set_card_debuff then
+                    self.game:set_card_debuff(n, true, "challenge")
+                else
+                    n.card_data.perma_debuff = true
+                end
             end
         end
     end

@@ -241,6 +241,12 @@ local EVENT_CONTEXT = {
     on_joker_added = "card_added",
     on_tag_added = "tag_added",
     on_hand_final = "final_scoring_step",
+    on_joker_type_destroyed = "joker_type_destroyed",
+    on_money_altered = "money_altered",
+    on_card_debuffed = "debuff_card",
+    on_press_play = "press_play",
+    on_blind_disabled = "blind_disabled",
+    on_setting_ability = "setting_ability",
 }
 SMODS.EVENT_CONTEXT = EVENT_CONTEXT
 
@@ -289,6 +295,23 @@ function SMODS.build_context(event_name, ctx, joker)
         c.card = ctx.joker or ctx.consumable
         c.selling_self = ctx.joker ~= nil and ctx.joker == joker
     end
+    -- The destroyed Joker itself, the way `selling_card` hands over the sold one: mods
+    -- compare `context.card` against their own card to tell their own end from another's.
+    if kind == "joker_type_destroyed" then c.card = ctx.joker end
+    if kind == "money_altered" then
+        c.amount = tonumber(ctx.amount) or 0
+        c.from_shop = ctx.from_shop == true
+    end
+    if kind == "debuff_card" then
+        c.card = refresh_card_view(ctx.card_node)
+        c.permanent = ctx.permanent == true
+    end
+    if kind == "blind_disabled" then c.blind = ctx.blind end
+    if kind == "setting_ability" then
+        c.other_card = refresh_card_view(ctx.card_node)
+        c.old = ctx.old
+        c.unchanged = ctx.unchanged == true
+    end
     if kind == "end_of_round" and ctx.game_over ~= nil then c.game_over = ctx.game_over == true end
     -- Contexts whose flag carries a value rather than `true`.
     if kind == "hand_drawn" then c.hand_drawn = card_views(ctx.drawn_cards) end
@@ -315,17 +338,62 @@ local function first_number(t, ...)
     return nil
 end
 
+--- `level_up` in a return: level the hand being scored, Steamodded semantics. The stored
+--- level rises through the game's own upgrade path (`Game:upgrade_hand_level_at_index`, what
+--- a Planet walks); when the levelled hand is the one on the table, the running totals also
+--- gain the level's delta, so contributions Jokers already made are kept rather than
+--- overwritten by the new base. Outside a scoring context the level still rises and no
+--- totals move. Returns whether a level was gained.
+local function apply_return_level_up(ctx, value)
+    local n = value == true and 1 or math.floor(tonumber(value) or 0)
+    if n <= 0 or type(ctx) ~= "table" or not (G and G.upgrade_hand_level_at_index) then return false end
+    local idx = tonumber(ctx.hand_index)
+    if not idx and type(ctx.hand_type) == "string" and type(G.handlist) == "table" then
+        for i, name in ipairs(G.handlist) do
+            if name == ctx.hand_type then idx = i break end
+        end
+    end
+    idx = idx or tonumber(G.selectedHand)
+    if not idx then return false end
+    local current = tonumber(G.selectedHand) == idx and ctx.chips ~= nil and ctx.mult ~= nil
+    local before_chips = current and (tonumber(G.selectedHandChips) or 0) or 0
+    local before_mult = current and (tonumber(G.selectedHandMult) or 1) or 1
+    local leveled = false
+    for _ = 1, n do
+        if G:upgrade_hand_level_at_index(idx) then leveled = true end
+    end
+    if not leveled then return false end
+    JokerEffects.mark_effect_applied(ctx)
+    if current then
+        ctx.chips = (tonumber(ctx.chips) or 0) + ((tonumber(G.selectedHandChips) or 0) - before_chips)
+        ctx.mult = (tonumber(ctx.mult) or 0) + ((tonumber(G.selectedHandMult) or 1) - before_mult)
+    end
+    return true
+end
+SMODS.apply_return_level_up = apply_return_level_up
+
 --- Apply what `calculate` returned, through the same helpers vanilla Jokers use: the popup, the
---- sound and the trigger bookkeeping that paces scoring all come for free.
+--- sound and the trigger bookkeeping that paces scoring all come for free. The total fields
+--- land in Steamodded's order: chips, mult, x_mult, e_mult, e_chips, x_chips, swap, balance,
+--- level_up, dollars.
 function SMODS.apply_return(joker, ctx, ret, kind)
     if type(ret) ~= "table" then return end
     local chips = first_number(ret, "chips", "chip_mod", "h_chips")
     local mult = first_number(ret, "mult", "mult_mod", "h_mult")
     local xmult = first_number(ret, "xmult", "x_mult", "Xmult", "Xmult_mod", "x_mult_mod")
+    local emult = first_number(ret, "emult", "e_mult", "Emult")
+    local echips = first_number(ret, "echips", "e_chips", "Echips")
+    local xchips = first_number(ret, "xchips", "x_chips", "Xchips")
     local dollars = first_number(ret, "dollars", "p_dollars")
     if chips and chips ~= 0 then JokerEffects.add_chips(ctx, chips) end
     if mult and mult ~= 0 then JokerEffects.add_mult(ctx, mult) end
     if xmult and xmult ~= 1 then JokerEffects.mul_mult(ctx, xmult) end
+    if emult and emult ~= 1 then JokerEffects.pow_mult(ctx, emult) end
+    if echips and echips ~= 1 then JokerEffects.pow_chips(ctx, echips) end
+    if xchips and xchips ~= 1 then JokerEffects.mul_chips(ctx, xchips) end
+    if ret.swap then JokerEffects.swap_totals(ctx) end
+    if ret.balance then JokerEffects.balance_totals(ctx) end
+    if ret.level_up then apply_return_level_up(ctx, ret.level_up) end
     if dollars and dollars ~= 0 then
         if kind == "end_of_round" then
             JokerEffects.add_round_win_money(ctx, joker, dollars)
@@ -334,7 +402,9 @@ function SMODS.apply_return(joker, ctx, ret, kind)
         end
     end
     -- A bare message ("Upgraded!", "Safe!") still counts as the Joker doing something.
-    if ret.message and not (chips or mult or xmult or dollars) then
+    -- swap / balance / level_up land no numeric popup of their own, so a message returned
+    -- alongside them still shows; the fields above each raise one and keep the old rule.
+    if ret.message and not (chips or mult or xmult or emult or echips or xchips or dollars) then
         if Popup and Top and ctx.VT then
             local p = Popup()
             p:spawn(tostring(ret.message), "Nope",
@@ -1439,22 +1509,48 @@ local function edition_value(name)
 end
 SMODS.edition_value = edition_value
 
---- Apply one center `calculate` return to a card event: `chips` / `mult` /
---- `x_mult` onto the running totals the event carries, `dollars` into the
---- player's money. Returns whether anything landed, so the caller can count
---- the card as triggered (its juice, its retrigger eligibility).
+--- Apply one center `calculate` return to a card event: the scoring fields
+--- onto the running totals the event carries, in the same order
+--- `SMODS.apply_return` lands them, `dollars` into the player's money.
+--- Returns whether anything landed, so the caller can count the card as
+--- triggered (its juice, its retrigger eligibility).
 local function apply_center_return(ctx, ret)
     if type(ret) ~= "table" then return false end
     local fired = ret.message ~= nil
     local chips = tonumber(ret.chips) or tonumber(ret.chip_mod) or 0
     local mult = tonumber(ret.mult) or tonumber(ret.mult_mod) or 0
     local xmult = tonumber(ret.x_mult) or tonumber(ret.xmult) or tonumber(ret.Xmult) or 1
+    local emult = tonumber(ret.emult) or tonumber(ret.e_mult) or tonumber(ret.Emult)
+    local echips = tonumber(ret.echips) or tonumber(ret.e_chips) or tonumber(ret.Echips)
+    local xchips = tonumber(ret.xchips) or tonumber(ret.x_chips) or tonumber(ret.Xchips)
     local dollars = tonumber(ret.dollars) or tonumber(ret.p_dollars) or 0
     if chips ~= 0 then ctx.chips = (tonumber(ctx.chips) or 0) + chips fired = true end
     if mult ~= 0 then ctx.mult = (tonumber(ctx.mult) or 1) + mult fired = true end
     if xmult ~= 1 then ctx.mult = (tonumber(ctx.mult) or 1) * xmult fired = true end
+    if emult and emult ~= 1 then
+        local base = tonumber(ctx.mult) or 1
+        local r = base ^ emult
+        if r == r then ctx.mult = r fired = true end
+    end
+    if echips and echips ~= 1 then
+        local base = tonumber(ctx.chips) or 0
+        local r = base ^ echips
+        if r == r then ctx.chips = r fired = true end
+    end
+    if xchips and xchips ~= 1 then ctx.chips = (tonumber(ctx.chips) or 0) * xchips fired = true end
+    if ret.swap then
+        local c, m = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
+        if c ~= m then ctx.chips, ctx.mult = m, c fired = true end
+    end
+    if ret.balance then
+        local c, m = tonumber(ctx.chips) or 0, tonumber(ctx.mult) or 1
+        local best = math.max(c, m)
+        if c ~= best or m ~= best then ctx.chips, ctx.mult = best, best fired = true end
+    end
+    if ret.level_up and apply_return_level_up(ctx, ret.level_up) then fired = true end
     if dollars ~= 0 and G then
         G.money = (tonumber(G.money) or 0) + dollars
+        if G._emit_money_altered then G:_emit_money_altered(dollars) end
         fired = true
     end
     return fired
@@ -1507,6 +1603,7 @@ function SMODS.card_center_event(node, event_name, ctx)
             local dollars = tonumber(cfg.h_dollars) or tonumber(cfg.dollars) or 0
             if dollars ~= 0 and G then
                 G.money = (tonumber(G.money) or 0) + dollars
+                if G._emit_money_altered then G:_emit_money_altered(dollars) end
                 fired = true
             end
         end
@@ -1925,6 +2022,12 @@ function SMODS.Consumable(t)
         check(type(config.hand_type) == "string", "Consumable '" .. t.key .. "': hand_type must be a string")
     end
 
+    -- `target_joker = true` (on the definition, or in `config`): using this
+    -- consumable means choosing one held Joker for it to act on. See
+    -- `SMODS.joker_target_for` for how the chosen Joker is resolved.
+    local target_joker = t.target_joker == true or config.target_joker == true
+    t.target_joker = target_joker or nil
+
     local loc = loc_for(t.loc_txt, "en") or {}
     consumable_order = consumable_order + 1
     -- Data only: an owned consumable is a copy of this table and is saved with the run, so
@@ -1935,6 +2038,7 @@ function SMODS.Consumable(t)
         name = tostring(loc.name or t.name or t.key),
         index = consumable_order,          -- collection order; the art is `mod_sprite`
         select = select,
+        target_joker = target_joker or nil,
         hand = kind == "planet" and config.hand_type or nil,
         cost = tonumber(t.cost),
         config = deep_copy(config),
@@ -1952,25 +2056,57 @@ function SMODS.Consumable(t)
     return t
 end
 
+--- The Joker a Joker-targeting consumable will act on, resolved in order:
+--- an explicit target (the argument, or one the use path attached to the
+--- consumable copy), the Joker under the gamepad focus while the focus layer
+--- is the Joker row, and the Joker whose tooltip is open. Anything that is
+--- not a currently held Joker does not count. Also mirrors the choice onto
+--- `game.jokers.highlighted`, the field Steamodded mods read, and returns it.
+function SMODS.joker_target_for(game, c, explicit)
+    local function held(j)
+        if type(j) ~= "table" then return nil end
+        for _, held_j in ipairs(type(game.jokers) == "table" and game.jokers or EMPTY) do
+            if held_j == j then return j end
+        end
+        return nil
+    end
+    local target = held(explicit) or held(c and c._smods_joker_target)
+    if not target and game.get_gamepad_focus_layer
+        and game:get_gamepad_focus_layer() == "jokers" then
+        target = held(game.jokers and game.jokers[tonumber(game._joker_focus_index) or 1])
+    end
+    if not target then target = held(game.active_tooltip_joker) end
+    if type(game.jokers) == "table" then
+        game.jokers.highlighted = target and { target } or nil
+    end
+    return target
+end
+
 --- Whether a mod consumable can be used now. The port has already checked that the game is in
---- a state where consumables can be used at all.
-function SMODS.consumable_can_use(game, c)
+--- a state where consumables can be used at all. A Joker-targeting consumable's
+--- `can_use(self, card, target)` receives the resolved target (possibly nil);
+--- with no `can_use` of its own it needs a valid target to be usable at all.
+function SMODS.consumable_can_use(game, c, target)
     local center = SMODS.Centers[c and c.id]
     if not center then return nil end
     if type(c.select) == "table" then
         if not game:hand_ready_for_tarot_selection() then return false end
         if not game:tarot_selection_requirement_met(c) then return false end
     end
+    if center.target_joker then target = SMODS.joker_target_for(game, c, target) end
     if type(center.can_use) == "function" then
         sync_highlighted(game)
-        return SMODS.call(center.mod, center.can_use, center, c) == true
+        return SMODS.call(center.mod, center.can_use, center, c, target) == true
     end
+    if center.target_joker then return target ~= nil end
     return true
 end
 
 --- Use a mod consumable. Returns true when it is fully handled, false to let the port's own
 --- Planet path level the hand first (the mod's `use`, if any, then runs from there).
-function SMODS.use_consumable(game, c)
+--- A Joker-targeting consumable's `use(self, card, area, copier, target)`
+--- receives the resolved target as its last argument.
+function SMODS.use_consumable(game, c, target)
     local center = SMODS.Centers[c and c.id]
     if not center then return false end
     local config = c.ability or c.config or {}
@@ -1980,6 +2116,7 @@ function SMODS.use_consumable(game, c)
     if center.consumable_kind == "planet" and c.hand and not c._smods_planet_done then
         return false
     end
+    if center.target_joker then target = SMODS.joker_target_for(game, c, target) end
 
     local conv = config.mod_conv and enhancement_name(config.mod_conv) or nil
     if conv then
@@ -1989,8 +2126,9 @@ function SMODS.use_consumable(game, c)
         game:convert_suit_ripple(highlighted, config.suit_conv)
     end
     if type(center.use) == "function" then
-        SMODS.call(center.mod, center.use, center, c, hand, nil)
+        SMODS.call(center.mod, center.use, center, c, hand, nil, target)
     end
+    c._smods_joker_target = nil
 
     game:record_consumable_use_id(c.id)
     if hand and hand.clear_selection then hand:clear_selection() end
@@ -2005,8 +2143,10 @@ function SMODS.after_planet(game, c)
     local center = SMODS.Centers[c and c.id]
     if center and type(center.use) == "function" then
         c._smods_planet_done = true
-        SMODS.call(center.mod, center.use, center, c, game.hand, nil)
+        local target = center.target_joker and SMODS.joker_target_for(game, c) or nil
+        SMODS.call(center.mod, center.use, center, c, game.hand, nil, target)
         c._smods_planet_done = nil
+        c._smods_joker_target = nil
     end
 end
 
@@ -2357,6 +2497,9 @@ function SMODS.destroy_card(card)
         if type(list) == "table" then
             for i, c in ipairs(list) do
                 if c == data or (data.uid ~= nil and c.uid == data.uid) then
+                    -- No node exists for a card sitting in the deck; the veto pass
+                    -- still runs, against a scratch view over the card's data.
+                    if SMODS.card_destroy_vetoed({ card_data = c }) then return false end
                     table.remove(list, i)
                     return true
                 end
@@ -2364,6 +2507,43 @@ function SMODS.destroy_card(card)
         end
     end
     return false
+end
+
+--- Steamodded's `destroying_card` pass, asked before a playing card is destroyed:
+--- every mod Joker sees the card in `context.destroying_card` and may answer
+--- `{ remove = false }` to keep it alive. Any other return (or none) lets the
+--- destruction proceed. `Hand:destroy_card_at_index` asks this for cards in hand
+--- or in play; `SMODS.destroy_card` asks it for cards in the deck or discard
+--- pile. With no mod Joker held this is a no-op, so vanilla destruction is
+--- untouched. Returns true when some Joker vetoed the destruction.
+function SMODS.card_destroy_vetoed(node)
+    if not holding_mod_joker() or type(node) ~= "table" then return false end
+    local view = refresh_card_view(node)
+    if not view then return false end
+    local vetoed = false
+    SMODS.ask_jokers(function()
+        return { destroying_card = view }
+    end, function(_, ret)
+        if ret.remove == false then vetoed = true end
+    end)
+    return vetoed
+end
+
+--- Debuff or un-debuff a playing card, through the game's canonical setter
+--- (`Game:set_card_debuff`, the persistent `perma_debuff` channel), so the
+--- `debuff_card` context fires exactly as for an effect that calls it. `card`
+--- is a card node or view, as contexts hand over; a bare `card_data` table has
+--- no node to show the other Jokers, so its flag is set with no context.
+--- Returns true when the card's state was set.
+function SMODS.set_debuff(card, debuffed)
+    if type(card) ~= "table" then return false end
+    if card.card_data then
+        if G and G.set_card_debuff then return G:set_card_debuff(card, debuffed, "smods") end
+        card.card_data.perma_debuff = debuffed and true or nil
+        return true
+    end
+    card.perma_debuff = debuffed and true or nil
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -2456,9 +2636,10 @@ function SMODS.mod_environment(mod)
         pseudorandom = SMODS.pseudorandom,
         pseudoseed = function(s) return tostring(s) end,
         pseudorandom_element = SMODS.pseudorandom_element,
-        -- Vanilla's money change, which Steamodded mods call directly.
+        -- Vanilla's money change, which Steamodded mods call directly. Routes
+        -- through the game's own choke point so `money_altered` fires for it.
         ease_dollars = function(n)
-            if G then G.money = (tonumber(G.money) or 0) + (tonumber(n) or 0) end
+            if G and G.ease_dollars then G:ease_dollars(n) end
         end,
     }
     env._MOD = mod

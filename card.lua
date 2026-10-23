@@ -385,6 +385,7 @@ end
 --- Set or clear enhancement (updates `card_data.enhancement` and back/face sprites in the centers atlas).
 ---@param name string|nil
 function Card:set_enhancement(name)
+    local old = self.card_data and self.card_data.enhancement or self.enhancement
     if self.card_data then
         if self.card_data.enhancement == "stone" and name ~= "stone" then
             Card.restore_gameplay_data(self.card_data)
@@ -403,10 +404,17 @@ function Card:set_enhancement(name)
             G:check_unlock("double_gold")
         end
     end
+    -- The canonical ability setters are where `setting_ability` fires from:
+    -- every conversion in the game (Tarots, effects, mod_conv) walks through
+    -- one of these two, so the context sees them all.
+    if G and G._emit_setting_ability then
+        G:_emit_setting_ability(self, "enhancement", old, name)
+    end
 end
 
 ---@param name string|nil
 function Card:set_seal(name)
+    local old = self.seal
     local changed = name ~= self.seal
     self.seal = name
     if self.card_data then
@@ -422,6 +430,21 @@ function Card:set_seal(name)
     if G and G.check_unlock and self.enhancement == "gold" and self.seal == "gold" then
         G:check_unlock("double_gold")
     end
+    if G and G._emit_setting_ability then
+        G:_emit_setting_ability(self, "seal", old, name)
+    end
+end
+
+--- Debuff or un-debuff this card, the setter mods patch on PC. The port's
+--- debuff state is the persistent `perma_debuff` flag the boss predicate
+--- reads, so this routes through the game's canonical setter, which raises
+--- the `debuff_card` context when a debuff is applied. Boss-blind debuffs
+--- are predicates, not state: clearing here does not lift a boss's debuff.
+---@param debuffed boolean
+function Card:set_debuff(debuffed)
+    if G and G.set_card_debuff then return G:set_card_debuff(self, debuffed, "effect") end
+    if self.card_data then self.card_data.perma_debuff = debuffed and true or nil end
+    return true
 end
 
 -- helper to draw one layer (atlas+quad) at given position (ox, oy) or default VT position
@@ -1391,6 +1414,7 @@ function Card:do_enhancement(ctx)
     elseif self.enhancement == "gold" then
         -- +$3 when held in hand
         G.money = G.money + 3
+        if G._emit_money_altered then G:_emit_money_altered(3) end
         p:spawn(3, "money", card_center_x, card_center_y)
         G:addPopup(p)
         Sfx.play_money(scoring_pitch())
@@ -1409,6 +1433,7 @@ function Card:do_enhancement(ctx)
         local money_n = G:chance_triggers(1, 15, 1, "lucky_money")
         if money_n > 0 then
             G.money = G.money + 20 * money_n
+            if G._emit_money_altered then G:_emit_money_altered(20 * money_n) end
             -- Its own popup, queued behind the mult one when both hit.
             local mp = Popup()
             mp:spawn(20 * money_n, "money", card_center_x, card_center_y, nil, mult_n > 0 and 0.8 or 0)
@@ -1428,6 +1453,7 @@ function Card:do_seal(ctx)
     if self.seal == "gold" then
         if G and G.money ~= nil then
             G.money = G.money + 3
+            if G._emit_money_altered then G:_emit_money_altered(3) end
         end
         Sfx.play_money(scoring_pitch())
     elseif self.seal == "red" then

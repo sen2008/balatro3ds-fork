@@ -226,6 +226,137 @@ suite.test("joker_main returns are scored like a vanilla Joker", function()
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Return readers (Tier 3d): x_chips, e_mult, e_chips, swap, balance, level_up
+--------------------------------------------------------------------------------
+
+local RETURNS = [[
+SMODS.Joker {
+    key = "xchips", rarity = 1, cost = 2, sprite = "xchips.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { x_chips = 3 } end
+    end,
+}
+SMODS.Joker {
+    key = "emult", rarity = 1, cost = 2, sprite = "emult.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { e_mult = 2 } end
+    end,
+}
+SMODS.Joker {
+    key = "echips", rarity = 1, cost = 2, sprite = "echips.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { e_chips = 2 } end
+    end,
+}
+SMODS.Joker {
+    key = "swapper", rarity = 1, cost = 2, sprite = "swapper.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { swap = true } end
+    end,
+}
+SMODS.Joker {
+    key = "balancer", rarity = 1, cost = 2, sprite = "balancer.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { balance = true } end
+    end,
+}
+SMODS.Joker {
+    key = "order", rarity = 1, cost = 2, sprite = "order.png",
+    calculate = function(self, card, context)
+        if context.joker_main then
+            return { chips = 10, mult = 3, x_mult = 2, e_mult = 2, e_chips = 2, x_chips = 2 }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "leveler", rarity = 1, cost = 2, sprite = "leveler.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { level_up = 1 } end
+    end,
+}
+]]
+
+local function install_returns()
+    wipe_mods()
+    write_mod("Returns", {
+        id = "ReturnsMod", name = "Returns", prefix = "rt", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, RETURNS)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(4402)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("return readers: x_chips multiplies the running chips", function()
+    local game = install_returns()
+    local ctx = scored(add(game, "j_rt_xchips"))
+    T.assert_eq(ctx.chips, 30)
+    T.assert_eq(ctx.mult, 2)
+    T.assert_true(ctx._joker_effect_applied)
+    wipe_mods()
+end)
+
+suite.test("return readers: e_mult and e_chips raise the totals to a power", function()
+    local game = install_returns()
+    local ctx = scored(add(game, "j_rt_emult"), { mult = 3 })
+    T.assert_eq(ctx.mult, 9)
+    T.assert_eq(ctx.chips, 10)
+    local ctx2 = scored(add(game, "j_rt_echips"), { chips = 5 })
+    T.assert_eq(ctx2.chips, 25)
+    T.assert_eq(ctx2.mult, 2)
+    wipe_mods()
+end)
+
+suite.test("return readers: swap and balance reconcile the totals", function()
+    local game = install_returns()
+    local ctx = scored(add(game, "j_rt_swapper"))
+    T.assert_eq(ctx.chips, 2)
+    T.assert_eq(ctx.mult, 10)
+    local bal = add(game, "j_rt_balancer")
+    local ctx2 = scored(bal)
+    T.assert_eq(ctx2.chips, 10)
+    T.assert_eq(ctx2.mult, 10)
+    local ctx3 = scored(bal, { chips = 2, mult = 10 })
+    T.assert_eq(ctx3.chips, 10)
+    T.assert_eq(ctx3.mult, 10)
+    wipe_mods()
+end)
+
+suite.test("return readers: fields land in Steamodded's order", function()
+    local game = install_returns()
+    -- From (10, 2): +10 chips, +3 mult, x2 mult, ^2 mult, ^2 chips, x2 chips.
+    local ctx = scored(add(game, "j_rt_order"))
+    T.assert_eq(ctx.mult, 100)
+    T.assert_eq(ctx.chips, 800)
+    wipe_mods()
+end)
+
+suite.test("return readers: level_up levels the scored hand and adds its delta", function()
+    local game = install_returns()
+    local idx
+    for i, name in ipairs(game.handlist) do if name == "Pair" then idx = i end end
+    T.assert_true(idx ~= nil)
+    local stats = game.hand_stats[idx]
+    T.assert_eq(stats.level, 1)
+    game.selectedHand = idx
+    game.selectedHandChips = stats.base_chips
+    game.selectedHandMult = stats.base_mult
+    local j = add(game, "j_rt_leveler")
+    -- Totals already carry another Joker's +15 chips / +4 mult on top of the base.
+    local ctx = { event = "on_hand_scored", event_name = "on_hand_scored",
+        chips = stats.base_chips + 15, mult = stats.base_mult + 4,
+        hand_index = idx, hand_type = "Pair" }
+    if j:matches_trigger(ctx.event_name, ctx) then j:apply_effect(ctx) end
+    T.assert_eq(stats.level, 2)
+    T.assert_eq(ctx.chips, stats.base_chips + 15 + stats.chips_per_level)
+    T.assert_eq(ctx.mult, stats.base_mult + 4 + stats.mult_per_level)
+    wipe_mods()
+end)
+
 suite.test("individual contexts see the scored card", function()
     local game = install_example()
     local j = add(game, "j_ex_sevens")
@@ -2688,6 +2819,317 @@ suite.test("custom tags: saves round-trip, and an orphaned held tag is a no-op",
     T.assert_true(fresh:load_run_snapshot(snap))
     T.assert_eq(#fresh.tags, 0, "the orphaned type is skipped on restore")
     wipe_mods()
+end)
+
+--------------------------------------------------------------------------------
+-- Tier 3d layer 2: the contexts the port never raised
+--------------------------------------------------------------------------------
+
+local CONTEXTS = [[
+local function seen()
+    G.cx_seen = G.cx_seen or {}
+    return G.cx_seen
+end
+SMODS.Joker {
+    key = "watcher", rarity = 1, cost = 2, sprite = "watcher.png",
+    calculate = function(self, card, context)
+        local s = seen()
+        if context.joker_type_destroyed then
+            s.destroyed = s.destroyed or {}
+            s.destroyed[#s.destroyed + 1] = context.card and context.card.def and context.card.def.id
+            if context.card == card then s.destroyed_self = true end
+            if context.card ~= card then return { dollars = 1 } end
+        end
+        if context.money_altered then
+            s.money = s.money or {}
+            s.money[#s.money + 1] = { amount = context.amount, from_shop = context.from_shop }
+        end
+        if context.debuff_card then
+            s.debuffed = s.debuffed or {}
+            s.debuffed[#s.debuffed + 1] = context.card and context.card.base and context.card.base.id
+        end
+        if context.press_play then
+            s.press = (s.press or 0) + 1
+            s.press_cards = context.full_hand and #context.full_hand
+        end
+        if context.blind_disabled then
+            s.blind_disabled = context.blind and context.blind.id
+        end
+        if context.setting_ability then
+            s.ability = s.ability or {}
+            s.ability[#s.ability + 1] = {
+                old = context.old, unchanged = context.unchanged,
+                rank = context.other_card and context.other_card.base and context.other_card.base.id,
+            }
+        end
+        if context.tag_added then
+            s.tag = type(context.tag_added) == "table" and context.tag_added.type or context.tag_added
+        end
+    end,
+}
+SMODS.Joker {
+    key = "guardian", rarity = 1, cost = 2, sprite = "guardian.png",
+    calculate = function(self, card, context)
+        if context.destroying_card then
+            local s = seen()
+            s.destroying = (s.destroying or 0) + 1
+            if context.destroying_card.base and context.destroying_card.base.id == 12 then
+                return { remove = false }
+            end
+        end
+    end,
+}
+SMODS.Joker {
+    key = "tipjar", rarity = 1, cost = 2, sprite = "tipjar.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { dollars = 4 } end
+    end,
+}
+]]
+
+local function install_contexts()
+    wipe_mods()
+    write_mod("Contexts", {
+        id = "ContextsMod", name = "Contexts", prefix = "cx", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, CONTEXTS)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(4403)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("contexts: joker_type_destroyed fires on destroy, not on sell", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    game:add_joker_by_def("j_cx_guardian")
+    local victim = game.jokers[#game.jokers]
+    game.money = 10
+    T.assert_true(SMODS.destroy_joker(victim))
+    local s = game.cx_seen
+    T.assert_true(s ~= nil and s.destroyed ~= nil, "the watcher heard a destruction")
+    T.assert_eq(#s.destroyed, 1)
+    T.assert_eq(s.destroyed[1], "j_cx_guardian")
+    T.assert_eq(game.money, 11, "the watcher's dollars return for it landed")
+
+    T.assert_true(game:sell_owned_joker(1), "the watcher sells")
+    T.assert_eq(#game.cx_seen.destroyed, 1, "a sale is not a destruction")
+
+    local game2 = install_contexts()
+    game2:add_joker_by_def("j_cx_watcher")
+    local w2 = game2.jokers[#game2.jokers]
+    T.assert_true(SMODS.destroy_joker(w2))
+    T.assert_true(game2.cx_seen.destroyed_self == true,
+        "the destroyed Joker hears about its own destruction")
+end)
+
+suite.test("contexts: money_altered reports gains, spends and Joker dollars", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    game.money = 10
+    game:ease_dollars(5)
+    game:ease_dollars(-3, { from_shop = true })
+    local s = game.cx_seen
+    T.assert_eq(#s.money, 2)
+    T.assert_eq(s.money[1].amount, 5)
+    T.assert_eq(s.money[1].from_shop, false)
+    T.assert_eq(s.money[2].amount, -3)
+    T.assert_eq(s.money[2].from_shop, true)
+    T.assert_eq(game.money, 12)
+
+    game:add_joker_by_def("j_cx_tipjar")
+    local tipjar = game.jokers[#game.jokers]
+    scored(tipjar)
+    T.assert_eq(game.money, 16, "a Joker's dollars return lands")
+    T.assert_eq(#s.money, 3, "and is heard as money_altered")
+    T.assert_eq(s.money[3].amount, 4)
+    T.assert_eq(s.money[3].from_shop, false)
+end)
+
+suite.test("contexts: debuff_card fires from the canonical setter", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    local node = hand_node(game, 9, "Clubs")
+    T.assert_true(SMODS.set_debuff(node, true))
+    T.assert_true(node.card_data.perma_debuff == true)
+    T.assert_true(game:boss_is_card_debuffed_for_scoring(node),
+        "the persistent channel reads as debuffed under any blind")
+    local s = game.cx_seen
+    T.assert_eq(#s.debuffed, 1)
+    T.assert_eq(s.debuffed[1], 9)
+    T.assert_true(SMODS.set_debuff(node, false))
+    T.assert_eq(node.card_data.perma_debuff, nil)
+    T.assert_eq(#game.cx_seen.debuffed, 1, "clearing a debuff raises nothing")
+    T.assert_true(node:set_debuff(true), "the Card method mods call routes the same way")
+    T.assert_eq(#game.cx_seen.debuffed, 2)
+end)
+
+suite.test("contexts: press_play fires when a hand is committed", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    game.STATE = game.STATES.SELECTING_HAND
+    local node = hand_node(game, 9, "Clubs")
+    game.hand:toggle_selection(node)
+    game.hand:play_selected()
+    T.assert_eq(game.cx_seen.press, 1)
+    T.assert_eq(game.cx_seen.press_cards, 1)
+end)
+
+suite.test("contexts: blind_disabled fires when the boss is disabled", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    -- A game sitting in The Wall, set up the way blind commit leaves it.
+    game.STATE = game.STATES.SELECTING_HAND
+    game.ante = 2
+    game.current_blind_index = 3
+    game.current_boss_blind_id = "bl_wall"
+    game.current_blind_target = game:get_blind_target(3, game.ante)
+    game:boss_reset_for_new_blind()
+    game:disable_boss_blind()
+    T.assert_eq(game.cx_seen.blind_disabled, "bl_wall")
+end)
+
+suite.test("contexts: setting_ability fires from the card setters", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    local node = hand_node(game, 4, "Spades")
+    local base = #(game.cx_seen and game.cx_seen.ability or {})
+    node:set_enhancement("gold")
+    node:set_enhancement("gold")
+    node:set_seal("gold")
+    local s = game.cx_seen
+    T.assert_eq(#s.ability, base + 3, "both setters raise it, once per call")
+    T.assert_eq(s.ability[base + 1].rank, 4, "the card comes along as other_card")
+    T.assert_eq(s.ability[base + 1].unchanged, false)
+    T.assert_eq(s.ability[base + 2].unchanged, true, "a same-to-same set reads unchanged")
+    T.assert_eq(s.ability[base + 2].old, "gold", "and reports the previous ability")
+end)
+
+suite.test("contexts: tag_added reaches mod Jokers when a tag is gained", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_watcher")
+    game:addTag("investment")
+    T.assert_eq(game.cx_seen.tag, "investment")
+end)
+
+suite.test("contexts: destroying_card can veto a destruction", function()
+    local game = install_contexts()
+    game:add_joker_by_def("j_cx_guardian")
+    game:add_joker_by_def("j_cx_watcher")
+    local hand = Hand(game)
+    game.hand = hand
+    hand:add_card({ rank = 12, suit = "Hearts" })
+    hand:add_card({ rank = 7, suit = "Clubs" })
+    local queen, seven = hand.card_nodes[1], hand.card_nodes[2]
+    T.assert_false(hand:destroy_card_node(queen), "the guardian keeps the Queen alive")
+    T.assert_eq(#hand.card_nodes, 2)
+    T.assert_true(hand:destroy_card_node(seven), "an unguarded card is destroyed")
+    T.assert_eq(#hand.card_nodes, 1)
+    T.assert_eq(game.cx_seen.destroying, 2, "both attempts were put to the Jokers")
+end)
+
+--------------------------------------------------------------------------------
+-- Tier 3d layer 3: Joker targeting for consumables
+--------------------------------------------------------------------------------
+
+local TARGETING = [[
+SMODS.ConsumableType {
+    key = "stone",
+    loc_txt = { name = "Stone" },
+    shop_rate = 4,
+}
+SMODS.Joker {
+    key = "sprout", rarity = 1, cost = 2, sprite = "sprout.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = 2 } end
+    end,
+}
+SMODS.Joker {
+    key = "bloom", rarity = 2, cost = 4, sprite = "bloom.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = 8 } end
+    end,
+}
+SMODS.Consumable {
+    set = "stone", key = "evo", sprite = "evo.png", cost = 4,
+    loc_txt = { name = "Evo Stone", text = { "Evolve a Sprout" } },
+    target_joker = true,
+    can_use = function(self, card, target)
+        return target ~= nil and target.def ~= nil and target.def.id == "j_tg_sprout"
+    end,
+    use = function(self, card, area, copier, target)
+        G.tg_seen = { highlighted = G.jokers.highlighted and G.jokers.highlighted[1] }
+        local edition = target.edition
+        SMODS.destroy_joker(target)
+        SMODS.add_card { set = "Joker", key = "j_tg_bloom", edition = edition }
+    end,
+}
+SMODS.Consumable {
+    set = "stone", key = "plain", sprite = "plain.png", cost = 4,
+    loc_txt = { name = "Plain Stone", text = { "Touch a Joker" } },
+    target_joker = true,
+    use = function(self, card, area, copier, target)
+        G.tg_plain = target
+    end,
+}
+]]
+
+local function install_targeting()
+    wipe_mods()
+    write_mod("Targeting", {
+        id = "TargetingMod", name = "Targeting", prefix = "tg", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, TARGETING)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(4404)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.consumable_nodes = {}, {}
+    return game
+end
+
+suite.test("joker targeting: can_use needs the chosen eligible Joker", function()
+    local game = install_targeting()
+    T.assert_true(game:add_consumable("c_tg_evo"))
+    T.assert_false(game:consumable_use_enabled(1), "no Jokers held: no target, not usable")
+    game:add_joker_by_def("j_tg_bloom")
+    T.assert_false(game:use_consumable(1, game.jokers[1]), "a Bloom is not an eligible target")
+    T.assert_eq(#game.consumables, 1, "a refused use spends nothing")
+    game:add_joker_by_def("j_tg_sprout")
+    T.assert_true(game:use_consumable(1, game.jokers[2]), "the chosen Sprout is a valid target")
+    T.assert_eq(#game.consumables, 0, "the stone is spent")
+    T.assert_eq(game.jokers[2].def.id, "j_tg_bloom", "the Sprout evolved")
+end)
+
+suite.test("joker targeting: the chosen Joker transforms, not the leftmost", function()
+    local game = install_targeting()
+    game:add_joker_by_def("j_tg_sprout")
+    game:add_joker_by_def("j_tg_sprout", { edition = "foil" })
+    local chosen = game.jokers[2]
+    T.assert_true(game:add_consumable("c_tg_evo"))
+    T.assert_true(game:use_consumable(1, chosen))
+    T.assert_eq(#game.jokers, 2)
+    T.assert_eq(game.jokers[1].def.id, "j_tg_sprout", "the leftmost is untouched")
+    T.assert_eq(game.jokers[2].def.id, "j_tg_bloom", "the chosen one evolved")
+    T.assert_eq(game.jokers[2].edition, "foil", "its edition carried over")
+    T.assert_true(game.tg_seen.highlighted == chosen,
+        "the target was mirrored to G.jokers.highlighted for the use")
+end)
+
+suite.test("joker targeting: without can_use, a target must resolve", function()
+    local game = install_targeting()
+    T.assert_true(game:add_consumable("c_tg_plain"))
+    T.assert_false(game:consumable_use_enabled(1), "no target anywhere: not usable")
+    game:add_joker_by_def("j_tg_bloom")
+    T.assert_false(game:consumable_use_enabled(1), "still nothing chosen")
+    game.active_tooltip_joker = game.jokers[1]
+    T.assert_true(game:consumable_use_enabled(1), "the tooltip Joker resolves as the target")
+    T.assert_true(game:use_consumable(1))
+    T.assert_true(game.tg_plain == game.jokers[1], "the use received that Joker")
 end)
 
 return suite
