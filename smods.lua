@@ -250,6 +250,9 @@ local EVENT_CONTEXT = {
     on_press_play = "press_play",
     on_blind_disabled = "blind_disabled",
     on_setting_ability = "setting_ability",
+    on_hand_level_up = "level_up_hand",
+    on_game_over = "game_over",
+    on_money_gain = "money_transform",
 }
 SMODS.EVENT_CONTEXT = EVENT_CONTEXT
 
@@ -316,6 +319,23 @@ function SMODS.build_context(event_name, ctx, joker)
         c.unchanged = ctx.unchanged == true
     end
     if kind == "end_of_round" and ctx.game_over ~= nil then c.game_over = ctx.game_over == true end
+    -- The game-over evaluation is Steamodded's end-of-round pass with the flag set:
+    -- `game_over` arrives as the kind itself, and `saved = true` in a return is what
+    -- `SMODS.game_over_saved` reads (the apply path never sees this event).
+    if kind == "game_over" then c.end_of_round = true end
+    -- A hand levelled, from any source: the flag carries the hand's NAME, Steamodded's
+    -- shape (`context.level_up_hand == "Pair"`), with the new level and the delta.
+    if kind == "level_up_hand" then
+        c.level_up_hand = ctx.hand_name
+        c.level = tonumber(ctx.level)
+        c.amount = tonumber(ctx.amount)
+    end
+    -- A money gain about to land, offered to held Jokers for transformation:
+    -- `amount` is the current (possibly already transformed) gain.
+    if kind == "money_transform" then
+        c.amount = tonumber(ctx.amount) or 0
+        c.from_shop = ctx.from_shop == true
+    end
     -- Contexts whose flag carries a value rather than `true`.
     if kind == "hand_drawn" then c.hand_drawn = card_views(ctx.drawn_cards) end
     if kind == "card_added" then c.card = ctx.joker end
@@ -424,6 +444,7 @@ function SMODS.apply_return(joker, ctx, ret, kind)
     local emult = first_value(ret, "emult", "e_mult", "Emult")
     local echips = first_value(ret, "echips", "e_chips", "Echips")
     local xchips = first_value(ret, "xchips", "x_chips", "Xchips")
+    local xlogchips = first_value(ret, "xlog_chips", "xlogchips", "Xlog_chips")
     local dollars = first_number(ret, "dollars", "p_dollars")
     if chips and Totals.cmp(chips, 0) ~= 0 then JokerEffects.add_chips(ctx, chips) end
     if mult and Totals.cmp(mult, 0) ~= 0 then JokerEffects.add_mult(ctx, mult) end
@@ -431,8 +452,9 @@ function SMODS.apply_return(joker, ctx, ret, kind)
     if emult and Totals.cmp(emult, 1) ~= 0 then JokerEffects.pow_mult(ctx, emult) end
     if echips and Totals.cmp(echips, 1) ~= 0 then JokerEffects.pow_chips(ctx, echips) end
     if xchips and Totals.cmp(xchips, 1) ~= 0 then JokerEffects.mul_chips(ctx, xchips) end
+    if xlogchips then JokerEffects.log_chips(ctx, xlogchips) end
     if ret.swap then JokerEffects.swap_totals(ctx) end
-    if ret.balance then JokerEffects.balance_totals(ctx) end
+    if ret.balance then JokerEffects.balance_totals(ctx, type(ret.balance) == "number" and ret.balance or nil) end
     if ret.level_up then apply_return_level_up(ctx, ret.level_up) end
     if dollars and dollars ~= 0 then
         if kind == "end_of_round" then
@@ -444,7 +466,7 @@ function SMODS.apply_return(joker, ctx, ret, kind)
     -- A bare message ("Upgraded!", "Safe!") still counts as the Joker doing something.
     -- swap / balance / level_up land no numeric popup of their own, so a message returned
     -- alongside them still shows; the fields above each raise one and keep the old rule.
-    if ret.message and not (chips or mult or xmult or emult or echips or xchips or dollars) then
+    if ret.message and not (chips or mult or xmult or emult or echips or xchips or xlogchips or dollars) then
         if Popup and Top and ctx.VT then
             local p = Popup()
             p:spawn(tostring(ret.message), "Nope",
@@ -516,6 +538,38 @@ local function build_effect(center, def)
             local bonus = tonumber(SMODS.call(mod, center.calc_dollar_bonus, center, joker))
             if bonus and bonus > 0 then JokerEffects.add_round_win_money(ctx, joker, bonus) end
         end
+    end
+
+    --- Money transformation (Bunco's Fiendish seat): asked with
+    --- `context.money_transform` and the gain in `context.amount`; an `amount`
+    --- field in the return replaces the gain. Anything else leaves it alone.
+    function impl.transform_money(joker, amount, raw)
+        if type(center.calculate) ~= "function" then return nil end
+        raw = type(raw) == "table" and raw or {}
+        raw.amount = amount
+        local ret = SMODS.call(mod, center.calculate, center, joker,
+            SMODS.build_context("on_money_gain", raw, joker))
+        if type(ret) == "table" and tonumber(ret.amount) then
+            return math.floor(tonumber(ret.amount))
+        end
+        return nil
+    end
+
+    --- The game-over question: asked with `context.game_over` (and `end_of_round`)
+    --- when a lost blind would end the run; `saved = true` in the return (or in a
+    --- nested `extra`) rescues it. The Joker's own consequences are its own
+    --- business -- Mr. Bones spends itself in the engine, a mod spends itself
+    --- through the ordinary destroy/sell contexts.
+    function impl.game_over_save(joker, raw)
+        if type(center.calculate) ~= "function" then return false end
+        local ret = SMODS.call(mod, center.calculate, center, joker,
+            SMODS.build_context("on_game_over", raw or {}, joker))
+        local function has_saved(r)
+            if type(r) ~= "table" then return false end
+            if r.saved == true then return true end
+            return has_saved(r.extra)
+        end
+        return has_saved(ret)
     end
 
     --- Retriggers: Steamodded asks with `context.repetition` and reads `repetitions` back.
@@ -1613,6 +1667,7 @@ local function apply_center_return(ctx, ret)
     local emult = first_value(ret, "emult", "e_mult", "Emult")
     local echips = first_value(ret, "echips", "e_chips", "Echips")
     local xchips = first_value(ret, "xchips", "x_chips", "Xchips")
+    local xlogchips = first_value(ret, "xlog_chips", "xlogchips", "Xlog_chips")
     local dollars = tonumber(ret.dollars) or tonumber(ret.p_dollars) or 0
     if Totals.cmp(chips, 0) ~= 0 then ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), chips) fired = true end
     if Totals.cmp(mult, 0) ~= 0 then ctx.mult = Big.add_values(Totals.read(ctx.mult, 1), mult) fired = true end
@@ -1628,6 +1683,14 @@ local function apply_center_return(ctx, ret)
         if r == r then ctx.chips = r fired = true end
     end
     if xchips and Totals.cmp(xchips, 1) ~= 0 then ctx.chips = Big.mul_values(Totals.read(ctx.chips, 0), xchips) fired = true end
+    if xlogchips then
+        local base = tonumber(xlogchips) or 0
+        local cur = Totals.read(ctx.chips, 0)
+        if base > 0 and base ~= 1 and Totals.cmp(cur, 1) > 0 then
+            local log = Big.log10_of(cur) / (math.log(base) / math.log(10))
+            if log >= 1 then ctx.chips = Big.mul_values(cur, log) fired = true end
+        end
+    end
     if ret.swap then
         local c, m = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
         if not Totals.eq(c, m) then ctx.chips, ctx.mult = m, c fired = true end
@@ -1635,10 +1698,24 @@ local function apply_center_return(ctx, ret)
     if ret.balance then
         local c, m = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
         local best = Totals.cmp(c, m) >= 0 and c or m
-        if not Totals.eq(c, best) or not Totals.eq(m, best) then ctx.chips, ctx.mult = best, best fired = true end
+        local f = tonumber(ret.balance)
+        if f and f > 0 and f < 1 then
+            local function toward(v)
+                if Totals.eq(v, best) then return v end
+                if Big.is_big(v) or Big.is_big(best) then
+                    return Big.add_values(v, Big.mul_values(Big.add_values(best, Big.mul_values(v, -1)), f))
+                end
+                return v + (best - v) * f
+            end
+            local nc, nm = toward(c), toward(m)
+            if not Totals.eq(nc, c) or not Totals.eq(nm, m) then ctx.chips, ctx.mult = nc, nm fired = true end
+        elseif not Totals.eq(c, best) or not Totals.eq(m, best) then ctx.chips, ctx.mult = best, best fired = true end
     end
     if ret.level_up and apply_return_level_up(ctx, ret.level_up) then fired = true end
     if dollars ~= 0 and G then
+        if dollars > 0 and SMODS.transform_money_gain then
+            dollars = SMODS.transform_money_gain(G, dollars)
+        end
         G.money = (tonumber(G.money) or 0) + dollars
         if G._emit_money_altered then G:_emit_money_altered(dollars) end
         fired = true
@@ -2690,6 +2767,160 @@ end
 function SMODS.pseudorandom_element(list, seed)
     if type(list) ~= "table" or #list == 0 then return nil end
     return list[SMODS.pseudorandom(seed, 1, #list)]
+end
+
+--------------------------------------------------------------------------------
+-- Wave-1 small systems: money transformation, the game-over question, polls,
+-- permanent card fields
+--------------------------------------------------------------------------------
+
+--- Offer a money gain to every held mod Joker, in slot order, before it lands.
+--- Each Joker whose `calculate` answers `context.money_transform` with an
+--- `amount` field replaces the running gain for the next. Only the Joker's OWN
+--- impl is asked: Bunco's PC wrapper keys off the held Joker itself, so a
+--- Blueprint copying a transformer does not transform. Boss-debuffed Jokers
+--- are skipped. Returns the final gain. Depth-capped and snapshot-safe, like
+--- the `money_altered` notification it precedes.
+function SMODS.transform_money_gain(game, amount, opts)
+    amount = math.floor(tonumber(amount) or 0)
+    if amount <= 0 or type(game) ~= "table" then return amount end
+    if game._restoring_run_snapshot then return amount end
+    if type(game.jokers) ~= "table" or #game.jokers == 0 then return amount end
+    local depth = game._money_transform_depth or 0
+    if depth >= 4 then return amount end
+    game._money_transform_depth = depth + 1
+    local ok, result = pcall(function()
+        for _, j in ipairs(game.jokers) do
+            local impl = j and j.effect_impl
+            if impl and type(impl.transform_money) == "function"
+                and not (game.boss_is_joker_debuffed and game:boss_is_joker_debuffed(j)) then
+                local new = impl.transform_money(j, amount,
+                    { from_shop = opts and opts.from_shop or nil })
+                if tonumber(new) then amount = math.floor(tonumber(new)) end
+                if amount <= 0 then break end
+            end
+        end
+        return amount
+    end)
+    game._money_transform_depth = depth
+    if ok and tonumber(result) then return math.floor(tonumber(result)) end
+    return amount
+end
+
+--- Ask the held Jokers, in slot order, whether any of them saves a run that is
+--- about to end (`context.game_over`, `saved = true` in the return). A Blueprint
+--- or Brainstorm is resolved to the Joker it copies, Steamodded-fashion, and
+--- the COPY's slot is what counts. Returns the slot index (into `game.jokers`)
+--- of the first saver, or nil. Mr. Bones is the engine's own business; the
+--- caller compares indices so the earlier slot wins, as one evaluation would.
+function SMODS.game_over_saved(game)
+    if type(game) ~= "table" or type(game.jokers) ~= "table" then return nil end
+    if game._restoring_run_snapshot then return nil end
+    local raw = {
+        round_score = Totals.read(game.round_score, 0),
+        blind_target = Totals.read(game.current_blind_target, 0),
+    }
+    for i, j in ipairs(game.jokers) do
+        local eff, is_copy = j, false
+        if j and j.def and (j.def.id == "j_blueprint" or j.def.id == "j_brainstorm")
+            and JokerEffects and JokerEffects.resolve_copy_target then
+            local r = JokerEffects.resolve_copy_target(j)
+            if type(r) == "table" and r ~= j then eff, is_copy = r, true end
+        end
+        local impl = eff and eff.effect_impl
+        if impl and type(impl.game_over_save) == "function"
+            and not (game.boss_is_joker_debuffed and game:boss_is_joker_debuffed(eff)) then
+            raw.blueprint = is_copy or nil
+            raw.blueprint_card = is_copy and j or nil
+            if impl.game_over_save(eff, raw) then return i end
+        end
+    end
+    return nil
+end
+
+--- The enhancement/seal polls mods call when they need a random center
+--- (`SMODS.poll_enhancement({guaranteed = true})` is MoreFluff's shape). The
+--- pool is the vanilla values plus every registered center, weighted by the
+--- registration's `config.weight` (default 1; `config.no_poll` or a weight of
+--- 0 stays out), drawn on the run's seeded stream. The fork's poll always
+--- deals a real center -- there is no "no enhancement" outcome to gate --
+--- so `guaranteed` is accepted for source compatibility and `options.key`,
+--- when it names a center, returns that center (the draw is still spent).
+--- Returns the fork VALUE ("lucky", "red"), not a PC center key.
+local function poll_center(options, vanilla, by_value, stream)
+    options = type(options) == "table" and options or {}
+    local key = options.key
+    if key ~= nil then
+        SMODS.pseudorandom(stream)
+        if by_value[key] then return key end
+        for _, v in ipairs(vanilla) do if v == key then return key end end
+        for _, entry in pairs(by_value) do
+            if entry.key == key and entry.value ~= nil then return entry.value end
+        end
+        return key
+    end
+    local pool, total = {}, 0
+    for _, v in ipairs(vanilla) do pool[#pool + 1] = { value = v, weight = 1 } total = total + 1 end
+    for value, entry in pairs(by_value) do
+        local cfg = type(entry.config) == "table" and entry.config or {}
+        local w = tonumber(cfg.weight) or tonumber(entry.weight) or 1
+        if cfg.no_poll ~= true and entry.no_poll ~= true and w > 0 then
+            pool[#pool + 1] = { value = value, weight = w }
+            total = total + w
+        end
+    end
+    if #pool == 0 then return nil end
+    local roll = SMODS.pseudorandom(stream) * total
+    for _, item in ipairs(pool) do
+        roll = roll - item.weight
+        if roll < 0 then return item.value end
+    end
+    return pool[#pool].value
+end
+
+local VANILLA_ENHANCEMENT_POLL = { "bonus", "mult", "wild", "glass", "steel", "stone", "gold", "lucky" }
+local VANILLA_SEAL_POLL = { "gold", "red", "blue", "purple" }
+
+function SMODS.poll_enhancement(options)
+    options = type(options) == "table" and options or {}
+    local suffix = options.key_append or options.type_key or ""
+    return poll_center(options, VANILLA_ENHANCEMENT_POLL, SMODS.EnhancementByValue or {},
+        "poll_enhancement" .. tostring(suffix))
+end
+
+function SMODS.poll_seal(options)
+    options = type(options) == "table" and options or {}
+    local suffix = options.key_append or options.type_key or ""
+    return poll_center(options, VANILLA_SEAL_POLL, SMODS.SealByValue or {},
+        "poll_seal" .. tostring(suffix))
+end
+
+--- Permanent per-card fields (Steamodded's `perma_*`): plain numbers stored on
+--- the card's data, beside `perma_debuff`, so they persist with the deck and
+--- survive saves. Readers: `perma_bonus` (+Chips) and `perma_mult` (+Mult)
+--- land with the card's own contribution; `perma_x_chips` / `perma_x_mult`
+--- multiply the running totals at the card's step, after its edition;
+--- `perma_repetitions` adds trigger passes played and held; `perma_p_dollars`
+--- pays at round end while held, retriggered like a Gold card. Effects set
+--- them through here (or by writing `card.card_data` directly); a nil value
+--- clears the field.
+SMODS.PERMA_FIELDS = {
+    perma_bonus = true, perma_mult = true, perma_x_chips = true,
+    perma_x_mult = true, perma_p_dollars = true, perma_repetitions = true,
+}
+
+function SMODS.set_perma(card, field, value)
+    if type(card) ~= "table" or not SMODS.PERMA_FIELDS[field] then return false end
+    local data = type(card.card_data) == "table" and card.card_data or card
+    if type(data) ~= "table" then return false end
+    if value == nil then data[field] = nil else data[field] = tonumber(value) end
+    return true
+end
+
+function SMODS.get_perma(card, field)
+    if type(card) ~= "table" then return nil end
+    local data = type(card.card_data) == "table" and card.card_data or card
+    return tonumber(data[field])
 end
 
 --- The handful of vanilla localisation keys mods reach for in messages.

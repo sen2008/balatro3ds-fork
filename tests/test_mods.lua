@@ -3845,4 +3845,242 @@ suite.test("joker targeting: without can_use, a target must resolve", function()
     T.assert_true(game.tg_plain == game.jokers[1], "the use received that Joker")
 end)
 
+--------------------------------------------------------------------------------
+-- Wave 1 small systems: xlog_chips, partial balance, polls, perma_* readers,
+-- sold-Joker history, level_up_hand, money transformation, game_over / saved
+--------------------------------------------------------------------------------
+
+local WAVE1 = [[
+local function seen()
+    G.w1_seen = G.w1_seen or {}
+    return G.w1_seen
+end
+SMODS.Joker {
+    key = "filler", rarity = 1, cost = 2, sprite = "filler.png",
+}
+SMODS.Joker {
+    key = "logger", rarity = 1, cost = 2, sprite = "logger.png",
+    calculate = function(self, card, context)
+        local s = seen()
+        if context.level_up_hand then
+            s.levels = s.levels or {}
+            s.levels[#s.levels + 1] = context.level_up_hand
+        end
+        if context.money_transform then
+            s.transforms = s.transforms or {}
+            s.transforms[#s.transforms + 1] = context.amount
+        end
+    end,
+}
+SMODS.Joker {
+    key = "logchips", rarity = 1, cost = 2, sprite = "logchips.png",
+    config = { extra = { base = 10 } },
+    calculate = function(self, card, context)
+        if context.joker_main then return { xlog_chips = card.ability.extra.base } end
+    end,
+}
+SMODS.Joker {
+    key = "partbalance", rarity = 1, cost = 2, sprite = "partbalance.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { balance = 0.5 } end
+    end,
+}
+SMODS.Joker {
+    key = "fullbalance", rarity = 1, cost = 2, sprite = "fullbalance.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { balance = true } end
+    end,
+}
+SMODS.Joker {
+    key = "doubler", rarity = 1, cost = 2, sprite = "doubler.png",
+    calculate = function(self, card, context)
+        if context.money_transform then return { amount = context.amount * 2 } end
+    end,
+}
+SMODS.Joker {
+    key = "earner", rarity = 1, cost = 2, sprite = "earner.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { dollars = 4 } end
+    end,
+}
+SMODS.Joker {
+    key = "saver", rarity = 1, cost = 2, sprite = "saver.png",
+    calculate = function(self, card, context)
+        if context.game_over then
+            seen().game_over = true
+            if G.w1_save_armed then return { saved = true } end
+        end
+    end,
+}
+SMODS.Joker {
+    key = "stamp", rarity = 1, cost = 2, sprite = "stamp.png",
+    calculate = function(self, card, context)
+        if context.individual and context.cardarea == G.play and context.other_card then
+            SMODS.set_perma(context.other_card, "perma_bonus",
+                (SMODS.get_perma(context.other_card, "perma_bonus") or 0) + 5)
+        end
+    end,
+}
+SMODS.Enhancement {
+    key = "glow",
+    loc_txt = { name = "Glow", text = { "{C:chips}+#1#{} Chips" } },
+    config = { bonus = 7 },
+    sprite = "glow.png",
+}
+]]
+
+local function install_wave1()
+    wipe_mods()
+    write_mod("Wave1", {
+        id = "Wave1Mod", name = "Wave1", prefix = "w1", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, WAVE1)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(4405)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("wave1: xlog_chips multiplies chips by log_base(chips), only at log >= 1", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_logchips")
+    local joker = game.jokers[#game.jokers]
+    local ctx = scored(joker, { chips = 1000, mult = 1 })
+    T.assert_true(math.abs(ctx.chips - 3000) < 0.001, "1000 * log10(1000) = 3000, got " .. tostring(ctx.chips))
+    local ctx2 = scored(joker, { chips = 5, mult = 1 })
+    T.assert_eq(ctx2.chips, 5, "log10(5) < 1: no change")
+end)
+
+suite.test("wave1: partial balance moves totals partway to the full balance", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_partbalance")
+    local part = game.jokers[#game.jokers]
+    local ctx = scored(part, { chips = 100, mult = 20 })
+    T.assert_eq(ctx.chips, 100, "the larger total is already at the target")
+    T.assert_eq(ctx.mult, 60, "20 moves halfway to 100")
+    game:add_joker_by_def("j_w1_fullbalance")
+    local full = game.jokers[#game.jokers]
+    local ctx2 = scored(full, { chips = 100, mult = 20 })
+    T.assert_eq(ctx2.chips, 100)
+    T.assert_eq(ctx2.mult, 100, "balance = true still lands the full balance")
+end)
+
+suite.test("wave1: polls deal vanilla + registered centers, seeded", function()
+    local function poll_line()
+        local game = install_wave1()
+        local out = {}
+        for _ = 1, 6 do out[#out + 1] = SMODS.poll_enhancement({ guaranteed = true }) end
+        for _ = 1, 3 do out[#out + 1] = SMODS.poll_seal({ guaranteed = true }) end
+        return out
+    end
+    local a, b = poll_line(), poll_line()
+    for i = 1, 9 do T.assert_eq(a[i], b[i], "same seed, same poll sequence") end
+    local enh = { bonus = true, mult = true, wild = true, glass = true,
+        steel = true, stone = true, gold = true, lucky = true, glow = true }
+    for i = 1, 6 do T.assert_true(enh[a[i]] == true, "enhancement poll deals a real center: " .. tostring(a[i])) end
+    local seals = { gold = true, red = true, blue = true, purple = true }
+    for i = 7, 9 do T.assert_true(seals[a[i]] == true, "seal poll deals a real seal: " .. tostring(a[i])) end
+    local game = install_wave1()
+    T.assert_eq(SMODS.poll_enhancement({ key = "glow", guaranteed = true }), "glow",
+        "a named key polls that center")
+end)
+
+suite.test("wave1: perma fields are read at the card's scoring step", function()
+    local game = install_wave1()
+    local node = hand_node(game, 9, "Clubs",
+        { perma_bonus = 5, perma_mult = 3, perma_x_chips = 2 })
+    local chips, mult = game.hand:accumulate_card_score(0, 1, node)
+    T.assert_eq(chips, 28, "(9 + 5) x perma_x_chips 2")
+    T.assert_eq(mult, 4, "1 + perma_mult 3")
+
+    T.assert_true(SMODS.set_perma(node, "perma_x_mult", 3))
+    T.assert_eq(SMODS.get_perma(node, "perma_x_mult"), 3)
+    local _, mult2 = game.hand:accumulate_card_score(0, 1, node)
+    T.assert_eq(mult2, 12, "perma_x_mult multiplies the running mult after the flats")
+    T.assert_false(SMODS.set_perma(node, "perma_h_chips", 9), "unknown fields are refused")
+end)
+
+suite.test("wave1: perma_repetitions adds passes and perma_p_dollars pays held", function()
+    local game = install_wave1()
+    local node = hand_node(game, 7, "Hearts", { perma_repetitions = 2 })
+    local out = {}
+    node:trigger_sources(false, nil, out)
+    T.assert_eq(#out, 2, "two extra passes, granted by the card itself")
+    T.assert_eq(out[1], false)
+
+    local rich = hand_node(game, 4, "Diamonds", { perma_p_dollars = 3 })
+    game.money = 10
+    game:emit_hand_cards_event("on_round_end", {})
+    T.assert_eq(game.money, 13, "a held card pays its perma_p_dollars at round end")
+end)
+
+suite.test("wave1: sold-Joker history records sales in order and saves", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_filler")
+    game:add_joker_by_def("j_w1_logchips")
+    T.assert_true(game:sell_owned_joker(1))
+    T.assert_eq(#game.jokers_sold, 1)
+    T.assert_eq(game.jokers_sold[1], "j_w1_filler")
+    T.assert_true(game:sell_owned_joker(1))
+    T.assert_eq(game.jokers_sold[2], "j_w1_logchips")
+    local snap = game:build_run_snapshot()
+    T.assert_eq(snap.jokers_sold[1], "j_w1_filler")
+    T.assert_true(game:load_run_snapshot(snap))
+    T.assert_eq(game.jokers_sold[2], "j_w1_logchips", "the history survives a save round-trip")
+end)
+
+suite.test("wave1: level_up_hand fires from the upgrade funnel with the hand's name", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_logger")
+    local idx
+    for i, name in ipairs(game.handlist) do if name == "Pair" then idx = i break end end
+    T.assert_true(idx ~= nil)
+    T.assert_true(game:upgrade_hand_level_at_index(idx))
+    T.assert_eq(#game.w1_seen.levels, 1)
+    T.assert_eq(game.w1_seen.levels[1], "Pair")
+end)
+
+suite.test("wave1: money_transform rewrites gains at the seats, never spends", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_logger")
+    game:add_joker_by_def("j_w1_doubler")
+    game.money = 0
+    game:ease_dollars(10)
+    T.assert_eq(game.money, 20, "a doubled gain lands")
+    game:ease_dollars(-5)
+    T.assert_eq(game.money, 15, "spending is never transformed")
+    T.assert_eq(#game.w1_seen.transforms, 1)
+    T.assert_eq(game.w1_seen.transforms[1], 10)
+    game:add_joker_by_def("j_w1_earner")
+    local earner = game.jokers[#game.jokers]
+    scored(earner)
+    T.assert_eq(game.money, 23, "a Joker's dollars return is transformed too (4 -> 8)")
+    T.assert_eq(game.w1_seen.transforms[2], 4)
+end)
+
+suite.test("wave1: game_over reaches mod Jokers and saved = true rescues the run", function()
+    local game = install_wave1()
+    game:add_joker_by_def("j_w1_saver")
+    game.STATE = game.STATES.SELECTING_HAND
+    game.hands = 0
+    game.round_score = 0
+    game.current_blind_target = 300
+    game:handle_failed_blind_reset()
+    T.assert_true(game.w1_seen and game.w1_seen.game_over == true, "the context fired")
+    T.assert_eq(game.STATE, game.STATES.GAME_OVER, "unarmed, the run still ends")
+
+    local game2 = install_wave1()
+    game2:add_joker_by_def("j_w1_saver")
+    game2.w1_save_armed = true
+    game2.STATE = game2.STATES.SELECTING_HAND
+    game2.hands = 0
+    game2.round_score = 0
+    game2.current_blind_target = 300
+    game2:handle_failed_blind_reset()
+    T.assert_true(game2.STATE ~= game2.STATES.GAME_OVER, "saved: the run continues")
+    T.assert_eq(#game2.jokers, 1, "the saver is not spent by the engine")
+end)
+
 return suite

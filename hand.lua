@@ -296,6 +296,18 @@ function Hand.scoring_pitch()
     return 0.8 + (seq.percent or SCORE_PERCENT_START) * 0.2
 end
 
+--- Permanent per-card multipliers (Steamodded's `perma_x_chips` / `perma_x_mult`,
+--- stored on `card_data`): they multiply the RUNNING totals at the card's own
+--- step, after its edition has landed -- the seat a card's own x-effects sit in.
+local function apply_card_perma_x(chips, mult, data)
+    if type(data) ~= "table" then return chips, mult end
+    local xc = tonumber(data.perma_x_chips) or 1
+    local xm = tonumber(data.perma_x_mult) or 1
+    if xc ~= 1 then chips = Big.mul_values(chips, xc) end
+    if xm ~= 1 then mult = Big.mul_values(mult, xm) end
+    return chips, mult
+end
+
 --- Step the ladder one trigger. One step per scored pass, never per cue: a card that adds
 --- both chips and mult is one trigger and moves the pitch once.
 ---@param seq table
@@ -1717,6 +1729,10 @@ function Hand:_update_play_sequence(dt)
                     -- editioned playing card had its bonus applied twice in the animated path.
                     chips, mult = self:apply_playing_card_edition(chips, mult, data)
                     self:announce_playing_card_edition(node, data)
+                    -- Permanent per-card multipliers land with the card's own
+                    -- effects, after its edition (the one-shot path in
+                    -- `accumulate_card_score` puts them in the same seat).
+                    chips, mult = apply_card_perma_x(chips, mult, data)
                     G.selectedHandChips = chips
                     G.selectedHandMult = mult
 
@@ -2338,11 +2354,21 @@ function Hand:accumulate_card_score(chips, mult, node, include_edition)
     local mod_chip_bonus, mod_mult_bonus = self:get_modifier_bonus(data)
     chips = chips + mod_chip_bonus
     mult = mult + mod_mult_bonus
+    -- Permanent per-card flats (`perma_bonus` / `perma_mult` on the card's data,
+    -- Steamodded's fields): they ride with the card's own contribution, announced
+    -- as their own effects like the modifier bonuses above.
+    local perma_bonus = math.floor(tonumber(data.perma_bonus) or 0)
+    local perma_mult = tonumber(data.perma_mult) or 0
+    chips = chips + perma_bonus
+    mult = mult + perma_mult
     -- The animated sequencer passes `false` and applies the edition itself, after the card's
     -- `card_played` listeners have run, which is the reference's order
     -- (`state_events.lua:759-776`). Callers that score in one shot let it happen here.
     if include_edition ~= false then
         chips, mult = self:apply_playing_card_edition(chips, mult, data)
+        -- One-shot callers take the whole card at once: the permanent multipliers
+        -- land here, after the edition, exactly where the sequencer puts them.
+        chips, mult = apply_card_perma_x(chips, mult, data)
     end
     local announce_edition_here = (include_edition ~= false)
 
@@ -2359,6 +2385,8 @@ function Hand:accumulate_card_score(chips, mult, node, include_edition)
         { amount = mod_chip_bonus, kind = "chips" },
         -- `> 0`, not `> 1`: this was guarded against 1 and silently swallowed a +1 mult.
         { amount = mod_mult_bonus, kind = "mult" },
+        { amount = perma_bonus, kind = "chips" },
+        { amount = perma_mult, kind = "mult" },
     })
     -- The sequencer applies the edition later and announces it there, in the reference's order.
     -- A one-shot caller applied it above, so it announces here to stay in step.

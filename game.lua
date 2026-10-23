@@ -5035,6 +5035,9 @@ function Game:build_run_snapshot()
         ante = tonumber(self.ante) or 1,
         round = tonumber(self.round) or 1,
         money = tonumber(self.money) or 0,
+        -- Sold-Joker run history (Steamodded's `jokers_sold`): def ids in sale
+        -- order, recorded by `sell_owned_joker`; mods read `G.jokers_sold`.
+        jokers_sold = copy_table(self.jokers_sold or {}),
         hands = tonumber(self.hands) or 0,
         discards = tonumber(self.discards) or 0,
         round_score = Totals.encode(Totals.read(self.round_score, 0)),
@@ -5231,6 +5234,7 @@ function Game:load_run_snapshot(snapshot)
     self.inflation = tonumber(snapshot.inflation) or 0
     self._victory_progress_recorded = snapshot._victory_progress_recorded == true
     self.money = tonumber(snapshot.money) or 0
+    self.jokers_sold = copy_table(snapshot.jokers_sold or {})
     self.hands = tonumber(snapshot.hands) or self:get_effective_hands_per_round()
     self.discards = tonumber(snapshot.discards) or self:get_effective_discards_per_round()
     self.round_score = Totals.revive(snapshot.round_score, 0)
@@ -7211,6 +7215,24 @@ function Game:upgrade_hand_level_at_index(idx)
         self.selectedHandLevel = level
         self.selectedHandChips = chips
         self.selectedHandMult = mult
+    end
+    -- Every level rise, from any source (Planet, a return's `level_up`, a mod's
+    -- own call), raises `level_up_hand` with the hand's name -- Steamodded fires
+    -- it from its level-up entry point, and this funnel is the fork's. Depth-
+    -- capped: a Joker that levels a hand in answer (Bunco's Head in the Clouds)
+    -- hears the answer land, but chains cannot recurse without bound.
+    if not self._restoring_run_snapshot then
+        local depth = self._level_up_emit_depth or 0
+        if depth < 4 then
+            self._level_up_emit_depth = depth + 1
+            pcall(function()
+                self:emit_joker_event("on_hand_level_up", {
+                    hand_name = self.handlist and self.handlist[idx],
+                    level = level, amount = 1,
+                })
+            end)
+            self._level_up_emit_depth = depth
+        end
     end
     return true
 end
@@ -9310,6 +9332,7 @@ function Game:_run_start_reset_objects()
         end
     end
     self._clearing_run = nil
+    self.jokers_sold = {}
     if type(self.consumables) == "table" then
         for i = #self.consumables, 1, -1 do
             self:remove_consumable_at(i)
@@ -11460,6 +11483,12 @@ end
 function Game:ease_dollars(amount, opts)
     amount = tonumber(amount) or 0
     if amount == 0 then return self.money end
+    -- A gain is offered to held mod Jokers for transformation before it lands
+    -- (Bunco's Fiendish seat, `SMODS.transform_money_gain`); spending never is.
+    if amount > 0 and SMODS and SMODS.transform_money_gain then
+        amount = SMODS.transform_money_gain(self, amount, opts)
+        if amount == 0 then return self.money end
+    end
     self.money = (tonumber(self.money) or 0) + amount
     self:_emit_money_altered(amount, opts and opts.from_shop)
     return self.money
@@ -16314,6 +16343,14 @@ function Game:sell_owned_joker(index)
     joker = self:remove_owned_joker_at(index, false, true, self.C and self.C.GOLD)
     self._joker_removal_kind = nil
     if not joker then return false end
+    -- Sold-Joker run history: def ids in sale order (Steamodded's `jokers_sold`).
+    -- Recorded after the removal, so the `selling_card` evaluation still sees the
+    -- history as it was BEFORE this sale -- a Joker reacting to a sale (Cryptid's
+    -- Necromancer) picks from what was sold earlier, never the card leaving now.
+    if joker.def and joker.def.id then
+        self.jokers_sold = self.jokers_sold or {}
+        self.jokers_sold[#self.jokers_sold + 1] = joker.def.id
+    end
     local value = tonumber(joker.sell_cost) or 0
     self:ease_dollars(value)
     local duplicated_from_invisible = false
@@ -16391,6 +16428,29 @@ function Game:handle_failed_blind_reset()
             end
         end
     end
+    -- A mod Joker's save (`context.game_over`, `saved = true`): one evaluation,
+    -- slot order -- a saver left of Mr. Bones fires first and Bones keeps its
+    -- seat; a saver right of it never gets asked, because Bones already spent
+    -- itself. The saving Joker's own consequences are its own (it hears the
+    -- ordinary contexts); the run continues exactly as a Bones rescue
+    -- continues, minus the sacrifice.
+    local mod_saved_index = nil
+    if SMODS and SMODS.game_over_saved then
+        mod_saved_index = SMODS.game_over_saved(self)
+    end
+    if mod_saved_index and (not mr_bones_index or mod_saved_index < mr_bones_index) then
+        self._blind_resolution_pending = false
+        self:recycle_full_deck_after_blind_win()
+
+        local cap_dollars = self:get_interest_round_cap_dollars()
+        local interest_count_cap = cap_dollars * 5
+        local interest = math.floor(math.min(math.max(0, self.money), interest_count_cap) / 5)
+        interest = math.min(interest, cap_dollars)
+        self:ease_dollars(interest)
+        self:enter_shop_after_blind()
+        return
+    end
+
     if mr_bones_index then
         self:remove_owned_joker_at(mr_bones_index, true, true)
         if Sfx and Sfx.play then

@@ -156,25 +156,70 @@ local function pow_chips(ctx, n)
 
     Sfx.play_chips(scoring_pitch())
 end
+--- `xlog_chips` (Talisman via MoreFluff's Freaky Pizza): Chips are multiplied by
+--- log_base(Chips), and only when that log is at least 1 -- the exact semantics of
+--- MoreFluff's own fallback implementation for when no `xlog_chips` calc key exists.
+--- The log is taken in log10 space, so a Big total logs as cleanly as a plain one.
+local function log_chips(ctx, base)
+    base = tonumber(base) or 0
+    if base <= 0 or base == 1 then return end
+    local chips = Totals.read(ctx.chips, 0)
+    if Totals.cmp(chips, 1) <= 0 then return end
+    local log = Big.log10_of(chips) / (math.log(base) / math.log(10))
+    if log < 1 then return end
+    ctx.chips = Big.mul_values(chips, log)
+    mark_effect_applied(ctx)
+
+    local p = Popup()
+    p:spawn(popup_amount(log), "xchips", card_center_x(ctx.VT), card_center_y(ctx.VT))
+    Top:addPopup(p)
+
+    Sfx.play_chips(scoring_pitch())
+end
 local function swap_totals(ctx)
     local chips, mult = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
     if Totals.eq(chips, mult) then return end
     ctx.chips, ctx.mult = mult, chips
     mark_effect_applied(ctx)
 end
-local function balance_totals(ctx)
+--- Full balance (`balance = true`) sets both totals to the larger of the two. A
+--- numeric `balance = f` (0 < f < 1) is the partial form Paperback's plasma-style
+--- Jokers need: each total moves the fraction `f` of the way toward the value the
+--- full balance would set, so `f = 1` and `true` agree and `f = 0` is a no-op.
+local function balance_totals(ctx, fraction)
     local chips, mult = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
     local best = Totals.cmp(chips, mult) >= 0 and chips or mult
+    local f = tonumber(fraction)
+    if f and f > 0 and f < 1 then
+        local function toward(v)
+            if Totals.eq(v, best) then return v end
+            if Big.is_big(v) or Big.is_big(best) then
+                return Big.add_values(v, Big.mul_values(Big.add_values(best, Big.mul_values(v, -1)), f))
+            end
+            return v + (best - v) * f
+        end
+        local new_chips, new_mult = toward(chips), toward(mult)
+        if Totals.eq(new_chips, chips) and Totals.eq(new_mult, mult) then return end
+        ctx.chips, ctx.mult = new_chips, new_mult
+        mark_effect_applied(ctx)
+        return
+    end
     if Totals.eq(chips, best) and Totals.eq(mult, best) then return end
     ctx.chips, ctx.mult = best, best
     mark_effect_applied(ctx)
 end
 local function add_money(ctx, n)
     if G and G.money ~= nil then
-        G.money = (tonumber(G.money) or 0) + (tonumber(n) or 0)
+        n = tonumber(n) or 0
+        -- A gain is transformed before it lands (Bunco's Fiendish seat): held mod
+        -- Jokers hear `money_transform` through the same choke `ease_dollars` uses.
+        if n > 0 and SMODS and SMODS.transform_money_gain then
+            n = SMODS.transform_money_gain(G, n)
+        end
+        G.money = (tonumber(G.money) or 0) + n
         -- Every Joker dollar lands here, vanilla and mod alike: the one place
         -- `money_altered` can hear them all.
-        if G._emit_money_altered then G:_emit_money_altered(tonumber(n) or 0) end
+        if G._emit_money_altered then G:_emit_money_altered(n) end
         if(n > 0) then
             mark_effect_applied(ctx) 
 
@@ -2155,6 +2200,7 @@ JokerEffects.pow_mult = pow_mult
 JokerEffects.pow_chips = pow_chips
 JokerEffects.swap_totals = swap_totals
 JokerEffects.balance_totals = balance_totals
+JokerEffects.log_chips = log_chips
 JokerEffects.add_money = add_money
 JokerEffects.add_round_win_money = add_round_win_money
 JokerEffects.rank_is_face = rank_is_face

@@ -1365,6 +1365,12 @@ function Card:trigger_sources(held, seq, out, held_first_pass_effect_applied)
     for _ = 1, extra do
         out[#out + 1] = false
     end
+    -- Permanent repetitions (`perma_repetitions` on the card's data, Steamodded's
+    -- field): the card's own extra passes, marked `false` like its Red Seal.
+    local perma_reps = math.max(0, math.floor(tonumber(cd.perma_repetitions) or 0))
+    for _ = 1, perma_reps do
+        out[#out + 1] = false
+    end
     if not (G and G.collect_retrigger_sources) then return out end
 
     local ctx = RETRIGGER_CTX
@@ -1428,6 +1434,21 @@ function Card:emit_hand_event(event_name, ctx)
     -- every vanilla card and for every card when no mod registered a center.
     if SMODS and SMODS.card_center_event then
         if SMODS.card_center_event(self, ev, ctx) then trigger = true end
+    end
+    -- Permanent dollars (`perma_p_dollars` on the card's data, Steamodded's
+    -- field): a held card pays at round end, as part of its own effect -- the
+    -- caller's retrigger loop repeats the whole emit, so a Red Seal pays it
+    -- twice, exactly like a Gold card. A gain, so it is transformed first.
+    if ev == "on_round_end" then
+        local dollars = math.floor(tonumber(self.card_data and self.card_data.perma_p_dollars) or 0)
+        if dollars ~= 0 and G then
+            if dollars > 0 and SMODS and SMODS.transform_money_gain then
+                dollars = SMODS.transform_money_gain(G, dollars)
+            end
+            G.money = (tonumber(G.money) or 0) + dollars
+            if G._emit_money_altered then G:_emit_money_altered(dollars) end
+            trigger = true
+        end
     end
     if trigger then
         self:juice_up()

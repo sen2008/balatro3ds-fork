@@ -152,6 +152,9 @@ SMODS.Joker {
 | `context.blind_disabled` | A Boss Blind was disabled (Chicot, Luchador, an effect). `context.blind.id` is the Blind's id. |
 | `context.setting_ability` | A card's enhancement or seal changed through its canonical setters (`Card:set_enhancement` / `Card:set_seal` -- every Tarot, effect and `mod_conv` conversion walks through them). `context.other_card` is the card, `context.old` the previous enhancement or seal (nil when there was none), and `context.unchanged` is true when the new value equals the old. Editions on playing cards have no node setter in this engine and do not fire it. |
 | `context.destroying_card` | Asked before a playing card is destroyed: `context.destroying_card` is the card, and returning `{ remove = false }` keeps it alive. Any other answer lets the destruction proceed. Cards destroyed from the discard pile or deck (no node) are asked about too, with a view over their data. |
+| `context.level_up_hand` | A hand's level rose, from any source (a Planet, a `level_up` return, an effect). `context.level_up_hand` is the hand's NAME (a string, Steamodded's shape), `context.level` the new level and `context.amount` the rise (1 per funnel call). A Joker that levels a hand in answer is heard, but chains cap at 4 deep. |
+| `context.game_over` | A lost Blind is about to end the run. Also carries `context.end_of_round = true`; `context.port.round_score` and `context.port.blind_target` hold the final numbers. Return `{ saved = true }` to rescue the run: the first saver in slot order wins (a Blueprint/Brainstorm copying a saver counts at the copy's slot, and Mr. Bones competes by the same order). The engine does not spend the saver -- its consequences are its own. |
+| `context.money_transform` | Asked of each held Joker, in slot order, before a money GAIN lands (never for spending). `context.amount` is the gain as the previous Joker left it; return `{ amount = n }` to replace it. Gains through `Game:ease_dollars`, Joker `dollars` returns, card-center dollars and `perma_p_dollars` all pass through here; a round-win payout row is transformed once, when the payout table flushes. Boss-debuffed Jokers are skipped, and a Blueprint copying a transformer does not transform (Bunco's PC wrapper keys off the held Joker itself). |
 
 Also available on `context`:
 - `blueprint` and `blueprint_card`: set when Blueprint or Brainstorm is copying this Joker.
@@ -165,7 +168,7 @@ Playing cards support `:get_id()` (2 to 14, where Jack is 11 and Ace is 14), `:i
 
 `chips`, `mult`, `xmult` (also `x_mult` and `Xmult`), `dollars` and `message`, plus `extra` to chain another table. They score exactly like a vanilla Joker's, with the same popups, sounds and timing. A return with only a `message` (such as `"Upgrade!"`) shows it and counts as the Joker triggering.
 
-The extended total fields Steamodded added are here too, applied to the running totals in this order, after the fields above: `x_chips` (also `xchips`: Chips x n), `e_mult` (also `emult`: Mult = Mult ^ n) and `e_chips` (also `echips`: Chips = Chips ^ n) -- the exponent fields land between them, in Steamodded's order chips, mult, x_mult, e_mult, e_chips, x_chips. Then `swap = true` exchanges Chips and Mult, `balance = true` sets both to the larger of the two, and `level_up = n` (or `true` for 1) levels the hand being scored: the stored level rises as a Planet would raise it, and the running totals gain the level's Chips/Mult delta, so earlier contributions are kept. Outside a scoring context `level_up` still raises the level and moves no totals. Enhancement, seal and edition `calculate` returns accept the same fields. Past the double range the totals become [big numbers](#big-numbers), which these readers feed transparently.
+The extended total fields Steamodded added are here too, applied to the running totals in this order, after the fields above: `x_chips` (also `xchips`: Chips x n), `e_mult` (also `emult`: Mult = Mult ^ n) and `e_chips` (also `echips`: Chips = Chips ^ n) -- the exponent fields land between them, in Steamodded's order chips, mult, x_mult, e_mult, e_chips, x_chips. Then `xlog_chips = b` (Talisman's field, via MoreFluff) multiplies Chips by log base `b` of Chips, but only when that log is at least 1. Then `swap = true` exchanges Chips and Mult, `balance = true` sets both to the larger of the two (a numeric `balance = f`, 0 < f < 1, moves each total the fraction `f` of the way toward that same target -- the partial form Paperback's plasma-style Jokers use), and `level_up = n` (or `true` for 1) levels the hand being scored: the stored level rises as a Planet would raise it, and the running totals gain the level's Chips/Mult delta, so earlier contributions are kept. Outside a scoring context `level_up` still raises the level and moves no totals. Enhancement, seal and edition `calculate` returns accept the same fields. Past the double range the totals become [big numbers](#big-numbers), which these readers feed transparently.
 
 A return may also ask for retriggers, as in Steamodded: `repetitions = n` runs this Joker's effect `n` more times, and `retrigger_joker = <a held Joker>` (or `true`, for this Joker) runs that Joker's effect again -- once, or `repetitions` times when both are given. The extra passes see `context.retrigger_joker`, are announced with "Again!", and run on the spot inside this Joker's own beat rather than being queued for a beat of their own. A pass that is itself a retrigger never retriggers, and one return buys at most 100 extra passes, so a Joker that always asks cannot loop forever.
 
@@ -190,6 +193,32 @@ All of these use the run's seed:
 - `pseudorandom_element(list, seed)`
 
 Oops! All 6s and every `mod_probability` / `fix_probability` Joker are counted, unless `no_mod` is true. `localize("k_upgrade_ex")` and a few other common message keys work, and so does `ease_dollars(n)`.
+
+### Polls: random enhancements and seals
+
+`SMODS.poll_enhancement(options)` and `SMODS.poll_seal(options)` deal one center from the pool a card could gain and return its port VALUE (a string like `"lucky"` or `"red"` -- feed it to `SMODS.add_card`'s `enhancement` / `seal` or a node's setters):
+
+```lua
+local enh = SMODS.poll_enhancement({ guaranteed = true, no_replace = true })
+local seal = SMODS.poll_seal({ guaranteed = true, type_key = "my_styled_roll" })
+```
+
+The pool is the eight vanilla enhancements (four seals) plus every center mods registered with `SMODS.Enhancement` / `SMODS.Seal`, each weighted by its `config.weight` (default 1); centers with `no_poll` or weight 0 are excluded. The draw is seeded per run, so a given seed polls the same sequence. `guaranteed` and `no_replace` are accepted for Steamodded compatibility (the poll always deals a real center -- nothing on PC overrides it here); `options.key` names one center (by port value, vanilla name or full key) and polls it directly, for the `mf_seaweed`-style effects that deal a fixed enhancement.
+
+### Permanent card effects (`perma_*`)
+
+Steamodded's card-persistent scoring fields work here, stored on the card itself so they save with the run. Write them from a `calculate` with `SMODS.set_perma(card, field, value)` and read with `SMODS.get_perma(card, field)` (a bare `card` node or its `card_data` both work; passing `nil` clears):
+
+- `perma_bonus` / `perma_mult`: flat Chips / Mult added at the card's own scoring step, and
+- `perma_x_chips` / `perma_x_mult`: multipliers on the running totals at that same step, after the card's edition.
+- `perma_repetitions`: extra passes the card itself grants when it scores (played or held) -- it stacks with Red Seal and retrigger Jokers in the same source list.
+- `perma_p_dollars`: dollars paid at round end while the card is held in hand, like a Gold card's pay (a positive pay passes the `money_transform` seat).
+
+Unknown field names are refused. A mod may also write `card.ability.perma_x_mult = 2` directly in a `calculate`, PC style: the value lands on the card's data the same way.
+
+### Sold-Joker history
+
+`G.jokers_sold` is the list of Joker def ids sold this run, in sale order (`"j_cry_cat"`, ...). It saves with the run and resets on a new one. Cryptid's Kidnapping reads it to count sold "Type" Jokers; Necromancer picks a random entry and recreates it.
 
 ### Creating and destroying cards
 
