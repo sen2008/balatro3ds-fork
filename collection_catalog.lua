@@ -369,6 +369,35 @@ function CollectionCatalog.build_booster_entries()
             end
         end
     end
+    -- Registered packs (SMODS.Booster) list after the vanilla ones, in
+    -- registration order, under the id buying one discovers.
+    local boosters = SMODS and SMODS.Boosters
+    if type(boosters) == "table" then
+        local entries = {}
+        for _, entry in pairs(boosters) do entries[#entries + 1] = entry end
+        table.sort(entries, function(a, b) return (a.order or 0) < (b.order or 0) end)
+        for _, entry in ipairs(entries) do
+            order = order + 1
+            local id = "booster_" .. entry.pack .. "_normal"
+            out[#out + 1] = {
+                id = id,
+                category = "boosters",
+                node_kind = "booster",
+                name = entry.name,
+                order = order,
+                pack = entry.pack,
+                size = "normal",
+                mod_sprite = entry.sprite,
+                discovery_id = id,
+                shop_offer = {
+                    pack = entry.pack,
+                    size = "normal",
+                    card_count = entry.card_count,
+                    picks_granted = entry.picks,
+                },
+            }
+        end
+    end
     return out
 end
 
@@ -470,6 +499,31 @@ function CollectionCatalog.build_tag_entries()
                         Tag and Tag.DESCRIPTIONS and Tag.DESCRIPTIONS[tag_type]),
                 }
             end
+        end
+    end
+    -- Registered tags (SMODS.Tag) list after the vanilla ones, in
+    -- registration order, under their full id -- the id `Game:addTag`
+    -- discovers as the tag is gained. The category itself is the vanilla
+    -- static one, so the collection menu is unchanged while no mod tag is
+    -- registered.
+    local customs = SMODS and SMODS.TagByType
+    if type(customs) == "table" then
+        local entries = {}
+        for _, entry in pairs(customs) do entries[#entries + 1] = entry end
+        table.sort(entries, function(a, b) return (a.order or 0) < (b.order or 0) end)
+        for _, entry in ipairs(entries) do
+            local _, lines = SMODS.tag_tooltip(entry.type)
+            out[#out + 1] = {
+                id = entry.id,
+                category = "tags",
+                node_kind = "tag",
+                name = entry.name,
+                order = 9000 + (entry.order or 0),
+                tag_type = entry.type,
+                tag_entry = entry,
+                discovery_id = entry.id,
+                description = table.concat(lines, " "),
+            }
         end
     end
     table.sort(out, sort_entries)

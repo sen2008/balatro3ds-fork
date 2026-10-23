@@ -148,7 +148,26 @@ function BoosterPackUI.shop_tooltip_description(offer)
 
     local kind_label, kind_key
     local tail, tail_key
-    if pack == "standard" then
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(pack) or nil
+    if bentry then
+        -- A registered pack names its own pool's cards.
+        if bentry.pool_kind == "jokers" then
+            kind_label, kind_key = "Joker", "joker"
+            tail, tail_key = "to add to your Jokers.", "jokers"
+        elseif bentry.pool_kind == "playing" then
+            kind_label, kind_key = "Playing", "playing"
+            tail, tail_key = "to add to your Deck.", "deck"
+        else
+            local kind_entry = SMODS.ConsumableKinds and SMODS.ConsumableKinds[bentry.consumable_kind]
+            kind_label = (kind_entry and kind_entry.name)
+                or (bentry.consumable_kind == "tarot" and "Tarot")
+                or (bentry.consumable_kind == "planet" and "Planet")
+                or (bentry.consumable_kind == "spectral" and "Spectral")
+                or "Cards"
+            kind_key = "cards"
+            tail, tail_key = "to be used immediately.", "use"
+        end
+    elseif pack == "standard" then
         kind_label, kind_key = "Playing", "playing"
         tail, tail_key = "to add to your Deck.", "deck"
     elseif pack == "arcana" then
@@ -311,7 +330,21 @@ function BoosterPackUI.draw_opening(game)
             h = h,
         }
         sess.opening_pack_rect = rect
-        if not ShopUI.draw_booster_atlas_frame(game, rect, tonumber(sess.booster_sprite_index) or 0) then
+        -- A registered pack's wrapper is its own image, fitted to the pack rect.
+        local wrapper_drawn = false
+        if sess.mod_sprite and SMODS and SMODS.image then
+            local img = SMODS.image(sess.mod_sprite)
+            if img then
+                local iw, ih = img:getDimensions()
+                if iw and iw > 0 and ih and ih > 0 then
+                    love.graphics.setColor(1, 1, 1, 1)
+                    love.graphics.draw(img, rect.x, rect.y, 0, rect.w / iw, rect.h / ih)
+                    wrapper_drawn = true
+                end
+            end
+        end
+        if not wrapper_drawn
+            and not ShopUI.draw_booster_atlas_frame(game, rect, tonumber(sess.booster_sprite_index) or 0) then
             love.graphics.setColor((game.C and game.C.BOOSTER) or { 0.4, 0.43, 0.72, 1 })
             love.graphics.rectangle("fill", rect.x, rect.y, rect.w, rect.h, 3, 3)
             love.graphics.setColor(1, 1, 1, 1)
@@ -322,7 +355,7 @@ function BoosterPackUI.draw_opening(game)
     if phase == "reveal" and elapsed < BoosterPackUI.CARD_REVEAL_DURATION then
         local p = elapsed / BoosterPackUI.CARD_REVEAL_DURATION
         local cx, cy = target.x + target.w * 0.5, target.y + target.h * 0.5
-        local colour = PACK_COLOURS[sess.pack] or game.C.WHITE
+        local colour = PACK_COLOURS[sess.pack] or sess.pack_colour or game.C.WHITE
         love.graphics.setColor(colour)
         for i = 1, 18 do
             local angle = i * 2.399963 + (tonumber(sess.booster_sprite_index) or 0) * 0.17

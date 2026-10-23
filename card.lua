@@ -320,9 +320,45 @@ function Card:sync_visual_from_card_data()
     self:refresh_quads()
 end
 
+--- Draw one of a mod's standalone images (a registered center's `sprite`)
+--- over the card's full rect, in the transform `Card:draw` has pushed.
+--- Returns false when the image is not (yet) loadable, so the caller falls
+--- back to the atlas art.
+local function draw_center_sprite(sprite_key, w, h)
+    if not sprite_key or not (SMODS and SMODS.image) then return false end
+    local img = SMODS.image(sprite_key)
+    if not img then return false end
+    local iw, ih = img:getDimensions()
+    if not iw or iw <= 0 or not ih or ih <= 0 then return false end
+    love.graphics.draw(img, 0, 0, 0, (w or iw) / iw, (h or ih) / ih)
+    return true
+end
+
 function Card:refresh_quads()
     apply_enhancement_center_indices(self)
     apply_seal_indices(self)
+
+    -- A registered center's own art (SMODS.Enhancement / Seal / Edition
+    -- `sprite`): the draw path prefers these standalone images over the
+    -- atlas fallbacks. Pure registry lookups, so they resolve the same
+    -- headless as on hardware.
+    self.face_sprite_key = nil
+    self.seal_sprite_key = nil
+    self.edition_sprite_key = nil
+    if SMODS and SMODS.center_sprite then
+        if self.enhancement then
+            self.face_sprite_key = SMODS.center_sprite("enhancement", self.enhancement)
+        end
+        if self.seal then
+            self.seal_sprite_key = SMODS.center_sprite("seal", self.seal)
+        end
+        local data = self.card_data or {}
+        local modifier = type(data.modifier) == "table" and data.modifier or nil
+        local ed = data.edition or (modifier and modifier.edition)
+        if type(ed) == "string" and ed ~= "" then
+            self.edition_sprite_key = SMODS.center_sprite("edition", ed)
+        end
+    end
 
     -- resolve atlases
     self.back_atlas = self:resolve_atlas(self.back_atlas_name)
@@ -1177,7 +1213,18 @@ function Card:draw()
     end
 
     if not masked then
-        if shown_up then
+        -- A mod enhancement's own art is the card's face, whole: it replaces
+        -- the atlas face draw (rank and seal still layer over it). An edition
+        -- shader pass does not run over it -- a registered edition's overlay
+        -- below is the treatment that stacks with it.
+        local sprite_face = false
+        if shown_up and self.face_sprite_key then
+            sprite_face = draw_center_sprite(self.face_sprite_key, w, h)
+            if sprite_face then love.graphics.setColor(1, 1, 1, lifecycle_alpha) end
+        end
+        if sprite_face then
+            -- The face is drawn; the layers below still apply.
+        elseif shown_up then
             if self.face_quad then
                 if ed and (self.shop_offer_slot == nil or Fx.shop_editions_animated()) then
                     -- Reference card drawing applies the edition shader without an area check
@@ -1216,6 +1263,21 @@ function Card:draw()
         if self.shop_offer_slot == nil and self.seal == "gold" and self.seal_atlas and self.seal_atlas.image then
             local sx, sy, cw, ch = self.seal_quad:getViewport()
             Fx.draw_shine_cell(self.seal_atlas.image, sx, sy, cw, ch, 0, 0, self.seal_w, self.seal_h, Fx.time())
+        end
+    end
+
+    -- A mod seal's own stamp, on the cards whose seal the atlas has no cell for.
+    if shown_up and not self.seal_quad and self.seal_sprite_key then
+        if draw_center_sprite(self.seal_sprite_key, w, h) then
+            love.graphics.setColor(1, 1, 1, lifecycle_alpha)
+        end
+    end
+
+    -- A mod edition's overlay art over the face: the simpler treatment that
+    -- stands in for a shader pass (registered editions have none).
+    if shown_up and self.edition_sprite_key then
+        if draw_center_sprite(self.edition_sprite_key, w, h) then
+            love.graphics.setColor(1, 1, 1, lifecycle_alpha)
         end
     end
 

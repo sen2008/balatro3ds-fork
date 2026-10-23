@@ -492,13 +492,14 @@ enhancements; `gold`, `red`, `blue`, `purple` for seals; `foil`, `holo`,
 `polychrome`, `negative`, `base` for editions). Registering one that clashes is a
 load error naming it.
 
-**`SMODS.Enhancement { key, loc_txt, config, calculate, weight }`**
+**`SMODS.Enhancement { key, loc_txt, config, calculate, weight, sprite }`**
 
 ```lua
 SMODS.Enhancement {
     key = "copper",
     loc_txt = { name = "Copper", text = { "{C:chips}+#1#{} Chips" } },
     config = { chips = 25, h_chips = 10, h_dollars = 2 },
+    sprite = "copper.png",
     loc_vars = function(self, info_queue, card) return { vars = { self.config.chips } } end,
     calculate = function(self, card, context)
         if context.card_played then return { mult = 3 } end
@@ -526,7 +527,7 @@ polls -- Grim / Familiar / Incantation and enhanced Standard-pack or shop cards 
 it takes `weight` slots among the vanilla names (default 1, the vanilla-like
 share; 0 keeps it out of the polls).
 
-**`SMODS.Seal { key, loc_txt, config, calculate, weight }`** -- a seal's behavior
+**`SMODS.Seal { key, loc_txt, config, calculate, weight, sprite }`** -- a seal's behavior
 is its `calculate`, fired at the moments the engine raises for cards:
 `context.card_played` (the Gold Seal's moment), `context.held_in_hand`,
 `context.on_round_end` (the Blue Seal's) and `context.on_discard` (the Purple
@@ -537,12 +538,16 @@ asked with `context.repetition`. In the Standard-pack seal poll a registered sea
 takes `weight` slots among the four vanilla seals (default 1; 0 keeps it out).
 `SMODS.add_card { set = "Playing", seal = "lime" }` applies one directly.
 
-**`SMODS.Edition { key, loc_txt, config, weight }`** -- `config` is what the
+**`SMODS.Edition { key, loc_txt, config, weight, cost }`** -- `config` is what the
 edition contributes: `chips` / `mult` / `x_mult`. On a playing card all three land
 in its scoring step; on a Joker the flat `chips` / `mult` land before its effect
 and `x_mult` after it, the slots Foil / Holo and Polychrome sit in.
 `config.joker_slots` grants that many extra Joker slots while a Joker carrying
-the edition is held -- Negative's trick, as data. `weight` is in the shop
+the edition is held -- Negative's trick, as data. `cost` is the extra dollars a
+Joker carrying the edition costs -- the vanilla editions add $2 / $3 / $5 / $5
+of their own -- applied where theirs are: the spawned Joker's price (and so its
+sell value, half the price) and the shop's offer price. Default 0; it may be
+negative for a discount edition. `weight` is in the shop
 ladder's units, percent of the roll (vanilla: Foil 4, Holo 2, Polychrome 0.6;
 default 2); Standard packs roll at double rates, and in guaranteed-edition rolls
 (Aura, Wheel of Fortune, Illusion) a registered edition shares the Foil band by
@@ -553,14 +558,30 @@ edition = "fluoro" }` or `edition = "e_fluoro"`.
 An unregistered center name in `SMODS.add_card` or a consumable's `mod_conv` is an
 error naming it -- unlike an unknown rank or suit, which only refuses the card.
 
-Three honest limits, all about art:
+**Art.** All three centers -- and tags -- take an optional
+`sprite = "Name.png"`, a single image in `assets/1x` like every other mod
+image here (Steamodded's `atlas` / `pos` are not how this port stores art).
+What the image is drawn as follows the slot it fills:
 
-- **No art for a custom center.** An enhanced card draws the plain card face, a
-  sealed card draws without a seal stamp, and an edition has no shader pass and
-  no reveal sting -- its cards draw plain. (The tooltip does show the center's
-  name and its `loc_txt` lines.)
-- **No price change.** A Joker with a custom edition costs and sells for its
-  base price; the vanilla editions' price deltas are theirs alone.
+- An **enhancement's** sprite is card-sized art drawn as the card's whole
+  face, with rank and suit still overlaid. It replaces the face, so no
+  edition shader pass runs over it (a registered edition's overlay still
+  stacks on top).
+- A **seal's** sprite is a full-card image, transparent but for the stamp,
+  drawn where a vanilla seal's stamp goes.
+- An **edition's** sprite is a full-card overlay drawn over the face -- a
+  Joker's front or a playing card's face. There is no shader pass for a
+  registered edition and no reveal sting; the overlay is its treatment.
+- A **tag's** sprite is its icon, fitted to the tag box.
+
+Without a `sprite`, the fallbacks are the old ones: an enhanced card draws
+the plain card face, a sealed card draws without a stamp, an edition's
+cards draw plain, and a tag draws as a plain outline. Naming a file that
+isn't in `assets/1x` is a load error naming it. (The tooltip always shows
+the center's name and its `loc_txt` lines.)
+
+One more honest limit:
+
 - **Saves degrade gracefully, not magically.** A card's center is saved as its
   value string, like a vanilla one. A run continued without the mod is refused by
   the run's mod check as usual; but a value that reaches the engine unregistered
@@ -569,13 +590,14 @@ Three honest limits, all about art:
 
 ## Custom tags
 
-**`SMODS.Tag { key, loc_txt, config, apply, weight, min_ante, in_pool }`**
+**`SMODS.Tag { key, loc_txt, config, apply, weight, min_ante, in_pool, sprite }`**
 
 ```lua
 SMODS.Tag {
     key = "windfall",
     loc_txt = { name = "Windfall Tag", text = { "Gain {C:money}$#1#{}" } },
     config = { type = "immediate", dollars = 7 },
+    sprite = "windfall.png",
     loc_vars = function(self, info_queue, tag) return { vars = { self.config.dollars } } end,
     apply = function(self, tag, context)
         G.money = G.money + tag.ability.dollars
@@ -602,22 +624,87 @@ it. The held tag's `ability` is a copy of the def's `config`.
   `round_start_bonus` (as a blind starts, Juggle Tag's seat), and `eval` (in
   the Boss payout, Investment Tag's seat; the context carries the payout's
   `add_round_win_payout(name, dollars)`). Returning true consumes the tag;
-  returning false -- or having no `apply` -- leaves it held. The vanilla
-  `store_joker_create` / `store_joker_modify` / `voucher_add` / `tag_add`
-  types cannot be registered: they are not moments a tag's own effect runs at,
-  they are effects the shop and Double Tag read off the tray.
+  returning false -- or having no `apply` -- leaves it held.
+- **Shop moments.** Two moments run in the shop, with the offer itself as
+  `context.card` (a plain table: `id`, `edition`, `price`, `stickers`,
+  `create_params`): `store_joker_create` fires as a shop Joker offer is
+  rolled -- over a draft carrying only `id` / `edition` / `stickers`, before
+  the offer is priced or built, so rewriting the draft's `id` or `edition`
+  changes the offer that lands (the Uncommon / Rare Tags' seat; booster-pack
+  rolls are not shop offers and never fire it). `store_joker_modify` fires
+  over the finished offer as it takes its shelf slot -- after the vanilla
+  edition tags and Coupon have had their say, so a price it sets sticks --
+  and again when a shelved offer is rebuilt under a new id (a pool swap).
+  The vanilla `voucher_add` / `tag_add` types still cannot be registered:
+  nothing in this engine runs a tag's own effect when a voucher is redeemed
+  or a tag is gained (a gain raises the `tag_added` Joker context instead).
 - **The skip poll.** A registered tag joins the poll at its `weight`, where
   every vanilla tag weighs 1: default 1, 0 keeps it out (it can still be
   created directly). `min_ante` gates it like a vanilla tag's, and
   `in_pool(self, game)` may veto it. The custom draw runs on its own random
   stream, so the vanilla picks are exactly what they would be with no tags
   registered.
-- **Art and collection.** A mod tag has no art: it draws as a plain outline,
-  and it has no collection entry. Its tooltip -- on the blind-select skip
-  reward -- does show its name and `loc_txt` lines.
+- **Art and collection.** A mod tag may carry `sprite = "Name.png"` as its
+  icon; without one it draws as a plain outline. Either way it is listed in
+  the collection's Tags category alongside the vanilla tags, discovered when
+  first gained. Its tooltip -- on the blind-select skip reward -- shows its
+  name and `loc_txt` lines.
 - **Saves.** A held tag saves as its type string, like a vanilla one, and a
   tag whose mod is gone loads harmlessly: it never fires, and a fresh restore
   skips its type rather than failing.
+
+## Custom booster packs
+
+**`SMODS.Booster { key, loc_txt, pool, card_count, picks, cost, weight, sprite, colour }`**
+
+```lua
+SMODS.Booster {
+    key = "vault",
+    loc_txt = { name = "Vault Pack", text = { "Choose {C:attention}1{} of {C:attention}4{} Minor Arcana" } },
+    pool = { consumable = "Minor" },
+    card_count = 4, picks = 1,
+    cost = 6, weight = 100,
+    sprite = "vault.png",
+    colour = { 0.5, 0.9, 0.6 },
+}
+```
+
+A pack's **name** -- the registration key, lowercased -- is the string a shop
+offer carries, the way a consumable kind is its set's key. Names are global:
+no two mods may register the same one, and none may reuse a vanilla name
+(`arcana`, `celestial`, `spectral`, `standard`, `buffoon`).
+
+- **The shop roll.** A registered pack joins the shop's booster profile
+  pool at its `weight`, in the pool's own units (a vanilla normal pack
+  weighs 100, a Jumbo 100, a Mega 25; the default here is 60). The roll
+  stays a single draw: with no packs registered the pool and its seeded
+  sequence are exactly vanilla's, and with some registered the vanilla
+  shares dilute, the way custom consumable kinds dilute the shop's card
+  roll. `weight = 0` keeps a pack out of the shop (it can still be opened
+  by id). A challenge can ban a pack by its full id, like a vanilla centre.
+- **One size of its own.** Vanilla packs come in normal / jumbo / mega; a
+  registered pack declares its size directly: `card_count` cards (default
+  3, at most 10), `picks` of them chosen (default 1). `cost` is its shop
+  price (default $4) before inflation and discounts -- the price a
+  refresh recomputes, so it sticks. Buying one discovers its collection
+  entry, like a vanilla pack.
+- **Pools.** `pool` names where the cards come from, dealt through the
+  same builders the vanilla kinds use: `{ consumable = "<kind>" }` deals
+  that consumable kind -- a vanilla one, or a kind registered with
+  `SMODS.ConsumableType` -- Soul / Black Hole polls included for the kinds
+  that have them; `{ jokers = true }` deals unique Jokers, like a Buffoon
+  pack; `{ playing = true }` deals playing cards, like a Standard pack. A
+  consumable pack shows the hand when a card it dealt needs one, judged
+  card by card like the pick gates judge them. One honest limit: the
+  engine culls duplicates and in-play copies from a pack, so a pack whose
+  pool holds fewer distinct cards than its `card_count` comes up short
+  rather than repeating itself.
+- **Art.** `sprite = "Name.png"` is the wrapper: drawn on the shop shelf,
+  as the pack flies open, and in the collection. `colour = { r, g, b }`
+  tints the opening burst. Without a sprite the pack draws the plain
+  booster fallback panel and a white burst.
+- **Collection.** Registered packs list in the Boosters category after
+  the vanilla packs, under the name and art of the registration.
 
 ## Card faces
 
@@ -648,7 +735,7 @@ This is why `version` matters: bump it when a change would break a run in progre
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks, blinds and booster packs can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals, editions and tags can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types), [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions) and [Custom tags](#custom-tags).) Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Decks and blinds can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals, editions, tags and booster packs can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types), [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions), [Custom tags](#custom-tags) and [Custom booster packs](#custom-booster-packs).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.

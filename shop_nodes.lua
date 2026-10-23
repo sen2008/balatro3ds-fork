@@ -46,7 +46,20 @@ function ShopBoosterNode:draw()
     if not game then return end
     local rect = { x = x, y = y, w = w, h = h }
     push_tilt(self, x, y, w, h)
-    if not ShopUI.draw_booster_atlas_frame(game, rect, idx) then
+    -- A registered pack's wrapper is its own image, fitted to the shelf rect.
+    local wrapper_drawn = false
+    if offer.mod_sprite and SMODS and SMODS.image then
+        local img = SMODS.image(offer.mod_sprite)
+        if img then
+            local iw, ih = img:getDimensions()
+            if iw and iw > 0 and ih and ih > 0 then
+                love.graphics.setColor(1, 1, 1, 1)
+                love.graphics.draw(img, x, y, 0, w / iw, h / ih)
+                wrapper_drawn = true
+            end
+        end
+    end
+    if not wrapper_drawn and not ShopUI.draw_booster_atlas_frame(game, rect, idx) then
         love.graphics.setColor((game.C and game.C.BOOSTER) or { 0.4, 0.43, 0.72 })
         love.graphics.rectangle("fill", x, y, w, h, 3, 3)
         love.graphics.setColor(1, 1, 1, 1)

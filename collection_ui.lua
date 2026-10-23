@@ -132,7 +132,21 @@ function CollectionStaticNode:draw()
             end
         end
     elseif kind == "booster" then
-        ShopUI.draw_booster_atlas_frame(G, { x = draw_x, y = draw_y, w = dw, h = dh }, entry.frame_index or 0)
+        local drawn = false
+        if entry.mod_sprite and SMODS and SMODS.image then
+            local img = SMODS.image(entry.mod_sprite)
+            if img then
+                local iw, ih = img:getDimensions()
+                if iw and iw > 0 and ih and ih > 0 then
+                    love.graphics.setColor(1, 1, 1, 1)
+                    love.graphics.draw(img, draw_x, draw_y, 0, dw / iw, dh / ih)
+                    drawn = true
+                end
+            end
+        end
+        if not drawn then
+            ShopUI.draw_booster_atlas_frame(G, { x = draw_x, y = draw_y, w = dw, h = dh }, entry.frame_index or 0)
+        end
     elseif kind == "tag" then
         local tag = Tag(entry.tag_type, draw_x, draw_y)
         tag:draw()

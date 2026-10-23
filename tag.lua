@@ -99,7 +99,8 @@ function Tag:init(type, x, y)
     self.quad, self.w, self.h = compute_quad(self.atlas, self.id)
 
     -- A mod tag (SMODS.Tag) has no cell in the vanilla sheet: it keeps its
-    -- poll id, drops the atlas so `draw` uses the plain outline fallback,
+    -- poll id, drops the atlas so `draw` uses the tag's own image when the
+    -- registration gave one (`sprite`), else the plain outline fallback,
     -- and carries a copy of its def's config as its ability.
     if SMODS and SMODS.TagByType and SMODS.TagByType[self.type] then
         local entry = SMODS.TagByType[self.type]
@@ -107,6 +108,7 @@ function Tag:init(type, x, y)
         self.atlas = nil
         self.atlas_name = nil
         self.quad = nil
+        self.sprite_key = entry.sprite
         self.ability = copy_table and copy_table(entry.config) or {}
     end
 end
@@ -126,6 +128,15 @@ function Tag:draw()
     if atlas and atlas.image and quad then
         love.graphics.setColor(1, 1, 1, 1)
         love.graphics.draw(atlas.image, quad, x, y, 0, 1, 1)
+    elseif self.sprite_key and SMODS and SMODS.image and SMODS.image(self.sprite_key) then
+        -- A mod tag's own icon, fitted to the tag box the atlas cell would fill.
+        local img = SMODS.image(self.sprite_key)
+        local iw, ih = img:getDimensions()
+        local bw, bh = (w > 0 and w) or 34, (h > 0 and h) or 34
+        if iw and iw > 0 and ih and ih > 0 then
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(img, x, y, 0, bw / iw, bh / ih)
+        end
     else
         love.graphics.setColor(0.9, 0.2, 0.2, 0.8)
         love.graphics.rectangle("line", x, y, (w > 0 and w) or 34, (h > 0 and h) or 34)

@@ -149,6 +149,11 @@ function Joker.edition_price_deltas(ed)
     if ed == "holo" then return 3 end
     if ed == "polychrome" then return 5 end
     if ed == "negative" then return 5 end
+    -- An edition a mod registered (SMODS.Edition) carries its own `cost`.
+    if SMODS and SMODS.edition_cost then
+        local custom = SMODS.edition_cost(ed)
+        if custom then return custom end
+    end
     return 0
 end
 
@@ -1237,6 +1242,17 @@ function Joker:draw()
                 love.graphics.draw(self.front_sprite.image, draw_x, art_y, 0, 1, 1)
             end
             love.graphics.setColor(1, 1, 1, lifecycle_alpha)
+        end
+        -- A mod edition's overlay art rides the front at the front's own 1:1
+        -- placement: registered editions have no shader pass, so the overlay
+        -- image is their treatment (SMODS.Edition `sprite`).
+        if SMODS and SMODS.center_sprite and SMODS.image then
+            local overlay_key = SMODS.center_sprite("edition", Joker.normalize_edition(self.edition))
+            local overlay = overlay_key and SMODS.image(overlay_key)
+            if overlay then
+                love.graphics.setColor(1, 1, 1, lifecycle_alpha)
+                love.graphics.draw(overlay, draw_x, art_y, 0, 1, 1)
+            end
         end
         self:draw_sub_pos_overlay(draw_x, art_y, lifecycle_alpha)
     else

@@ -1872,6 +1872,14 @@ function Game:addTag(tag_type, opts)
         t.orbital_hand_index = opts.orbital_hand_index
     end
     self:emit_joker_event("on_tag_added", { tag = t })
+    -- A registered tag's collection entry is discovered as the tag is
+    -- gained, under its full id -- whether its moment fires on the spot
+    -- (the Use path below) or it is held for a later one, the way a vanilla
+    -- tag's key is discovered on the held path further down.
+    if SMODS and SMODS.tag_entry_for then
+        local entry = SMODS.tag_entry_for(tag_type)
+        if entry then self:discover_item(entry.id) end
+    end
     if t.Use and t:Use() then
         if double_count > 0 then
             for _ = 1, double_count do
@@ -1909,6 +1917,18 @@ function Game:removeTag(i)
         table.remove(self.tags, i)
         self:updateTagList()
     end
+end
+
+--- Fire held registered tags of one shop moment over a shop Joker offer
+--- (SMODS.Tag's `store_joker_create` / `store_joker_modify`): the tag's
+--- `apply` sees the offer itself as `context.card` and may rewrite it, and
+--- returning true consumes the tag, as at every other moment. A no-op
+--- while no mod tag is registered -- `SMODS.tag_moment` checks the
+--- registry first and spends no random draws -- so vanilla shop rolls,
+--- and their seeded sequences, are untouched.
+function Game:_fire_shop_joker_tag_moment(moment, offer)
+    if not (SMODS and SMODS.tag_moment) then return end
+    SMODS.tag_moment(self, moment, { card = offer })
 end
 
 --- Keep the consumed tag visible for one last beat. The reference juices and dissolves the
@@ -2301,6 +2321,7 @@ function Game:is_collection_discovery_id(id)
     if type(id) ~= "string" or id == "" then return false end
     if VOUCHER_DEFS and VOUCHER_DEFS[id] then return true end
     if self.P_TAGS and self.P_TAGS[id] then return true end
+    if SMODS and SMODS.Tags and SMODS.Tags[id] then return true end
     if self.P_BLINDS and self.P_BLINDS[id] then return true end
     if id:sub(1, 12) == "enhancement_" then return true end
     if id:sub(1, 5) == "seal_" then return true end
@@ -7068,6 +7089,16 @@ function Game:replace_shop_joker_offer(offer, from_id, to_id)
     offer.eternal = sticker_params.eternal == true or nil
     offer.perishable = sticker_params.perishable == true or nil
     offer.rental = sticker_params.rental == true or nil
+    -- A shelved offer rebuilt under a new id is store_joker_modify's
+    -- second seat; a queued one meets the moment when it is shelved.
+    if type(self.shop_offers) == "table" then
+        for _, shelved in ipairs(self.shop_offers) do
+            if shelved == offer then
+                self:_fire_shop_joker_tag_moment("store_joker_modify", offer)
+                break
+            end
+        end
+    end
     return offer
 end
 
@@ -12949,6 +12980,19 @@ function Game:_roll_shop_queue_joker_offer(append, pack_area, picked_ids)
     local def = JOKER_DEFS[pick]
     local sticker_params = self:_build_joker_sticker_params(def, pack_area)
     local edition = self:roll_joker_offer_edition(append)
+    if not pack_area then
+        -- store_joker_create: held tags see the draft before it is priced
+        -- or built, so a swapped id or edition is the offer that lands.
+        -- (Pack rolls are not the shop's shelf and never fire it.)
+        local draft = { id = pick, edition = edition, stickers = sticker_params }
+        self:_fire_shop_joker_tag_moment("store_joker_create", draft)
+        if draft.id ~= pick and JOKER_DEFS[draft.id] then
+            pick = draft.id
+            def = JOKER_DEFS[pick]
+            sticker_params = self:_build_joker_sticker_params(def, pack_area)
+        end
+        edition = Joker.normalize_edition(draft.edition or edition)
+    end
     local create_params = self:_build_joker_create_params(def, { edition = edition }, sticker_params)
     local offer = {
         kind = "joker",
@@ -13240,6 +13284,9 @@ function Game:extend_shop_offers_to_slot_count()
                 end
 
                 if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
+                -- store_joker_modify: the finished offer, priced and
+                -- editioned, as it takes its shelf slot.
+                self:_fire_shop_joker_tag_moment("store_joker_modify", entry)
                 self.shop_offers[#self.shop_offers + 1] = entry
                 if id ~= nil then seen_ids[id] = true end
                 if tagUsed ~= nil then
@@ -13304,6 +13351,17 @@ function Game:generate_joker_from_rarity(rarity)
     local name = def and def.name or id
     local edition = "base"
     local stickers = self:_build_joker_sticker_params(def, false)
+    -- A tag-driven offer is still a shop offer being created:
+    -- store_joker_create fires over its draft, as for a rolled one.
+    local draft = { id = id, edition = edition, stickers = stickers }
+    self:_fire_shop_joker_tag_moment("store_joker_create", draft)
+    if draft.id ~= id and JOKER_DEFS[draft.id] then
+        id = draft.id
+        def = JOKER_DEFS[id]
+        name = def and def.name or id
+        stickers = self:_build_joker_sticker_params(def, false)
+    end
+    edition = Joker.normalize_edition(draft.edition or edition)
     return {
         kind = "joker",
         id = id,
@@ -13406,6 +13464,9 @@ function Game:roll_shop_offers()
                 end
 
                 if self:hasTag("coupon") ~= -1 and self.shop_reroll_count == 0 then entry.price = 0 end
+                -- store_joker_modify: the finished offer, priced and
+                -- editioned, as it takes its shelf slot.
+                self:_fire_shop_joker_tag_moment("store_joker_modify", entry)
                 self.shop_offers[#self.shop_offers + 1] = entry
                 if id ~= nil then seen_ids[id] = true end
                 if tagUsed ~= nil then
@@ -13652,6 +13713,19 @@ function Game:_roll_booster_offer_profile()
             total = total + e.weight
         end
     end
+    -- Registered packs (SMODS.Booster) join the same single draw, appended
+    -- after the vanilla centres: with none registered the pool, the total
+    -- and the draw are exactly vanilla's, so the seeded offer sequence is
+    -- untouched; with some registered the vanilla shares dilute, the way
+    -- the shop's custom consumable kinds dilute theirs.
+    if SMODS and SMODS.booster_profile_entries then
+        for _, e in ipairs(SMODS.booster_profile_entries()) do
+            if not self:is_challenge_banned(e.key) then
+                pool[#pool + 1] = e
+                total = total + e.weight
+            end
+        end
+    end
     if total <= 0 or #pool == 0 then
         return { key = "p_arcana_normal_1", pack = "arcana", size = "normal", frame = 0 }
     end
@@ -13661,16 +13735,23 @@ function Game:_roll_booster_offer_profile()
     for _, e in ipairs(pool) do
         acc = acc + e.weight
         if r <= acc then
-            return { key = e.key, pack = e.pack, size = e.size, frame = e.frame }
+            return { key = e.key, pack = e.pack, size = e.size, frame = e.frame, booster = e.booster }
         end
     end
     local last = pool[#pool]
-    return { key = last.key, pack = last.pack, size = last.size, frame = last.frame }
+    return { key = last.key, pack = last.pack, size = last.size, frame = last.frame, booster = last.booster }
 end
 
 function Game:_booster_offer_price(pack, size)
     if self:hasJoker("j_astronomer") and pack == "celestial" then
         return 0
+    end
+    -- A registered pack prices from its registration's `cost`, the same
+    -- inflation-and-discount path the vanilla sizes take below.
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(pack)
+    if bentry then
+        local raw = bentry.cost + (tonumber(self.inflation) or 0)
+        return self:apply_shop_discount_to_price(raw)
     end
     local by_size = {
         normal = 4,
@@ -13682,6 +13763,8 @@ function Game:_booster_offer_price(pack, size)
 end
 
 function Game:_booster_offer_display_name(pack, size)
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(pack)
+    if bentry then return bentry.name end
     return BoosterPackUI.pack_name(pack, size)
 end
 
@@ -13708,6 +13791,13 @@ function Game:roll_shop_boosters()
         local n_cards = BoosterPackUI.card_count_for_size(size, pack)
         local n_picks = BoosterPackUI.picks_for_size(size)
         local sprite_idx = profile.frame
+        -- A registered pack carries its own size, art and tint on the offer:
+        -- its card count and picks override the size tables, and its wrapper
+        -- is its own image rather than a boosters-sheet frame.
+        if profile.booster then
+            n_cards = profile.booster.card_count
+            n_picks = profile.booster.picks
+        end
         local new_price = self:_booster_offer_price(pack, size)
         if self:hasTag("coupon") ~= -1 then
             new_price = 0
@@ -13722,6 +13812,8 @@ function Game:roll_shop_boosters()
             picks_granted = n_picks,
             booster_sprite_index = sprite_idx,
             center_key = profile.key,
+            mod_sprite = profile.booster and profile.booster.sprite or nil,
+            booster_colour = profile.booster and profile.booster.colour or nil,
         }
     end
     self.active_shop_booster_slot = nil
@@ -14010,7 +14102,40 @@ function Game:_booster_build_choices(offer)
         return vanilla_kind
     end
 
-    if pack == "arcana" then
+    -- A registered pack (SMODS.Booster) deals from its declared pool,
+    -- through the same builders the vanilla kind it mirrors uses.
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(pack) or nil
+    if bentry and bentry.pool_kind == "consumable" then
+        for _ = 1, n do
+            consumable_choice(bentry.consumable_kind,
+                create_consumable(bentry.consumable_kind, "cp"))
+        end
+    elseif bentry and bentry.pool_kind == "jokers" then
+        local entries = self:_shop_pick_unique_joker_ids(n)
+        for _, e in ipairs(entries) do
+            if e and e.id then
+                local sticker_params = e.stickers or {}
+                choices[#choices + 1] = {
+                    kind = "joker",
+                    joker_id = e.id,
+                    edition = e.edition or "base",
+                    taken = false,
+                    create_params = e.create_params or self:_build_joker_create_params(
+                        JOKER_DEFS and JOKER_DEFS[e.id], { edition = e.edition or "base" }, sticker_params),
+                    stickers = sticker_params,
+                }
+            end
+        end
+    elseif bentry and bentry.pool_kind == "playing" then
+        for _ = 1, n do
+            local enhanced = self:random("stdset" .. ante) > 0.6
+            choices[#choices + 1] = {
+                kind = "playing",
+                playing_data = self:_roll_playing_card_data(true, "sta", enhanced),
+                taken = false,
+            }
+        end
+    elseif pack == "arcana" then
         for _ = 1, n do
             local kind = self:has_voucher("v_omen_globe") and self:random("omen_globe") > 0.8
                 and "spectral" or "tarot"
@@ -14215,6 +14340,16 @@ function Game:begin_booster_session(offer, opening_origin)
     end
 
     local needs_hand = BoosterPackUI.pack_needs_hand(offer.pack)
+    if not needs_hand and SMODS and SMODS.booster_entry_for
+        and SMODS.booster_entry_for(offer.pack) then
+        -- A registered pack shows the hand when any card it dealt needs it,
+        -- judged choice by choice like the pick gates judge them.
+        for _, ch in ipairs(choices) do
+            if ch.consumable_def and self:booster_consumable_needs_hand(ch.consumable_def) then
+                needs_hand = true break
+            end
+        end
+    end
     self.booster_session = {
         pack = offer.pack,
         size = offer.size,
@@ -14224,6 +14359,8 @@ function Game:begin_booster_session(offer, opening_origin)
         picks_remaining = math.max(0, math.floor(tonumber(offer.picks_granted) or 1)),
         hand_for_tarot = needs_hand,
         active_choice_index = nil,
+        mod_sprite = offer.mod_sprite,
+        pack_colour = offer.booster_colour,
         booster_sprite_index = tonumber(offer.booster_sprite_index)
             or self:_default_booster_sprite_index(offer.pack, offer.size),
         opening_origin_rect = opening_origin,
@@ -14321,6 +14458,8 @@ function Game:_serialize_booster_session()
         picks_remaining = math.max(0, math.floor(tonumber(sess.picks_remaining) or 0)),
         hand_for_tarot = sess.hand_for_tarot == true or nil,
         booster_sprite_index = sess.booster_sprite_index,
+        mod_sprite = sess.mod_sprite,
+        pack_colour = sess.pack_colour,
         return_state = self._booster_return_state,
     }
 end
@@ -14344,6 +14483,8 @@ function Game:_restore_booster_session(data)
         picks_remaining = math.max(0, math.floor(tonumber(data.picks_remaining) or 0)),
         hand_for_tarot = data.hand_for_tarot == true,
         active_choice_index = nil,
+        mod_sprite = data.mod_sprite,
+        pack_colour = data.pack_colour,
         booster_sprite_index = tonumber(data.booster_sprite_index)
             or self:_default_booster_sprite_index(data.pack, data.size),
         -- The wrapper burst already happened before the save; come back to the open pack.

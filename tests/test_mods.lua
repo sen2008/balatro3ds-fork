@@ -2360,6 +2360,280 @@ suite.test("custom consumable kinds get their own collection category", function
 end)
 
 --------------------------------------------------------------------------------
+-- Custom booster packs (SMODS.Booster)
+--------------------------------------------------------------------------------
+
+local PACKMAKER = [[
+SMODS.ConsumableType {
+    key = "Minor",
+    loc_txt = { name = "Minor Arcana" },
+    shop_rate = 0,
+}
+SMODS.Consumable {
+    set = "Minor", key = "coin",
+    loc_txt = { name = "Coin", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 5 } },
+    cost = 3, sprite = "coin.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Consumable {
+    set = "Minor", key = "sigil",
+    loc_txt = { name = "Sigil", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 2 } },
+    sprite = "sigil.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Consumable {
+    set = "Minor", key = "token",
+    loc_txt = { name = "Token", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 3 } },
+    sprite = "token.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Consumable {
+    set = "Minor", key = "charm",
+    loc_txt = { name = "Charm", text = { "Gain {C:money}$#1#{}" } },
+    config = { extra = { dollars = 4 } },
+    sprite = "charm.png",
+    use = function(self, card) ease_dollars(card.ability.extra.dollars) end,
+}
+SMODS.Booster {
+    key = "vault",
+    loc_txt = { name = "Vault Pack", text = { "Choose {C:attention}1{} of {C:attention}4{} Minor Arcana" } },
+    pool = { consumable = "Minor" },
+    card_count = 4, picks = 1, cost = 6, weight = 100000,
+    sprite = "vault.png",
+    colour = { 0.5, 0.9, 0.6 },
+}
+SMODS.Booster {
+    key = "hoard",
+    loc_txt = { name = "Hoard Pack", text = { "Choose {C:attention}1{} of {C:attention}3{} Jokers" } },
+    pool = { jokers = true },
+    card_count = 3, weight = 0,
+}
+SMODS.Booster {
+    key = "deckbox",
+    loc_txt = { name = "Deckbox Pack", text = { "Choose {C:attention}1{} of {C:attention}3{} Playing cards" } },
+    pool = { playing = true },
+    card_count = 3, weight = 0,
+}
+]]
+
+local function install_packmaker(seed)
+    wipe_mods()
+    write_mod("PackMaker", { id = "PackMaker", prefix = "pm", main_file = "main.lua", version = "1" }, PACKMAKER)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.PackMaker.status, "loaded", tostring(ModLoader.by_id.PackMaker.error))
+    local game = bootstrap.new_game(seed or 4510)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 100
+    return game
+end
+
+-- The seeded shop booster profile sequence of a vanilla install, captured
+-- from the build before SMODS.Booster: seed 777, 40 rolls, ante cycling 1-5.
+local BASELINE_PROFILE_SEQ = {
+    "p_buffoon_normal_1", "p_standard_normal_3", "p_spectral_normal_1", "p_arcana_normal_4",
+    "p_celestial_normal_2", "p_celestial_normal_2", "p_standard_normal_2", "p_buffoon_jumbo_1",
+    "p_arcana_jumbo_1", "p_celestial_normal_3", "p_arcana_jumbo_1", "p_standard_normal_1",
+    "p_arcana_normal_4", "p_celestial_normal_1", "p_standard_normal_4", "p_standard_jumbo_1",
+    "p_standard_normal_3", "p_arcana_normal_2", "p_celestial_normal_3", "p_standard_normal_3",
+    "p_celestial_normal_3", "p_celestial_normal_1", "p_arcana_normal_4", "p_spectral_normal_1",
+    "p_spectral_jumbo_1", "p_standard_normal_1", "p_arcana_normal_4", "p_celestial_normal_4",
+    "p_celestial_jumbo_1", "p_standard_normal_1", "p_celestial_normal_3", "p_standard_normal_4",
+    "p_standard_normal_4", "p_spectral_jumbo_1", "p_arcana_normal_2", "p_arcana_normal_1",
+    "p_arcana_normal_1", "p_celestial_normal_1", "p_standard_normal_2", "p_arcana_jumbo_2",
+}
+
+local function profile_sequence(game)
+    local out = {}
+    for i = 1, 40 do
+        game.ante = math.floor((i - 1) / 8) + 1
+        out[#out + 1] = game:_roll_booster_offer_profile().key
+    end
+    return out
+end
+
+suite.test("custom booster packs: the seeded profile sequence is vanilla's, before and after", function()
+    wipe_mods()
+    local plain = bootstrap.new_game(777)
+    G = plain
+    local seq = profile_sequence(plain)
+    T.assert_eq(#seq, #BASELINE_PROFILE_SEQ)
+    for i, key in ipairs(BASELINE_PROFILE_SEQ) do
+        T.assert_eq(seq[i], key, "profile roll " .. i)
+    end
+
+    -- Registered, the heavyweight pack joins the same single draw; the
+    -- weight-0 packs never roll, and every other key is a vanilla centre.
+    local game = install_packmaker(777)
+    local vaults, others = 0, 0
+    for i = 1, 40 do
+        game.ante = math.floor((i - 1) / 8) + 1
+        local profile = game:_roll_booster_offer_profile()
+        if profile.key == "pm_vault" then
+            vaults = vaults + 1
+            T.assert_eq(profile.pack, "vault")
+            T.assert_true(profile.booster == SMODS.Boosters["pm_vault"], "the profile carries the entry")
+        else
+            others = others + 1
+            T.assert_eq(profile.booster, nil, "vanilla profiles carry no entry")
+        end
+    end
+    T.assert_true(vaults >= 20, "the weight-100000 pack dominates the roll: " .. vaults)
+    T.assert_true(others >= 1, "vanilla packs still roll")
+
+    wipe_mods()
+    T.assert_eq(next(SMODS.Boosters), nil, "packs unregister on rollback")
+    T.assert_eq(SMODS.booster_entry_for("vault"), nil)
+    local plain2 = bootstrap.new_game(777)
+    G = plain2
+    local seq2 = profile_sequence(plain2)
+    for i, key in ipairs(BASELINE_PROFILE_SEQ) do
+        T.assert_eq(seq2[i], key, "post-rollback profile roll " .. i)
+    end
+end)
+
+suite.test("custom booster packs: registration, pools and bad registrations", function()
+    local game = install_packmaker()
+    local entry = SMODS.Boosters["pm_vault"]
+    T.assert_true(entry ~= nil, "the pack registers under its full id")
+    T.assert_eq(entry.pack, "vault")
+    T.assert_eq(entry.pool_kind, "consumable")
+    T.assert_eq(entry.consumable_kind, "Minor", "the pool kind resolves to the registered kind")
+    T.assert_eq(entry.card_count, 4)
+    T.assert_eq(entry.picks, 1)
+    T.assert_eq(entry.cost, 6)
+    T.assert_eq(entry.sprite, "mod:pm:vault.png")
+    T.assert_true(SMODS.booster_entry_for("vault") == entry, "resolved by pack name")
+    T.assert_true(SMODS.booster_entry_for("pm_vault") == entry, "and by full id")
+    T.assert_eq(SMODS.booster_entry_for("arcana"), nil, "vanilla packs are not the registry's")
+    local profiled = SMODS.booster_profile_entries()
+    T.assert_eq(#profiled, 1, "only the weighted pack is in the shop pool")
+    T.assert_eq(profiled[1].key, "pm_vault")
+
+    -- The joker and playing pools deal through the vanilla builders.
+    local jokers = game:_booster_build_choices({ pack = "hoard", card_count = 3 })
+    T.assert_eq(#jokers, 3, "the joker pack deals its card count")
+    for _, ch in ipairs(jokers) do
+        T.assert_eq(ch.kind, "joker")
+        T.assert_true(ch.joker_id ~= nil and JOKER_DEFS[ch.joker_id] ~= nil, "a real Joker: " .. tostring(ch.joker_id))
+    end
+    local playing = game:_booster_build_choices({ pack = "deckbox", card_count = 3 })
+    T.assert_eq(#playing, 3)
+    for _, ch in ipairs(playing) do
+        T.assert_eq(ch.kind, "playing")
+        T.assert_true(ch.playing_data ~= nil and ch.playing_data.rank ~= nil, "a real playing card")
+    end
+    wipe_mods()
+
+    write_mod("BadBooster", { id = "BadBooster", prefix = "bb", main_file = "main.lua", version = "1" }, [[
+SMODS.Booster { key = "arcana", loc_txt = { name = "Arcana II" }, pool = { jokers = true } }
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadBooster.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadBooster.error):find("vanilla", 1, true) ~= nil,
+        tostring(ModLoader.by_id.BadBooster.error))
+    wipe_mods()
+
+    write_mod("BadPool", { id = "BadPool", prefix = "bp", main_file = "main.lua", version = "1" }, [[
+SMODS.Booster { key = "mystery", loc_txt = { name = "Mystery Pack" }, pool = { consumable = "Nope" } }
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BadPool.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.BadPool.error):find("Nope", 1, true) ~= nil,
+        "the error names the kind: " .. tostring(ModLoader.by_id.BadPool.error))
+    wipe_mods()
+end)
+
+suite.test("custom booster packs: shop offer, price, buy, open and pick end to end", function()
+    local game = install_packmaker(4511)
+    game.STATE = game.STATES.SHOP
+    game.shop_booster_slots = 2
+    game:roll_shop_boosters()
+    local slot
+    for i, offer in ipairs(game.shop_booster_offers) do
+        if offer.pack == "vault" then slot = i break end
+    end
+    T.assert_true(slot ~= nil, "the vault pack is on the shelf")
+    local offer = game.shop_booster_offers[slot]
+    T.assert_eq(offer.card_count, 4, "the offer carries the pack's own card count")
+    T.assert_eq(offer.picks_granted, 1)
+    T.assert_eq(offer.name, "Vault Pack", "and its registered name")
+    T.assert_eq(offer.center_key, "pm_vault")
+    T.assert_eq(offer.mod_sprite, "mod:pm:vault.png", "and its wrapper art")
+    T.assert_eq(offer.price, 6, "priced from the registration's cost")
+    T.assert_eq(game:get_shop_booster_price(offer), 6, "and the price survives a refresh")
+    T.assert_eq(game:_booster_offer_price("arcana", "jumbo"), 6, "vanilla prices stand (jumbo = 6)")
+    T.assert_eq(game:_booster_offer_price("arcana", "normal"), 4)
+
+    T.assert_true(game:buy_shop_booster(slot), "the pack buys")
+    T.assert_eq(game.money, 94, "at its registered cost")
+    T.assert_true(game:is_discovered("booster_vault_normal"), "buying discovers its collection entry")
+    local sess = game.booster_session
+    T.assert_true(sess ~= nil, "the pack opens")
+    T.assert_eq(sess.pack, "vault")
+    T.assert_eq(sess.title, "Vault Pack")
+    T.assert_eq(sess.mod_sprite, "mod:pm:vault.png", "the session carries the wrapper art")
+    T.assert_eq(#sess.choices, 4, "it deals its card count")
+    T.assert_eq(sess.picks_remaining, 1)
+    T.assert_false(sess.hand_for_tarot, "its cards need no hand")
+    local idx, want
+    local minor_ids = { c_pm_coin = true, c_pm_sigil = true, c_pm_token = true, c_pm_charm = true }
+    for i, ch in ipairs(sess.choices) do
+        T.assert_true(ch.consumable_def ~= nil, "every choice is a consumable")
+        T.assert_true(minor_ids[ch.consumable_def.id] == true,
+            "of the pack's own kind: " .. tostring(ch.consumable_def.id))
+        if not idx then idx, want = i, ch.consumable_def.ability.extra.dollars end
+    end
+    T.assert_true(game:pick_booster_choice(idx), "a choice picks")
+    T.assert_eq(game.money, 94 + want, "and its use pays out of the pack")
+    T.assert_true(sess.choices[idx].taken)
+    game:end_booster_session()
+    wipe_mods()
+end)
+
+suite.test("custom booster packs: the collection lists them after the vanilla packs", function()
+    local Catalog = require("collection_catalog")
+    wipe_mods()
+    Catalog.invalidate_cache()
+    local vanilla_count = #Catalog.get_entries("boosters")
+    T.assert_true(vanilla_count > 0)
+
+    local game = install_packmaker(4512)
+    Catalog.invalidate_cache()
+    local entries = Catalog.get_entries("boosters")
+    T.assert_eq(#entries, vanilla_count + 3, "the three registered packs are listed")
+    local vault
+    for _, e in ipairs(entries) do
+        if e.pack == "vault" then vault = e end
+    end
+    T.assert_true(vault ~= nil)
+    T.assert_eq(vault.id, "booster_vault_normal")
+    T.assert_eq(vault.discovery_id, "booster_vault_normal")
+    T.assert_eq(vault.name, "Vault Pack")
+    T.assert_eq(vault.mod_sprite, "mod:pm:vault.png")
+    T.assert_eq(vault.shop_offer.card_count, 4)
+    T.assert_eq(vault.shop_offer.picks_granted, 1)
+    T.assert_true(entries[1].mod_sprite == nil, "vanilla packs still lead the category")
+
+    local BoosterPackUI = require("booster_pack_ui")
+    T.assert_eq(BoosterPackUI.shop_tooltip_description(
+        { pack = "vault", card_count = 4, picks_granted = 1 }),
+        "Choose 1 of 4 Minor Arcana Cards to be used immediately.",
+        "the tooltip names the pool's kind")
+    T.assert_eq(BoosterPackUI.shop_tooltip_description(
+        { pack = "hoard", card_count = 3, picks_granted = 1 }),
+        "Choose 1 of 3 Joker Cards to add to your Jokers.")
+
+    wipe_mods()
+    Catalog.invalidate_cache()
+    T.assert_eq(#Catalog.get_entries("boosters"), vanilla_count, "rollback restores the vanilla list")
+end)
+
+--------------------------------------------------------------------------------
 -- Custom centers: enhancements, seals and editions (SMODS.Enhancement / Seal / Edition)
 --------------------------------------------------------------------------------
 
@@ -2368,6 +2642,7 @@ SMODS.Enhancement {
     key = "copper",
     loc_txt = { name = "Copper", text = { "{C:chips}+#1#{} Chips", "{C:mult}+#2#{} Mult when played" } },
     config = { chips = 25, h_chips = 10, h_dollars = 2 },
+    sprite = "copper.png",
     loc_vars = function(self, info_queue, card) return { vars = { self.config.chips, 3 } } end,
     calculate = function(self, card, context)
         if context.card_played then return { mult = 3 } end
@@ -2377,6 +2652,7 @@ SMODS.Seal {
     key = "lime",
     loc_txt = { name = "Lime Seal", text = { "Earn {C:money}$2{} when played", "Retrigger this card" } },
     config = { retrigger = 1 },
+    sprite = "lime.png",
     calculate = function(self, card, context)
         if context.repetition then return { repetitions = 1 } end
         if context.card_played then return { dollars = 2 } end
@@ -2387,6 +2663,7 @@ SMODS.Edition {
     key = "fluoro",
     loc_txt = { name = "Fluorescent", text = { "{C:chips}+40{} Chips, {C:mult}+6{} Mult,", "{X:mult,C:white}X2{} Mult" } },
     config = { chips = 40, mult = 6, x_mult = 2 },
+    sprite = "fluoro.png",
 }
 SMODS.Edition {
     key = "roomy",
@@ -2597,6 +2874,112 @@ suite.test("custom centers: polls reach them, and unloaded polls stay vanilla", 
     T.assert_eq(sequence(plain2), before, "rollback restores the vanilla poll sequence exactly")
 end)
 
+suite.test("custom centers: art hooks resolve to the registered sprites", function()
+    local game = install_t3()
+    game.hand = Hand(game)
+
+    -- The registrations carry their sprite keys in the port's own terms.
+    T.assert_eq(SMODS.Enhancements["t3_copper"].sprite, "mod:t3:copper.png")
+    T.assert_eq(SMODS.Seals["t3_lime"].sprite, "mod:t3:lime.png")
+    T.assert_eq(SMODS.Editions["t3_fluoro"].sprite, "mod:t3:fluoro.png")
+    T.assert_eq(SMODS.center_sprite("enhancement", "copper"), "mod:t3:copper.png")
+    T.assert_eq(SMODS.center_sprite("seal", "Lime"), "mod:t3:lime.png", "values resolve in any case")
+    T.assert_eq(SMODS.center_sprite("edition", "e_fluoro"), "mod:t3:fluoro.png")
+    T.assert_eq(SMODS.center_sprite("enhancement", "bonus"), nil, "vanilla centers have no registry art")
+    T.assert_eq(SMODS.center_sprite("seal", "gold"), nil)
+    T.assert_eq(SMODS.center_sprite("edition", "foil"), nil)
+
+    -- The draw dispatch picks the cells up: a card carrying all three
+    -- resolves all three sprite keys when its quads refresh.
+    local view = SMODS.add_card { set = "Playing", rank = 9, suit = "Hearts",
+        enhancement = "copper", seal = "Lime", edition = "fluoro" }
+    T.assert_true(view ~= nil)
+    local node = game.hand.card_nodes[#game.hand.card_nodes]
+    T.assert_eq(node.face_sprite_key, "mod:t3:copper.png", "the enhancement art is the face")
+    T.assert_eq(node.seal_sprite_key, "mod:t3:lime.png", "the seal art is the stamp")
+    T.assert_eq(node.edition_sprite_key, "mod:t3:fluoro.png", "the edition art is the overlay")
+
+    -- A vanilla card resolves none of them and keeps the atlas fallbacks.
+    local plain = SMODS.add_card { set = "Playing", rank = 4, suit = "Clubs",
+        enhancement = "bonus", seal = "Gold", edition = "foil" }
+    T.assert_true(plain ~= nil)
+    local pnode = game.hand.card_nodes[#game.hand.card_nodes]
+    T.assert_eq(pnode.face_sprite_key, nil)
+    T.assert_eq(pnode.seal_sprite_key, nil)
+    T.assert_eq(pnode.edition_sprite_key, nil)
+
+    wipe_mods()
+    T.assert_eq(SMODS.center_sprite("enhancement", "copper"), nil, "rollback forgets the art")
+end)
+
+suite.test("custom centers: a sprite naming a missing file is a load error naming it", function()
+    wipe_mods()
+    write_mod("NoArt", { id = "NoArt", prefix = "na", main_file = "main.lua", version = "1" }, [[
+SMODS.Enhancement {
+    key = "ghostly",
+    loc_txt = { name = "Ghostly", text = { "Boo" } },
+    sprite = "ghost" .. ".png",
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.NoArt.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.NoArt.error):find("ghost.png", 1, true) ~= nil,
+        "the error names the file: " .. tostring(ModLoader.by_id.NoArt.error))
+    wipe_mods()
+end)
+
+suite.test("custom editions: the registration's cost is the price delta, buy and sell", function()
+    wipe_mods()
+    write_mod("Prices", { id = "Prices", prefix = "pr", main_file = "main.lua", version = "1" }, [[
+SMODS.Edition {
+    key = "gilded",
+    loc_txt = { name = "Gilded", text = { "{C:chips}+10{} Chips" } },
+    config = { chips = 10 },
+    cost = 4,
+}
+SMODS.Edition {
+    key = "shoddy",
+    loc_txt = { name = "Shoddy", text = { "{C:chips}+1{} Chip" } },
+    config = { chips = 1 },
+    cost = -1,
+    weight = 0,
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Prices.status, "loaded", tostring(ModLoader.by_id.Prices.error))
+    T.assert_eq(SMODS.EditionByValue.gilded.cost, 4, "the cost is on the entry")
+    T.assert_eq(SMODS.edition_cost("gilded"), 4)
+    T.assert_eq(SMODS.edition_cost("e_shoddy"), -1, "Steamodded spelling resolves, negatives allowed")
+    T.assert_eq(SMODS.edition_cost("foil"), nil, "vanilla editions are not the registry's business")
+
+    T.assert_eq(Joker.edition_price_deltas("gilded"), 4, "the delta answers the registered cost")
+    T.assert_eq(Joker.edition_price_deltas("foil"), 2, "vanilla deltas are untouched")
+    T.assert_eq(Joker.edition_price_deltas("negative"), 5)
+    T.assert_eq(Joker.edition_price_deltas("base"), 0)
+
+    local game = bootstrap.new_game(4473)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    local def = JOKER_DEFS.j_joker
+    local base = tonumber(def.cost) or 1
+
+    -- A spawned Joker prices and sells with the delta in, like a Foil one does.
+    T.assert_true(game:add_joker_by_def("j_joker", { edition = "gilded" }))
+    local joker = game.jokers[#game.jokers]
+    T.assert_eq(joker.cost, base + 4, "spawn cost carries the delta")
+    T.assert_eq(joker.sell_cost, math.max(1, math.floor((base + 4) / 2)), "and the sell value follows")
+
+    -- The shop's offer price is the same number the spawn would charge.
+    T.assert_eq(game:shop_price_for_joker_offer(def, "gilded"),
+        game:shop_price_for_joker_offer(def, "base") + 4, "the offer price carries the delta")
+    T.assert_eq(game:shop_price_for_joker_offer(def, "foil"),
+        game:shop_price_for_joker_offer(def, "base") + 2, "vanilla offer deltas stand")
+
+    wipe_mods()
+    T.assert_eq(Joker.edition_price_deltas("gilded"), 0, "rollback forgets the delta")
+end)
+
 suite.test("custom centers: mod_conv converts to a registered enhancement", function()
     local game = install_t3()
     game.STATE = game.STATES.SELECTING_HAND
@@ -2696,6 +3079,7 @@ SMODS.Tag {
     key = "windfall",
     loc_txt = { name = "Windfall Tag", text = { "Gain {C:money}$#1#{}" } },
     config = { type = "immediate", dollars = 7 },
+    sprite = "windfall.png",
     loc_vars = function(self, info_queue, tag) return { vars = { self.config.dollars } } end,
     apply = function(self, tag, context)
         G.money = G.money + tag.ability.dollars
@@ -2795,6 +3179,62 @@ suite.test("custom tags: registration, addTag by key and full id, immediate use"
     wipe_mods()
 end)
 
+suite.test("custom tags: a registered sprite is the tag's icon", function()
+    local game = install_tags()
+    T.assert_eq(SMODS.Tags["tg_windfall"].sprite, "mod:tg:windfall.png",
+        "the registration carries its sprite key")
+    local with_art = Tag("windfall")
+    T.assert_eq(with_art.sprite_key, "mod:tg:windfall.png", "a held tag resolves its icon")
+    T.assert_eq(with_art.atlas, nil, "and still has no vanilla sheet cell")
+    local plain = Tag("dud")
+    T.assert_eq(plain.sprite_key, nil, "a tag without art keeps the outline fallback")
+    wipe_mods()
+end)
+
+suite.test("custom tags: registered tags list in the collection's Tags category", function()
+    local Catalog = require("collection_catalog")
+    wipe_mods()
+    Catalog.invalidate_cache()
+    local vanilla_count = #Catalog.get_entries("tags")
+    T.assert_true(vanilla_count > 0, "the vanilla tags list")
+
+    local game = install_tags()
+    Catalog.invalidate_cache()
+    local entries = Catalog.get_entries("tags")
+    T.assert_eq(#entries, vanilla_count + 6, "the six registered tags join the category")
+    local by_type = {}
+    for _, e in ipairs(entries) do
+        if e.tag_entry then by_type[e.tag_type] = e end
+    end
+    local windfall = by_type["windfall"]
+    T.assert_true(windfall ~= nil, "a mod entry exists for the type")
+    T.assert_eq(windfall.category, "tags")
+    T.assert_eq(windfall.node_kind, "tag")
+    T.assert_eq(windfall.id, "tg_windfall", "listed under its full id")
+    T.assert_eq(windfall.discovery_id, "tg_windfall")
+    T.assert_eq(windfall.name, "Windfall Tag")
+    T.assert_true(windfall.description:find("$7", 1, true) ~= nil,
+        "its tooltip lines are its description: " .. windfall.description)
+    -- Vanilla entries keep their places ahead of the mod ones.
+    T.assert_true(entries[1].tag_entry == nil, "vanilla tags still lead the category")
+
+    local prog = Catalog.get_progress(game, "tags")
+    T.assert_eq(prog.total, vanilla_count + 6, "they count into the category progress")
+    -- Discovery is profile state shared by every game in this process, and
+    -- earlier tests already gained windfall and dud -- so the gain/discover
+    -- assertions run on ghost, which nothing else in the suite ever gains.
+    local ghost = by_type["ghost"]
+    T.assert_false(Catalog.is_entry_discovered(game, ghost), "undiscovered before it is gained")
+    game:addTag("ghost")
+    T.assert_true(Catalog.is_entry_discovered(game, ghost),
+        "gaining the tag discovers its entry (even though its moment fires at once)")
+    T.assert_true(game:is_discovered("tg_ghost"), "recorded under the full id")
+
+    wipe_mods()
+    Catalog.invalidate_cache()
+    T.assert_eq(#Catalog.get_entries("tags"), vanilla_count, "rollback restores the vanilla list")
+end)
+
 suite.test("custom tags: blind-choice tags wait for their moment, then fire", function()
     local game = install_tags()
     game.consumables, game.consumable_nodes = {}, {}
@@ -2889,11 +3329,11 @@ SMODS.Tag { key = "double", loc_txt = { name = "Double Ganger" } }
     wipe_mods()
 
     write_mod("BadMoment", { id = "BadMoment", prefix = "bm", main_file = "main.lua", version = "1" }, [[
-SMODS.Tag { key = "shopkeep", loc_txt = { name = "Shopkeep" }, config = { type = "store_joker_create" } }
+SMODS.Tag { key = "shopkeep", loc_txt = { name = "Shopkeep" }, config = { type = "voucher_add" } }
 ]])
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.BadMoment.status, "error")
-    T.assert_true(tostring(ModLoader.by_id.BadMoment.error):find("store_joker_create", 1, true) ~= nil,
+    T.assert_true(tostring(ModLoader.by_id.BadMoment.error):find("voucher_add", 1, true) ~= nil,
         "the error names the moment: " .. tostring(ModLoader.by_id.BadMoment.error))
     wipe_mods()
 end)
@@ -2926,6 +3366,172 @@ suite.test("custom tags: saves round-trip, and an orphaned held tag is a no-op",
     T.assert_true(fresh:load_run_snapshot(snap))
     T.assert_eq(#fresh.tags, 0, "the orphaned type is skipped on restore")
     wipe_mods()
+end)
+
+--------------------------------------------------------------------------------
+-- Custom tags: the shop moments (store_joker_create / store_joker_modify)
+--------------------------------------------------------------------------------
+
+local STORE_TAGS = [[
+SMODS.Tag {
+    key = "greeter",
+    loc_txt = { name = "Greeter Tag", text = { "Shop Jokers are {C:edition}Foil{}" } },
+    config = { type = "store_joker_create" },
+    apply = function(self, tag, context)
+        _G.ST_CREATE = (_G.ST_CREATE or 0) + 1
+        context.card.edition = "foil"
+        return false
+    end,
+}
+SMODS.Tag {
+    key = "swapper",
+    loc_txt = { name = "Swapper Tag", text = { "The next shop Joker becomes another" } },
+    config = { type = "store_joker_create" },
+    apply = function(self, tag, context)
+        if _G.ST_SWAPPED_TO then return false end
+        _G.ST_SWAPPED_FROM = context.card.id
+        context.card.id = (context.card.id == "j_joker") and "j_drunkard" or "j_joker"
+        _G.ST_SWAPPED_TO = context.card.id
+        return true
+    end,
+}
+SMODS.Tag {
+    key = "clearance",
+    loc_txt = { name = "Clearance Tag", text = { "The next shelved Joker is free" } },
+    config = { type = "store_joker_modify" },
+    apply = function(self, tag, context)
+        _G.ST_MODIFY = (_G.ST_MODIFY or 0) + 1
+        context.card.price = 0
+        return true
+    end,
+}
+]]
+
+local function install_store_tags(seed)
+    wipe_mods()
+    _G.ST_CREATE, _G.ST_MODIFY, _G.ST_SWAPPED_FROM, _G.ST_SWAPPED_TO = nil, nil, nil, nil
+    write_mod("StoreTags", { id = "StoreTags", prefix = "st", main_file = "main.lua", version = "1" }, STORE_TAGS)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.StoreTags.status, "loaded", tostring(ModLoader.by_id.StoreTags.error))
+    local game = bootstrap.new_game(seed or 4490)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    game.money = 100
+    return game
+end
+
+suite.test("custom tags: the shop moments register like any other moment", function()
+    local game = install_store_tags()
+    T.assert_eq(SMODS.Tags["st_greeter"].moment, "store_joker_create")
+    T.assert_eq(SMODS.Tags["st_clearance"].moment, "store_joker_modify")
+    -- Neither fires as it is gained: both wait in the tray for the shop.
+    game:addTag("greeter")
+    game:addTag("clearance")
+    T.assert_eq(#game.tags, 2, "shop-moment tags are held, not spent on gain")
+    T.assert_eq(_G.ST_CREATE, nil)
+    T.assert_eq(_G.ST_MODIFY, nil)
+    wipe_mods()
+end)
+
+suite.test("custom tags: store_joker_create fires on shop generation and rewrites the draft", function()
+    local game = install_store_tags()
+    game:addTag("greeter")
+    local offers = {}
+    for _ = 1, 3 do offers[#offers + 1] = game:_roll_shop_queue_joker_offer() end
+    T.assert_eq(_G.ST_CREATE, 3, "one firing per rolled offer")
+    for _, offer in ipairs(offers) do
+        T.assert_eq(offer.edition, "foil", "the tag's edition is the offer's edition")
+        T.assert_eq(offer.price, game:shop_price_for_joker_offer(JOKER_DEFS[offer.id], "foil"),
+            "and the offer is priced as the edition it now carries")
+        T.assert_eq(offer.create_params.edition, "foil", "create params follow")
+    end
+    T.assert_eq(game:hasTag("greeter") >= 0, true, "an apply returning false stays held")
+
+    -- Pack rolls are not the shop's shelf: no firing there.
+    _G.ST_CREATE = 0
+    game:_roll_shop_queue_joker_offer("buf", true)
+    T.assert_eq(_G.ST_CREATE, 0, "buffoon-pack rolls do not fire the moment")
+
+    -- A swap rewrites the id before pricing, and consumes the tag.
+    local game2 = install_store_tags(4491)
+    game2:addTag("swapper")
+    local swapped_offer
+    for _ = 1, 40 do
+        local offer = game2:_roll_shop_queue_joker_offer()
+        if _G.ST_SWAPPED_TO and offer.id == _G.ST_SWAPPED_TO then swapped_offer = offer break end
+    end
+    T.assert_true(swapped_offer ~= nil, "an offer came out as the swapped Joker")
+    T.assert_true(_G.ST_SWAPPED_FROM ~= _G.ST_SWAPPED_TO, "the draft's id was rewritten")
+    T.assert_eq(swapped_offer.name, JOKER_DEFS[_G.ST_SWAPPED_TO].name, "the offer is the new Joker's")
+    T.assert_eq(game2:hasTag("swapper"), -1, "an apply returning true is consumed")
+    wipe_mods()
+end)
+
+suite.test("custom tags: store_joker_modify fires as an offer is shelved", function()
+    local game = install_store_tags(4492)
+    game.shop_offer_slots = 4
+    game:addTag("clearance")
+    local free_offer
+    for _ = 1, 30 do
+        game:roll_shop_offers()
+        if (_G.ST_MODIFY or 0) >= 1 then
+            for _, offer in ipairs(game.shop_offers) do
+                if (offer.kind == "joker" or offer.kind == nil) and offer.price == 0 then
+                    free_offer = offer
+                end
+            end
+            break
+        end
+    end
+    T.assert_true((_G.ST_MODIFY or 0) >= 1, "the moment fired during a shop roll")
+    T.assert_true(free_offer ~= nil, "a shelved Joker carries the tag's price of 0")
+    T.assert_eq(game:hasTag("clearance"), -1, "and the tag is consumed")
+
+    -- A shelved offer rebuilt under a new id meets the moment again.
+    local game2 = install_store_tags(4493)
+    game2.shop_offer_slots = 4
+    game2:roll_shop_offers()
+    local shelved
+    for _, offer in ipairs(game2.shop_offers) do
+        if (offer.kind == "joker" or offer.kind == nil) and offer.id ~= "j_joker" then
+            shelved = offer break
+        end
+    end
+    T.assert_true(shelved ~= nil, "the shop has a Joker to rebuild")
+    game2:addTag("clearance")
+    game2:replace_shop_joker_offer(shelved, shelved.id, "j_joker")
+    T.assert_eq(_G.ST_MODIFY, 1, "the rebuild fired the moment")
+    T.assert_eq(shelved.price, 0, "and its rewrite landed on the rebuilt offer")
+    T.assert_eq(game2:hasTag("clearance"), -1)
+    wipe_mods()
+end)
+
+suite.test("custom tags: shop rolls are untouched while no shop tag is held", function()
+    local function offer_sequence(seed)
+        local game = bootstrap.new_game(seed)
+        G = game
+        game.shop_offer_slots = 4
+        local parts = {}
+        for roll = 1, 12 do
+            game.shop_reroll_count = roll
+            game:roll_shop_offers()
+            for _, offer in ipairs(game.shop_offers) do
+                parts[#parts + 1] = table.concat({ tostring(offer.kind), tostring(offer.id),
+                    tostring(offer.edition), tostring(offer.price) }, "/")
+            end
+            parts[#parts + 1] = "|"
+        end
+        return table.concat(parts, ",")
+    end
+    wipe_mods()
+    local vanilla = offer_sequence(4494)
+    -- The mod loaded, its tags registered, none held: the same sequence.
+    local loaded = install_store_tags(4494)
+    T.assert_eq(offer_sequence(4494), vanilla,
+        "registration alone spends no draws and changes no offers")
+    wipe_mods()
+    T.assert_eq(offer_sequence(4494), vanilla, "and rollback restores it exactly")
 end)
 
 --------------------------------------------------------------------------------

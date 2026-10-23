@@ -1443,14 +1443,19 @@ end
 --- (`context.card_played` / `context.held_in_hand` / `context.on_round_end`,
 --- with `context.other_card` the card): its return's `chips` / `mult` /
 --- `x_mult` land on the running totals and `dollars` in the player's money.
---- There is no art for a mod enhancement: its cards draw the plain card face,
---- the same fallback as a mod suit's Hearts row.
+--- Art is the optional `sprite = "Name.png"` (a card-sized image in
+--- assets/1x): a card carrying the enhancement draws it as its face, the
+--- rank and suit still overlaid. Without one the card draws the plain card
+--- face, the same fallback as a mod suit's Hearts row.
 function SMODS.Enhancement(t)
     local entry = register_center("Enhancement", t, VANILLA_ENHANCEMENTS,
         SMODS.Enhancements, SMODS.EnhancementByValue)
     local weight = t.weight == nil and 1 or math.floor(tonumber(t.weight) or -1)
     check(weight >= 0, "Enhancement '" .. t.original_key .. "': weight must be a whole number >= 0")
     entry.weight = weight
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(entry.mod, t.sprite, "Enhancement", t.original_key, "sprite")
+    end
     return t
 end
 
@@ -1467,13 +1472,18 @@ end
 --- `x_mult` on the running totals, as for enhancements. Retriggers (Red
 --- Seal's trick) come from `config.retrigger` / `config.retrigger_held`
 --- counts, or from `calculate` returning `repetitions` when asked with
---- `context.repetition`. A mod seal has no overlay art: its cards draw without
---- a seal stamp, like a card whose seal the atlas has no cell for.
+--- `context.repetition`. Art is the optional `sprite = "Name.png"`: a
+--- full-card image (transparent but for the stamp) drawn as the seal
+--- overlay. Without one the card draws without a seal stamp, like a card
+--- whose seal the atlas has no cell for.
 function SMODS.Seal(t)
     local entry = register_center("Seal", t, VANILLA_SEALS, SMODS.Seals, SMODS.SealByValue)
     local weight = t.weight == nil and 1 or math.floor(tonumber(t.weight) or -1)
     check(weight >= 0, "Seal '" .. t.original_key .. "': weight must be a whole number >= 0")
     entry.weight = weight
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(entry.mod, t.sprite, "Seal", t.original_key, "sprite")
+    end
     return t
 end
 
@@ -1490,14 +1500,26 @@ end
 --- scoring step; on a Joker the flat `chips` / `mult` land before its effect
 --- and `x_mult` after it, the slots Foil / Holo and Polychrome sit in.
 --- `config.joker_slots` grants that many extra Joker slots while a Joker
---- carrying the edition is held -- Negative's trick, as data. A mod edition
---- has no shader pass and no reveal sting: its cards draw plain.
+--- carrying the edition is held -- Negative's trick, as data. `cost` is the
+--- extra dollars a Joker carrying the edition costs (and so half again on
+--- its sell value), applied where the vanilla editions' own deltas are --
+--- the spawned Joker's price and the shop's offer price; default 0, and it
+--- may be negative. A mod edition has no shader pass and no reveal sting;
+--- its treatment is the optional `sprite = "Name.png"`, a full-card overlay
+--- image drawn over the face (a Joker's front, a playing card's face).
+--- Without one its cards draw plain.
 function SMODS.Edition(t)
     local entry = register_center("Edition", t, VANILLA_EDITIONS,
         SMODS.Editions, SMODS.EditionByValue)
     local weight = t.weight == nil and 2 or tonumber(t.weight)
     check(weight ~= nil and weight >= 0, "Edition '" .. t.original_key .. "': weight must be a number >= 0")
     entry.weight = weight
+    local cost = t.cost == nil and 0 or tonumber(t.cost)
+    check(cost ~= nil, "Edition '" .. t.original_key .. "': cost must be a number")
+    entry.cost = math.floor(cost)
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(entry.mod, t.sprite, "Edition", t.original_key, "sprite")
+    end
     return t
 end
 
@@ -1548,6 +1570,34 @@ local function edition_value(name)
     return nil
 end
 SMODS.edition_value = edition_value
+
+--- The extra dollars a registered edition adds to a Joker's price -- its
+--- registration's `cost`, which `Joker.edition_price_deltas` applies at the
+--- same sites as the vanilla deltas (a spawned Joker's cost, and so its sell
+--- value, and the shop's offer price). Nil for a vanilla edition or an
+--- unknown name: those are not the registry's business.
+function SMODS.edition_cost(name)
+    local value = edition_value(name)
+    local entry = value and SMODS.EditionByValue[value]
+    return entry and entry.cost or nil
+end
+
+--- The standalone image a registered center draws with -- its registration's
+--- `sprite`, in this port's one-image-per-card terms -- by kind
+--- ("enhancement" / "seal" / "edition") and the value a card carries. Nil
+--- when the center is vanilla, unregistered, or registered without art:
+--- those draw the plain fallbacks.
+function SMODS.center_sprite(kind, value)
+    if type(value) ~= "string" or value == "" then return nil end
+    if kind == "enhancement" then value = enhancement_name(value) or value
+    elseif kind == "seal" then value = seal_name(value) or value
+    elseif kind == "edition" then value = edition_value(value) or value end
+    local by_value = kind == "enhancement" and SMODS.EnhancementByValue
+        or kind == "seal" and SMODS.SealByValue
+        or kind == "edition" and SMODS.EditionByValue
+    local entry = by_value and by_value[value:lower()]
+    return entry and entry.sprite or nil
+end
 
 --- Apply one center `calculate` return to a card event: the scoring fields
 --- onto the running totals the event carries, in the same order
@@ -2720,12 +2770,19 @@ local VANILLA_TAG_TYPES = { uncommon = true, rare = true, negative = true, foil 
 --- at blind-select, one tag per screen; `shop_start` and `shop_final_pass`
 --- bracket the shop roll in `Game:enter_shop_after_blind`;
 --- `round_start_bonus` as a blind starts (Juggle Tag's seat); `eval` in the
---- Boss payout (Investment Tag's seat). The vanilla `store_joker_create` /
---- `store_joker_modify` / `voucher_add` / `tag_add` types are not moments a
---- tag's own effect runs at -- they are read off the tray by the shop and
---- Double Tag code -- so they cannot be registered.
+--- Boss payout (Investment Tag's seat); `store_joker_create` as a shop
+--- Joker offer is rolled (the draft offer is `context.card`, and an `apply`
+--- may rewrite its `id` / `edition` before the offer is priced and built --
+--- the Uncommon / Rare Tags' seat in the reference); `store_joker_modify`
+--- as a rolled offer is shelved, and again when a shelved offer is rebuilt
+--- (the edition tags' seat), with the finished offer as `context.card`.
+--- The vanilla `voucher_add` / `tag_add` types still cannot be registered:
+--- nothing in this engine runs a tag's own effect when a voucher is
+--- redeemed or a tag is gained (a gain raises the `tag_added` Joker
+--- context, not a tag moment).
 local TAG_MOMENTS = { immediate = true, new_blind_choice = true, shop_start = true,
-    shop_final_pass = true, round_start_bonus = true, eval = true }
+    shop_final_pass = true, round_start_bonus = true, eval = true,
+    store_joker_create = true, store_joker_modify = true }
 
 function SMODS.is_vanilla_tag_type(name)
     return type(name) == "string" and VANILLA_TAG_TYPES[name:lower()] == true
@@ -2757,8 +2814,9 @@ end
 --- weighs 1: the default 1 makes it as likely as any vanilla tag, 0 keeps it
 --- out of the poll (it can still be created directly). `min_ante` gates the
 --- poll like a vanilla tag's. `in_pool(self, game)` may veto the poll.
---- A mod tag has no art: it draws as a plain outline, and it has no
---- collection entry.
+--- Art is the optional `sprite = "Name.png"`, drawn in the tag's box;
+--- without one a mod tag draws as a plain outline. Either way it is listed
+--- in the collection's Tags category.
 function SMODS.Tag(t)
     local mod = need_mod("SMODS.Tag")
     check(type(t) == "table", "SMODS.Tag expects a table")
@@ -2786,7 +2844,8 @@ function SMODS.Tag(t)
     check(TAG_MOMENTS[moment] == true,
         "Tag '" .. t.key .. "': moment '" .. tostring(moment)
         .. "' is not one the engine raises for mod tags (immediate, "
-        .. "new_blind_choice, shop_start, shop_final_pass, round_start_bonus, eval)")
+        .. "new_blind_choice, shop_start, shop_final_pass, round_start_bonus, eval, "
+        .. "store_joker_create, store_joker_modify)")
     local weight = t.weight == nil and 1 or tonumber(t.weight)
     check(weight ~= nil and weight >= 0,
         "Tag '" .. t.key .. "': weight must be a number >= 0")
@@ -2803,6 +2862,9 @@ function SMODS.Tag(t)
         in_pool = t.in_pool,
         order = next_tag_order, skip_id = next_tag_skip_id,
     }
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(mod, t.sprite, "Tag", t.key, "sprite")
+    end
     next_tag_order = next_tag_order + 1
     next_tag_skip_id = next_tag_skip_id + 1
     SMODS.Tags[id] = entry
@@ -2931,6 +2993,153 @@ function SMODS.tag_tooltip(type_name)
 end
 
 --------------------------------------------------------------------------------
+-- Booster packs (SMODS.Booster)
+--------------------------------------------------------------------------------
+
+--- Custom pack kinds by full id (`<prefix>_<key>`) and by the pack string a
+--- shop offer carries (the bare key, lowercased -- the same slot the vanilla
+--- names "arcana" / "celestial" / "spectral" / "standard" / "buffoon" fill).
+--- Pack names are global: two mods cannot register the same one, and none
+--- may reuse a vanilla name.
+SMODS.Boosters = SMODS.Boosters or {}
+SMODS.BoosterByPack = SMODS.BoosterByPack or {}
+local next_booster_order = 1
+
+local VANILLA_PACK_NAMES = { arcana = true, celestial = true, spectral = true,
+    standard = true, buffoon = true }
+
+--- `SMODS.Booster { key, loc_txt, pool, card_count, picks, cost, weight, sprite, colour }`:
+--- a booster pack kind of this mod's own. It joins the shop's booster roll
+--- at its `weight`, in the profile pool's units (a vanilla normal pack
+--- weighs 100, a Mega 25): the draw is the pool's single draw, extended --
+--- with nothing registered the pool and the seeded sequence are exactly
+--- vanilla's. `cost` is the pack's shop price before inflation and
+--- discounts (vanilla packs price 4 / 6 / 8 by size). A registered pack has
+--- one size of its own: `card_count` cards (default 3), `picks` of them
+--- chosen (default 1).
+---
+--- `pool` names where its cards come from, mirroring a vanilla kind's
+--- choice builder: `{ consumable = "<kind>" }` deals that consumable kind
+--- (a vanilla one, or a kind registered with `SMODS.ConsumableType`) through
+--- the pack flow, Soul / Black Hole polls included for the kinds that have
+--- them; `{ jokers = true }` deals unique Jokers like a Buffoon pack;
+--- `{ playing = true }` deals playing cards like a Standard pack.
+---
+--- `sprite = "Name.png"` is the wrapper art, drawn on the shop shelf and
+--- as the pack flies open; without one the pack draws the plain booster
+--- fallback panel. `colour = { r, g, b }` tints its opening burst.
+function SMODS.Booster(t)
+    local mod = need_mod("SMODS.Booster")
+    check(type(t) == "table", "SMODS.Booster expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
+        "SMODS.Booster needs a 'key' of letters, digits and underscores")
+    local pack = t.key:lower()
+    check(VANILLA_PACK_NAMES[pack] == nil,
+        "Booster '" .. t.key .. "' reuses a vanilla pack name")
+    local clash = SMODS.BoosterByPack[pack]
+    check(clash == nil, "Booster '" .. t.key .. "': the pack '" .. pack
+        .. "' is already registered by " .. (clash and clash.mod.id or "?"))
+    local id = mod.prefix .. "_" .. t.key
+    check(SMODS.Boosters[id] == nil,
+        "Booster '" .. t.key .. "' is defined twice (id " .. id .. ")")
+
+    check(type(t.pool) == "table",
+        "Booster '" .. t.key .. "': pool must be a table: { consumable = \"<kind>\" }, "
+        .. "{ jokers = true } or { playing = true }")
+    local pool_kind, consumable_kind
+    if t.pool.consumable ~= nil then
+        pool_kind = "consumable"
+        local want = t.pool.consumable
+        if type(want) == "string" and SMODS.ConsumableKinds[want] then
+            consumable_kind = want
+        elseif type(want) == "string" then
+            local lower = want:lower()
+            if lower == "tarot" or lower == "planet" or lower == "spectral" then
+                consumable_kind = lower
+            else
+                for _, e in pairs(SMODS.ConsumableKinds) do
+                    if e.kind:lower() == lower then consumable_kind = e.kind break end
+                end
+            end
+        end
+        check(consumable_kind ~= nil,
+            "Booster '" .. t.key .. "': pool.consumable '" .. tostring(want)
+            .. "' is not a consumable kind (a vanilla kind, or one registered "
+            .. "with SMODS.ConsumableType first)")
+    elseif t.pool.jokers then
+        pool_kind = "jokers"
+    elseif t.pool.playing then
+        pool_kind = "playing"
+    end
+    check(pool_kind ~= nil,
+        "Booster '" .. t.key .. "': pool names no source: { consumable = \"<kind>\" }, "
+        .. "{ jokers = true } or { playing = true }")
+
+    local card_count = t.card_count == nil and 3 or math.floor(tonumber(t.card_count) or -1)
+    check(card_count >= 1 and card_count <= 10,
+        "Booster '" .. t.key .. "': card_count must be a whole number from 1 to 10")
+    local picks = t.picks == nil and 1 or math.floor(tonumber(t.picks) or -1)
+    check(picks >= 1 and picks <= card_count,
+        "Booster '" .. t.key .. "': picks must be a whole number from 1 to card_count")
+    local cost = t.cost == nil and 4 or math.floor(tonumber(t.cost) or -1)
+    check(cost >= 0, "Booster '" .. t.key .. "': cost must be a whole number >= 0")
+    local weight = t.weight == nil and 60 or tonumber(t.weight)
+    check(weight ~= nil and weight >= 0,
+        "Booster '" .. t.key .. "': weight must be a number >= 0 (0 keeps it out of the shop roll)")
+
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, pack = pack, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        pool_kind = pool_kind, consumable_kind = consumable_kind,
+        card_count = card_count, picks = picks, cost = cost, weight = weight,
+        colour = type(t.colour) == "table" and t.colour or nil,
+        loc_txt = t.loc_txt,
+        order = next_booster_order,
+    }
+    next_booster_order = next_booster_order + 1
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(mod, t.sprite, "Booster", t.key, "sprite")
+    end
+    SMODS.Boosters[id] = entry
+    SMODS.BoosterByPack[pack] = entry
+    mod.registered.boosters = mod.registered.boosters or {}
+    mod.registered.boosters[#mod.registered.boosters + 1] = id
+    register_center_strings(mod, "booster", pack, t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    return t
+end
+
+--- The registered pack a name means, or nil: the pack string a shop offer
+--- carries (the bare key, in any case) or the full id.
+function SMODS.booster_entry_for(name)
+    if type(name) ~= "string" or name == "" then return nil end
+    return SMODS.Boosters[name] or SMODS.BoosterByPack[name]
+        or SMODS.BoosterByPack[name:lower()]
+end
+
+--- The custom half of the shop's booster profile pool: one entry per
+--- registered pack with weight, shaped like the vanilla entries
+--- (`key` = the pack's full id, `size` = "normal" -- a registered pack has
+--- one size of its own), in registration order. Empty while no pack is
+--- registered, and the vanilla pool is then exactly what it was.
+function SMODS.booster_profile_entries()
+    local out = {}
+    for _, entry in pairs(SMODS.Boosters) do
+        if entry.weight > 0 then
+            out[#out + 1] = {
+                key = entry.id, pack = entry.pack, size = "normal",
+                weight = entry.weight, frame = nil, booster = entry,
+            }
+        end
+    end
+    table.sort(out, function(a, b) return a.booster.order < b.booster.order end)
+    return out
+end
+
+--------------------------------------------------------------------------------
 -- Rollback
 --------------------------------------------------------------------------------
 
@@ -2972,6 +3181,12 @@ function SMODS.rollback(mod)
         SMODS.Tags[id] = nil
     end
     mod.registered.tags = {}
+    for _, id in ipairs(mod.registered.boosters or {}) do
+        local entry = SMODS.Boosters[id]
+        if entry then SMODS.BoosterByPack[entry.pack] = nil end
+        SMODS.Boosters[id] = nil
+    end
+    mod.registered.boosters = {}
     for _, id in ipairs(mod.registered.enhancements or {}) do
         local entry = SMODS.Enhancements[id]
         if entry then SMODS.EnhancementByValue[entry.value] = nil end
