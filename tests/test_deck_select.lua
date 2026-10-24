@@ -154,4 +154,60 @@ suite.test("the pop does not move the layout the info card is placed from", func
     T.assert_eq(h1, h0)
 end)
 
+--------------------------------------------------------------------------------
+-- CardSleeves (Wave 2): the sleeve carousel on this screen.
+--------------------------------------------------------------------------------
+
+suite.test("the sleeve list is No sleeve plus the unlocked decks", function()
+    local g = deck_select(9201)
+    local options = MainMenuUI.sleeve_options(g)
+    T.assert_eq(options[1], false, "the first entry is No sleeve")
+    T.assert_nil(MainMenuUI.selected_sleeve_id(g), "and it is the default")
+    local unlocked = 0
+    for _, def in ipairs(DECK_DEFS) do
+        if g:is_deck_unlocked(def.id) then unlocked = unlocked + 1 end
+    end
+    T.assert_eq(#options, unlocked + 1, "one entry per unlocked deck")
+
+    g.unlocks.b_ghost = g.unlocks.b_ghost or {}
+    g.unlocks.b_ghost.unlocked = true
+    local grown = MainMenuUI.sleeve_options(g)
+    T.assert_eq(#grown, unlocked + 2, "unlocking a deck adds it as a sleeve")
+    local found = false
+    for _, id in ipairs(grown) do if id == "b_ghost" then found = true end end
+    T.assert_true(found)
+end)
+
+suite.test("the sleeve carousel clamps and start-up takes the pick", function()
+    local g = deck_select(9202)
+    g.unlocks.b_blue = g.unlocks.b_blue or {}
+    g.unlocks.b_blue.unlocked = true
+    MainMenuUI.draw_bottom(g)
+    T.assert_not_nil(g._sleeve_select_rects, "the draw leaves sleeve rects")
+
+    local count = #MainMenuUI.sleeve_options(g)
+    for _ = 1, count + 2 do
+        local r = g._sleeve_select_rects.next
+        T.assert_true(MainMenuUI.handle_touch(g, r.x + r.w * 0.5, r.y + r.h * 0.5))
+    end
+    T.assert_eq(g._sleeve_select_idx, count, "clamped at the far end, like the other carousels")
+    local sleeve_id = MainMenuUI.selected_sleeve_id(g)
+    T.assert_not_nil(sleeve_id, "the last option is a real deck")
+
+    local r = g._sleeve_select_rects.prev
+    T.assert_true(MainMenuUI.handle_touch(g, r.x + r.w * 0.5, r.y + r.h * 0.5))
+    T.assert_eq(g._sleeve_select_idx, count - 1)
+
+    -- Starting takes the sleeve into the pending run.
+    g._sleeve_select_idx = count
+    g.start_new_run_from_main_menu = function() return true end
+    T.assert_true(MainMenuUI._start_run(g), "the run starts")
+    T.assert_eq(g._pending_sleeve_id, sleeve_id, "the pick is the pending sleeve")
+
+    -- And No sleeve leaves no pending sleeve behind.
+    g._sleeve_select_idx = 1
+    T.assert_true(MainMenuUI._start_run(g))
+    T.assert_nil(g._pending_sleeve_id)
+end)
+
 return suite

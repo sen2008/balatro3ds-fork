@@ -128,4 +128,57 @@ suite.test("deal stagger survives 4x game speed", function()
     T.assert_eq(#hand.cards, 1, "card lands once the capped clock reaches the beat")
 end)
 
+suite.test("speed hotkey chord cycles speed and leaves panels as found", function()
+    local game = bootstrap.new_game(1208)
+    game:set_game_speed(1)
+    local flips = { jokers = 0, consumables = 0 }
+    game.toggle_jokers_pulled = function() flips.jokers = flips.jokers + 1 return true end
+    game.toggle_consumables_pulled = function() flips.consumables = flips.consumables + 1 return true end
+
+    -- A lone shoulder press is the panel toggle it has always been.
+    T.assert_eq(game:handle_shoulder_role_press("shoulder_l"), true, "lone press toggles")
+    T.assert_eq(flips.jokers, 1, "jokers panel flipped")
+    T.assert_eq(game.SETTINGS.GAMESPEED, 1, "speed untouched by a lone press")
+
+    -- Holding that shoulder and tapping the other cycles speed, undoes the first
+    -- press's panel flip, and never toggles the second panel.
+    T.assert_eq(game:handle_shoulder_role_press("shoulder_r"), true, "chord consumed")
+    T.assert_eq(game.SETTINGS.GAMESPEED, 2, "speed cycled up")
+    T.assert_eq(flips.jokers, 2, "first panel flip undone")
+    T.assert_eq(flips.consumables, 0, "second panel never toggled")
+    T.assert_true(game._game_speed_flash ~= nil, "flash stamped for the readout")
+
+    -- Keeping the first shoulder held and tapping again cycles again, panels untouched.
+    T.assert_eq(game:handle_shoulder_role_press("shoulder_r"), true, "repeat chord consumed")
+    T.assert_eq(game.SETTINGS.GAMESPEED, 4, "speed cycled again")
+    T.assert_eq(flips.jokers, 2, "no further panel flips")
+    T.assert_eq(flips.consumables, 0, "no further panel flips")
+    game:handle_shoulder_role_release("shoulder_l")
+    T.assert_eq(game:_shoulder_role_down("shoulder_l"), false, "release clears the latch")
+end)
+
+suite.test("speed chord does not invent a panel flip the first press never made", function()
+    local game = bootstrap.new_game(1209)
+    game:set_game_speed(1)
+    local flips = { jokers = 0, consumables = 0 }
+    -- A blocked toggle (empty row, modal up) reports no flip.
+    game.toggle_jokers_pulled = function() return false end
+    game.toggle_consumables_pulled = function() flips.consumables = flips.consumables + 1 return true end
+
+    T.assert_eq(game:handle_shoulder_role_press("shoulder_l"), false, "blocked press reports no flip")
+    T.assert_eq(game:handle_shoulder_role_press("shoulder_r"), true, "chord still cycles")
+    T.assert_eq(game.SETTINGS.GAMESPEED, 2, "speed cycled")
+    T.assert_eq(flips.consumables, 0, "no undo flip for a panel that never moved")
+    game:handle_shoulder_role_release("shoulder_l")
+end)
+
+suite.test("cycle_game_speed wraps through the shipping speeds", function()
+    local game = bootstrap.new_game(1210)
+    game:set_game_speed(1)
+    local seen = {}
+    for _ = 1, 4 do seen[#seen + 1] = game:cycle_game_speed(1) end
+    T.assert_eq(table.concat(seen, ","), "2,4,0.5,1", "cycle order wraps")
+    T.assert_eq(game:cycle_game_speed(-1), 0.5, "reverse step wraps down")
+end)
+
 return suite

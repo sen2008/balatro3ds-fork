@@ -535,4 +535,27 @@ suite.test("deleting a profile drops the memo", function()
         "delete_profile removes the file by a route clear_run_snapshot never sees")
 end)
 
+suite.test("a sleeved run's snapshot restores the sleeve and its merged modifiers", function()
+    local g = bootstrap.new_game(9101)
+    g.STAGE = g.STAGES.RUN
+    g.deck = Deck(g)
+    g.hand = Hand(g)
+    g:apply_deck_config("b_painted", "b_black")
+    local snapshot = g:build_run_snapshot()
+    T.assert_eq(snapshot.selected_deck_id, "b_painted", "the snapshot names the primary")
+    T.assert_eq(snapshot.selected_sleeve_id, "b_black", "and the sleeve")
+
+    local g2 = bootstrap.new_game(9102)
+    g2.STAGE = g2.STAGES.RUN
+    g2.deck = Deck(g2)
+    g2.hand = Hand(g2)
+    g2:apply_deck_config("b_red")
+    T.assert_true(g2:load_run_snapshot(snapshot), "the sleeved snapshot loads")
+    T.assert_eq(g2.selected_sleeve_id, "b_black", "the sleeve survives the round trip")
+    -- Painted (+2 hand size, -1 Joker slot) merged with Black (+1 Joker slot, -1 hand).
+    T.assert_eq(g2.deck_hand_size, 2)
+    T.assert_eq(g2.deck_joker_slots, 0)
+    T.assert_eq(g2.deck_hands, -1)
+end)
+
 return suite

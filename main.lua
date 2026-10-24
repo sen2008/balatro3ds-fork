@@ -441,11 +441,13 @@ function love.gamepadpressed(_, button)
         end
     end
 
-    if G and G:is_role(button, "shoulder_l") and G.toggle_jokers_pulled then
-        G:toggle_jokers_pulled()
+    -- Shoulder presses route through one Game method: a press made while the other
+    -- shoulder is still held is the game-speed chord (see `handle_shoulder_role_press`).
+    if G and G:is_role(button, "shoulder_l") and G.handle_shoulder_role_press then
+        G:handle_shoulder_role_press("shoulder_l")
     end
-    if G and G:is_role(button, "shoulder_r") and G.toggle_consumables_pulled then
-        G:toggle_consumables_pulled()
+    if G and G:is_role(button, "shoulder_r") and G.handle_shoulder_role_press then
+        G:handle_shoulder_role_press("shoulder_r")
     end
 
     if not G then return end
@@ -551,6 +553,12 @@ function love.gamepadreleased(_, button)
 
     local role = G:get_role_for_button(button)
     local press_time = role and G:get_role_press_time(role) or nil
+
+    -- Shoulder latches clear on release even under a wipe, like the role holds below.
+    if G.handle_shoulder_role_release then
+        if G:is_role(button, "shoulder_l") then G:handle_shoulder_role_release("shoulder_l") end
+        if G:is_role(button, "shoulder_r") then G:handle_shoulder_role_release("shoulder_r") end
+    end
 
     -- A wipe swallows the gesture but never the bookkeeping. The button that started the
     -- transition goes down before it and comes up under it, so dropping this outright would

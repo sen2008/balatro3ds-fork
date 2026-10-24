@@ -307,59 +307,139 @@ for _, s in ipairs(STAKE_DEFS) do
     STAKE_DEFS_BY_ID[s.id] = s
 end
 
+--- Clear every lasting deck modifier. The first half of `apply_deck_modifiers`'
+--- contract, split out for CardSleeves: a run's modifiers are reset once, then the
+--- primary deck and its sleeve are merged in one at a time.
+function Game:reset_deck_modifiers()
+    self.deck_hands = 0
+    self.deck_discards = 0
+    self.extra_hand_bonus = 0
+    self.extra_discard_bonus = 0
+    self.deck_hand_size = 0
+    self.deck_consumable_slots = 0
+    self._deck_no_interest = false
+    self.deck_joker_slots = 0
+    self.deck_spectral_rate = 0
+    self._deck_special = nil
+    self._deck_special_sleeve = nil
+    self.selected_sleeve_id = nil
+end
+
+--- Add one deck's lasting modifiers onto the current ones (CardSleeves merge rules):
+--- numeric modifiers add, `no_interest` ORs, and the deck's special takes the primary
+--- slot or the sleeve slot — the same special twice collapses to one.
+---@param def table a `DECK_DEFS` entry
+---@param is_sleeve boolean
+function Game:merge_deck_modifiers(def, is_sleeve)
+    local cfg = def.config or {}
+    self.deck_hands = self.deck_hands + (tonumber(cfg.hands) or 0)
+    self.deck_discards = self.deck_discards + (tonumber(cfg.discards) or 0)
+    self.extra_hand_bonus = self.extra_hand_bonus + (tonumber(cfg.extra_hand_bonus) or 0)
+    self.extra_discard_bonus = self.extra_discard_bonus + (tonumber(cfg.extra_discard_bonus) or 0)
+    self.deck_hand_size = self.deck_hand_size + (tonumber(cfg.hand_size) or 0)
+    self.deck_consumable_slots = self.deck_consumable_slots + (tonumber(cfg.consumable_slots) or 0)
+    self._deck_no_interest = self._deck_no_interest or cfg.no_interest == true
+    self.deck_joker_slots = self.deck_joker_slots + (tonumber(cfg.joker_slots) or 0)
+    self.deck_spectral_rate = self.deck_spectral_rate + (tonumber(cfg.spectral_rate) or 0)
+    if def.special then
+        if is_sleeve then
+            if self._deck_special ~= def.special then
+                self._deck_special_sleeve = def.special
+            end
+        else
+            self._deck_special = def.special
+        end
+    end
+end
+
+--- Whether either the primary deck or its sleeve carries `special` ("plasma",
+--- "anaglyph", "erratic"). The one question the special readers ask.
+---@param special string
+---@return boolean
+function Game:deck_special_active(special)
+    return self._deck_special == special or self._deck_special_sleeve == special
+end
+
 --- Set every lasting deck modifier from `def`, clearing whatever the previous run's deck
 --- left behind. Safe to call again when a saved run is loaded.
 ---@param def table a `DECK_DEFS` entry
 function Game:apply_deck_modifiers(def)
-    local cfg = def.config or {}
     self.selected_deck_id = def.id
-    self.deck_hands = tonumber(cfg.hands) or 0
-    self.deck_discards = tonumber(cfg.discards) or 0
-    self.extra_hand_bonus = tonumber(cfg.extra_hand_bonus) or 0
-    self.extra_discard_bonus = tonumber(cfg.extra_discard_bonus) or 0
-    self.deck_hand_size = tonumber(cfg.hand_size) or 0
-    self.deck_consumable_slots = tonumber(cfg.consumable_slots) or 0
-    self._deck_no_interest = cfg.no_interest == true
-    self.deck_joker_slots = tonumber(cfg.joker_slots) or 0
-    self.deck_spectral_rate = tonumber(cfg.spectral_rate) or 0
-    self._deck_special = def.special or nil
+    self:reset_deck_modifiers()
+    self:merge_deck_modifiers(def, false)
 end
 
-function Game:apply_deck_config(deck_id)
+--- Merge a sleeve deck's lasting modifiers over the primary's (CardSleeves). The
+--- primary keeps ownership of the run: wins and unlocks still credit it alone.
+---@param def table a `DECK_DEFS` entry
+function Game:apply_sleeve_modifiers(def)
+    self.selected_sleeve_id = def.id
+    self:merge_deck_modifiers(def, true)
+end
+
+--- The one-shot deck rewrite a deck asks for, if any: "erratic", "no_face",
+--- "suit_filter" or "suit_split", with its argument. Two rewrites of the same 52
+--- cards have no sane composition, so a run applies at most one — the primary
+--- deck's, or the sleeve's when the primary has none.
+---@param def table a `DECK_DEFS` entry
+---@return string|nil kind, any arg
+local function deck_transform(def)
+    local cfg = def.config or {}
+    if def.special == "erratic" then return "erratic" end
+    if cfg.no_face_cards then return "no_face" end
+    if cfg.suit_filter then return "suit_filter", cfg.suit_filter end
+    if cfg.suit_split then return "suit_split", cfg.suit_split end
+    return nil
+end
+
+function Game:apply_deck_config(deck_id, sleeve_id)
     local def = DECK_DEFS_BY_ID[deck_id or "b_red"]
     if not def then def = DECK_DEFS[1] end
+    -- A deck cannot sleeve itself: the pair collapses to the deck alone.
+    local sleeve = nil
+    if type(sleeve_id) == "string" and sleeve_id ~= def.id then
+        sleeve = DECK_DEFS_BY_ID[sleeve_id]
+    end
 
-    local cfg = def.config or {}
     self:apply_deck_modifiers(def)
+    if sleeve then self:apply_sleeve_modifiers(sleeve) end
 
-    if (tonumber(cfg.dollars) or 0) ~= 0 then
-        self.money = math.max(0, (tonumber(self.money) or 0) + (tonumber(cfg.dollars) or 0))
+    for _, d in ipairs({ def, sleeve }) do
+        if d then
+            local dollars = tonumber((d.config or {}).dollars) or 0
+            if dollars ~= 0 then
+                self.money = math.max(0, (tonumber(self.money) or 0) + dollars)
+            end
+        end
     end
 
     self:refresh_joker_capacity_from_negatives()
     self:refresh_consumable_capacity_from_negatives()
 
-    if def.special == "erratic" then
+    local kind, arg = deck_transform(def)
+    if not kind and sleeve then kind, arg = deck_transform(sleeve) end
+    if kind == "erratic" then
         self:_apply_erratic_deck()
-    elseif cfg.no_face_cards then
+    elseif kind == "no_face" then
         self:_apply_no_face_cards()
-    elseif cfg.suit_filter then
-        self:_apply_suit_filter(cfg.suit_filter)
-    elseif cfg.suit_split then
-        self:_apply_suit_split(cfg.suit_split)
+    elseif kind == "suit_filter" then
+        self:_apply_suit_filter(arg)
+    elseif kind == "suit_split" then
+        self:_apply_suit_split(arg)
     end
 
-    if def.start_consumables and type(def.start_consumables) == "table" then
-        for _, cid in ipairs(def.start_consumables) do
-            self:_give_start_consumable(cid)
+    for _, d in ipairs({ def, sleeve }) do
+        if d and d.start_consumables and type(d.start_consumables) == "table" then
+            for _, cid in ipairs(d.start_consumables) do
+                self:_give_start_consumable(cid)
+            end
         end
-    end
-
-    if def.start_vouchers and type(def.start_vouchers) == "table" then
-        for _, vid in ipairs(def.start_vouchers) do
-            if not self:has_voucher(vid) then
-                table.insert(self.vouchers, vid)
-                self:apply_voucher_effect(vid)
+        if d and d.start_vouchers and type(d.start_vouchers) == "table" then
+            for _, vid in ipairs(d.start_vouchers) do
+                if not self:has_voucher(vid) then
+                    table.insert(self.vouchers, vid)
+                    self:apply_voucher_effect(vid)
+                end
             end
         end
     end

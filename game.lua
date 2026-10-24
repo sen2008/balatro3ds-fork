@@ -217,6 +217,11 @@ function Game:init(seed)
     self._pause_continue_rect = nil
     self._pause_new_run_rect = nil
     self._pause_save_quit_rect = nil
+    self._pause_slots_rect = nil
+    self._pause_slot_save_rects = nil
+    self._pause_slot_load_rects = nil
+    self._pause_restart_seed_rect = nil
+    self._pause_slot_infos = nil
     self._pause_save_error = nil
     self._deck_view_open = false
     self._run_info_open = false
@@ -1833,6 +1838,7 @@ function Game:add(node)
 end
 
 function Game:addPopup(node)
+    if self._simulating then return end -- dry-run scoring shows no popups
     if Popup and node and node.is and node:is(Popup) then
         table.insert(self.popups, node)
     end
@@ -2440,6 +2446,7 @@ end
 --- Record first-time discovery of a Joker, Tarot, Planet, or Spectral card.
 ---@return boolean true when newly discovered
 function Game:discover_item(id)
+    if self._simulating then return false end -- a Preview dry run discovers nothing
     if not self:is_trackable_discovery_id(id) then return false end
     if not self.Discovered then self.Discovered = {} end
     if self.Discovered[id] == true then return false end
@@ -2498,6 +2505,7 @@ end
 --- Seeded and challenge runs do not grant collection progression, matching
 --- `check_for_unlock` (`reference/Balatro/functions/common_events.lua:1165-1177`).
 function Game:check_voucher_unlocks(data)
+    if self._simulating then return {} end -- a Preview dry run unlocks nothing
     if self.seeded == true or self.challenge_id ~= nil then return {} end
     self.voucher_unlocks = self.voucher_unlocks or {}
     local earned = {}
@@ -2612,6 +2620,7 @@ end
 ---@param name string
 ---@param amount number|nil defaults to 1
 function Game:add_career_stat(name, amount)
+    if self._simulating then return end -- a Preview dry run earns nothing
     if type(name) ~= "string" then return end
     if type(self.career_stats) ~= "table" then self.career_stats = {} end
     local delta = tonumber(amount) or 1
@@ -2623,6 +2632,7 @@ end
 ---@param name string
 ---@param value number
 function Game:record_career_best(name, value)
+    if self._simulating then return false end -- a Preview dry run sets no records
     if type(name) ~= "string" then return end
     if type(self.career_stats) ~= "table" then self.career_stats = {} end
     local v = Totals.read(value, 0)
@@ -2637,6 +2647,7 @@ function Game:record_career_best(name, value)
 end
 
 function Game:queue_run_record_milestones()
+    if self._simulating then return end
     if self._run_records_queued then return end
     self._run_records_queued = true
     local labels = {
@@ -2674,6 +2685,7 @@ end
 ---@param data table|nil
 ---@return string[] newly unlocked joker ids
 function Game:check_unlock(event_type, data)
+    if self._simulating then return {} end -- a Preview dry run unlocks nothing
     if type(event_type) ~= "string" or event_type == "" then return {} end
     if self.seeded == true then return {} end
     if self.challenge_id ~= nil then return {} end
@@ -2706,6 +2718,14 @@ function Game:get_run_deck_id()
     return nil
 end
 
+--- The run's sleeve deck (CardSleeves), or nil for an unsleeved run. The primary
+--- deck owns the run; the sleeve only merges modifiers, so it is tracked apart.
+function Game:get_run_sleeve_id()
+    local sleeve_id = self.selected_sleeve_id or self._pending_sleeve_id
+    if type(sleeve_id) == "string" and sleeve_id ~= "" then return sleeve_id end
+    return nil
+end
+
 function Game:get_run_stake_id()
     local stake_id = self.selected_stake_id or self._pending_stake_id
     if type(stake_id) == "string" and stake_id ~= "" then return stake_id end
@@ -2721,6 +2741,15 @@ function Game:restore_run_deck_stake_from_snapshot(snapshot)
             self:apply_deck_modifiers(def)
         else
             self.selected_deck_id = deck_id
+        end
+    end
+    -- The sleeve merges over the primary just restored. Snapshots from before
+    -- sleeves existed have no field and restore unsleeved, as they were saved.
+    local sleeve_id = snapshot.selected_sleeve_id
+    if type(sleeve_id) == "string" and sleeve_id ~= "" and sleeve_id ~= deck_id then
+        local sleeve_def = DECK_DEFS_BY_ID and DECK_DEFS_BY_ID[sleeve_id]
+        if sleeve_def and self.apply_sleeve_modifiers then
+            self:apply_sleeve_modifiers(sleeve_def)
         end
     end
     local stake_id = snapshot.selected_stake_id
@@ -3014,6 +3043,11 @@ function Game:enter_pause_menu()
     self._pause_continue_rect = nil
     self._pause_new_run_rect = nil
     self._pause_save_quit_rect = nil
+    self._pause_slots_rect = nil
+    self._pause_slot_save_rects = nil
+    self._pause_slot_load_rects = nil
+    self._pause_restart_seed_rect = nil
+    self._pause_slot_infos = nil
     self._pause_settings_rect = nil
     self._pause_show_settings = false
     self._pause_settings_tab = "general"
@@ -3186,6 +3220,25 @@ function Game:build_pause_focus_targets()
             end
             return targets
         end
+        if self._pause_settings_tab == "slots" then
+            -- Brainstorm page: per-slot save/load pairs, then restart-seed, then back.
+            -- A load target exists only for a slot that holds a snapshot.
+            local infos = self._pause_slot_infos or {}
+            for i, r in ipairs(self._pause_slot_save_rects or {}) do
+                targets[#targets + 1] = { kind = "slot_save", index = i, rect = r }
+                local lr = (self._pause_slot_load_rects or {})[i]
+                if lr and infos[i] then
+                    targets[#targets + 1] = { kind = "slot_load", index = i, rect = lr }
+                end
+            end
+            if self._pause_restart_seed_rect then
+                targets[#targets + 1] = { kind = "restart_seed", rect = self._pause_restart_seed_rect }
+            end
+            if self._pause_back_rect then
+                targets[#targets + 1] = { kind = "back", rect = self._pause_back_rect }
+            end
+            return targets
+        end
         for i, r in ipairs(self._pause_speed_rects or {}) do
             if r then targets[#targets + 1] = { kind = "speed", index = i, rect = r } end
         end
@@ -3210,6 +3263,9 @@ function Game:build_pause_focus_targets()
         if self._pause_joker_display_rect then
             targets[#targets + 1] = { kind = "joker_display", rect = self._pause_joker_display_rect }
         end
+        if self._pause_preview_score_rect then
+            targets[#targets + 1] = { kind = "preview_score", rect = self._pause_preview_score_rect }
+        end
         if self._pause_skip_tutorial_rect then
             targets[#targets + 1] = { kind = "skip_tutorial", rect = self._pause_skip_tutorial_rect }
         end
@@ -3226,6 +3282,9 @@ function Game:build_pause_focus_targets()
     end
     if self._pause_collection_rect then
         targets[#targets + 1] = { kind = "collection", rect = self._pause_collection_rect }
+    end
+    if self._pause_slots_rect then
+        targets[#targets + 1] = { kind = "slots_open", rect = self._pause_slots_rect }
     end
     if self._pause_new_run_rect then
         targets[#targets + 1] = { kind = "new_run", rect = self._pause_new_run_rect }
@@ -3286,6 +3345,9 @@ function Game:activate_pause_focus()
     elseif t.kind == "joker_display" then
         self:set_joker_display_enabled(not self:joker_display_enabled())
         return true
+    elseif t.kind == "preview_score" then
+        self:set_preview_score_enabled(not self:preview_score_enabled())
+        return true
     elseif t.kind == "art_open" then
         return self:open_card_art_panel()
     elseif t.kind == "art_suit" then
@@ -3322,6 +3384,34 @@ function Game:activate_pause_focus()
     elseif t.kind == "collection" then
         self:open_collection_over_run()
         return true
+    elseif t.kind == "slots_open" then
+        self._pause_show_settings = true
+        self._pause_settings_tab = "slots"
+        self._pause_save_error = nil
+        self:refresh_pause_slot_infos()
+        self._pause_focus_index = 1
+        return true
+    elseif t.kind == "slot_save" and t.index then
+        local ok, err = self:save_run_slot(t.index)
+        if ok then
+            self:refresh_pause_slot_infos()
+            if Sfx and Sfx.play then Sfx.play("button", 1, 0.3) end
+        elseif err == "scoring" then
+            self._pause_save_error = I18N.text("save.scoring_blocked", nil, "Cannot save while scoring.")
+        else
+            self._pause_save_error = I18N.text("save.failed_prefix", nil, "Save failed: ") .. tostring(err)
+        end
+        return true
+    elseif t.kind == "slot_load" and t.index then
+        local ok, err = self:load_run_slot(t.index)
+        if not ok then
+            self._pause_save_error = err == "scoring"
+                and I18N.text("save.scoring_blocked", nil, "Cannot save while scoring.")
+                or (I18N.text("save.failed_prefix", nil, "Save failed: ") .. tostring(err))
+        end
+        return true
+    elseif t.kind == "restart_seed" then
+        return self:restart_run_with_same_seed()
     elseif t.kind == "new_run" then
         if self.enter_main_menu_deck_select then self:enter_main_menu_deck_select() end
         return true
@@ -3447,6 +3537,11 @@ function Game:exit_pause_menu()
     self._pause_continue_rect = nil
     self._pause_new_run_rect = nil
     self._pause_save_quit_rect = nil
+    self._pause_slots_rect = nil
+    self._pause_slot_save_rects = nil
+    self._pause_slot_load_rects = nil
+    self._pause_restart_seed_rect = nil
+    self._pause_slot_infos = nil
     self._pause_save_error = nil
     self._pause_prev_state = nil
     self._pause_settings_rect = nil
@@ -3500,6 +3595,117 @@ end
 
 function Game:run_save_path()
     return self:run_save_path_for_profile(self:get_profile_id())
+end
+
+--- Brainstorm save-states: named snapshot slots beside the autosave, one file per slot
+--- per profile, written and read through the same serialize path as the main save.
+Game.RUN_SLOT_COUNT = 3
+
+function Game:run_slot_path_for_profile(slot, profile_id)
+    local s = math.max(1, math.min(Game.RUN_SLOT_COUNT, math.floor(tonumber(slot) or 1)))
+    local id = math.floor(tonumber(profile_id) or 1)
+    return string.format("sdmc/Balatro3DS_run_slot_%d_%d.lua", s, id)
+end
+
+function Game:run_slot_path(slot)
+    return self:run_slot_path_for_profile(slot, self:get_profile_id())
+end
+
+--- The snapshot half of `read_run_snapshot` with the path (and its existence check)
+--- parameterized, for slot files the `has_saved_run` memo does not cover.
+function Game:read_run_snapshot_from(path)
+    if not (love and love.filesystem and love.filesystem.load) then
+        return nil, "filesystem_unavailable"
+    end
+    if love.filesystem.getInfo and not love.filesystem.getInfo(path, "file") then
+        return nil, "missing"
+    end
+    local chunk, err = love.filesystem.load(path)
+    if not chunk then return nil, tostring(err or "load_failed") end
+    local ok, data = pcall(chunk)
+    if not ok or type(data) ~= "table" then
+        return nil, "decode_failed"
+    end
+    return data, nil
+end
+
+--- Cheap slot summary for the pause page: ante/round/money/deck, or nil when empty.
+function Game:run_slot_info(slot)
+    local snapshot = self:read_run_snapshot_from(self:run_slot_path(slot))
+    if not snapshot then return nil end
+    return {
+        ante = tonumber(snapshot.ante) or 1,
+        round = tonumber(snapshot.round) or 1,
+        money = tonumber(snapshot.money) or 0,
+        deck_id = snapshot.selected_deck_id,
+        seed = snapshot.seed,
+    }
+end
+
+--- Save the current run into a slot. Inherits the autosave validity window: a snapshot
+--- is only meaningful at a non-scoring moment, and never mid-restore.
+---@return boolean ok, string|nil err
+function Game:save_run_slot(slot)
+    if self.STAGE ~= self.STAGES.RUN then return false, "not_in_run" end
+    if self._restoring_run_snapshot == true then return false, "restoring" end
+    if self:is_hand_scoring_active() then return false, "scoring" end
+    local ok, err = self:write_run_snapshot(self:build_run_snapshot(), self:run_slot_path(slot))
+    return ok == true, err
+end
+
+--- Restore a slot into the live run. The restore replays state transitions like
+--- Continue does, then the autosave re-pins the main save to the restored state so a
+--- later quit resumes HERE, not at whatever the autosave last held.
+---@return boolean ok, string|nil err
+function Game:load_run_slot(slot)
+    if self:is_hand_scoring_active() then return false, "scoring" end
+    local snapshot, err = self:read_run_snapshot_from(self:run_slot_path(slot))
+    if not snapshot then return false, err end
+    local ok, load_err = self:load_run_snapshot(snapshot)
+    if not ok then return false, load_err end
+    -- The restore lands in a run state; drop the pause panel that asked for it.
+    self._pause_show_settings = false
+    self._pause_settings_tab = "general"
+    self._pause_prev_state = nil
+    self._pause_save_error = nil
+    self:autosave_run()
+    return true
+end
+
+--- Slot summaries for the pause page, cached: reading three slot files off the SD
+--- card is a page-open cost, not a per-frame one.
+function Game:refresh_pause_slot_infos()
+    local infos = {}
+    for i = 1, Game.RUN_SLOT_COUNT do
+        infos[i] = self:run_slot_info(i)
+    end
+    self._pause_slot_infos = infos
+    return infos
+end
+
+--- Brainstorm's seed hunting: start the same seed, deck, stake (and challenge, when
+--- the run has one) over from ante 1, through the ordinary run-start machinery. The
+--- restarted run counts as seeded -- its seed is known -- exactly as if it had been
+--- typed into deck select.
+---@return boolean started
+function Game:restart_run_with_same_seed()
+    if self.STAGE ~= self.STAGES.RUN then return false end
+    local seed = self:normalize_run_seed(self.SEED)
+    if seed == nil then return false end
+    if ScreenWipe.active(self) then return false end
+    self._pending_run_seed = seed
+    self._pending_deck_id = self:get_run_deck_id()
+    self._pending_sleeve_id = self:get_run_sleeve_id()
+    self._pending_stake_id = self:get_run_stake_id()
+    if type(self.challenge_id) == "string" and self.challenge_id ~= "" then
+        self._pending_challenge_id = self.challenge_id
+    end
+    -- Leave the pause panel behind the way Continue does; the wipe's run build ends
+    -- in its own set_state.
+    if self.STATE == self.STATES.PAUSED then
+        self:exit_pause_menu()
+    end
+    return self:start_new_run_from_main_menu()
 end
 
 function Game:default_profile_name(profile_id)
@@ -3648,6 +3854,9 @@ function Game:delete_profile(profile_id)
     if love and love.filesystem and love.filesystem.remove then
         love.filesystem.remove(self:settings_path_for_profile(id))
         love.filesystem.remove(self:run_save_path_for_profile(id))
+        for slot = 1, Game.RUN_SLOT_COUNT do
+            love.filesystem.remove(self:run_slot_path_for_profile(slot, id))
+        end
         -- The run save just went away by a route `clear_run_snapshot` never saw.
         self:forget_saved_run()
     end
@@ -3812,6 +4021,11 @@ function Game:default_settings()
         -- it is an information overlay the base game does not have, and it costs the 20 px
         -- under the row.
         JOKER_DISPLAY = false,
+        -- Balatro Preview: the exact score the current selection will produce, shown
+        -- in the readout before the hand is played (a snapshot-sandboxed dry run of
+        -- the real sequencer). Off by default: each selection change costs a
+        -- snapshot + simulation + restore.
+        PREVIEW_SCORE = false,
         -- Per suit: which collab draws the face cards (absent = the deck's own) and whether
         -- the suit uses the high-contrast sheets (`card_art.lua`).
         CARD_ART = CardArt.default_settings(),
@@ -3874,6 +4088,9 @@ function Game:normalize_settings(data)
     if type(data.JOKER_DISPLAY) == "boolean" then
         out.JOKER_DISPLAY = data.JOKER_DISPLAY
     end
+    if type(data.PREVIEW_SCORE) == "boolean" then
+        out.PREVIEW_SCORE = data.PREVIEW_SCORE
+    end
     -- A save from before per-suit art has only the old global contrast switch.
     out.CARD_ART = CardArt.normalize(data.CARD_ART, data.HIGH_CONTRAST_CARDS)
     if Localization.is_supported(data.LANGUAGE) then out.LANGUAGE = data.LANGUAGE end
@@ -3916,6 +4133,7 @@ function Game:snapshot_settings()
         REDUCED_MOTION = self:reduced_motion_enabled(),
         TILT = self:tilt_enabled(),
         JOKER_DISPLAY = self:joker_display_enabled(),
+        PREVIEW_SCORE = self:preview_score_enabled(),
         CARD_ART = CardArt.normalize(self.SETTINGS and self.SETTINGS.CARD_ART),
         LANGUAGE = Localization.is_supported(self.SETTINGS and self.SETTINGS.LANGUAGE)
             and self.SETTINGS.LANGUAGE or Localization.DEFAULT_LANGUAGE,
@@ -4111,6 +4329,79 @@ function Game:set_game_speed(speed)
     self:save_settings()
 end
 
+--- The shipping speeds in cycle order, for the in-run hotkey below.
+local GAME_SPEED_CYCLE = { 0.5, 1, 2, 4 }
+local GAME_SPEED_LABELS = { [0.5] = "x0.5", [1] = "x1", [2] = "x2", [4] = "x4" }
+
+--- Advance GAMESPEED one step through the cycle (wrapping), Handy-style: the pause
+--- settings tab stays the place to jump straight to a speed; this is for nudging it
+--- mid-run. Returns the new speed, or nil if settings are unavailable.
+function Game:cycle_game_speed(dir)
+    if not self.SETTINGS then return nil end
+    local cur = tonumber(self.SETTINGS.GAMESPEED) or 1
+    local idx = 2
+    for i, s in ipairs(GAME_SPEED_CYCLE) do
+        if s == cur then idx = i break end
+    end
+    idx = ((idx - 1 + (dir or 1)) % #GAME_SPEED_CYCLE) + 1
+    local next_speed = GAME_SPEED_CYCLE[idx]
+    self:set_game_speed(next_speed)
+    -- Transient confirmation on the top screen (drawn by TopUI while the stamp is fresh).
+    self._game_speed_flash = {
+        label = GAME_SPEED_LABELS[next_speed] or tostring(next_speed),
+        until_real = ((self.TIMERS and self.TIMERS.REAL) or 0) + 1.2,
+    }
+    if Sfx and Sfx.play then Sfx.play("button", 1, 0.3) end
+    return next_speed
+end
+
+--- Is a shoulder role physically down right now? Role holds (`is_role_held`) only track
+--- confirm/cancel, so shoulder state comes from the latch `handle_shoulder_role_press`
+--- keeps, cross-checked against the live pad so a release the latch missed (a wipe can
+--- swallow one) never wedges the chord.
+function Game:_shoulder_role_down(role)
+    if self._shoulder_down and self._shoulder_down[role] then return true end
+    if not (love and love.joystick and love.joystick.getJoysticks) then return false end
+    local joysticks = love.joystick.getJoysticks()
+    local joy = joysticks and joysticks[1]
+    if not joy then return false end
+    local bindings = InputBindings.get_bindings(self)
+    for _, btn in ipairs(InputBindings.get_role_buttons(role, bindings)) do
+        if InputBindings.safe_is_gamepad_down(joy, btn) then return true end
+    end
+    return false
+end
+
+function Game:handle_shoulder_role_release(role)
+    if type(self._shoulder_down) == "table" then self._shoulder_down[role] = nil end
+end
+
+--- One shoulder-role press, routed from `love.gamepadpressed`. Shoulders are momentary
+--- panel toggles and holding one is otherwise inert (HOLD_ROLES covers confirm/cancel
+--- only), so a shoulder pressed while the OTHER shoulder role is still down is a free
+--- chord: it cycles the game speed instead of toggling its panel, and first undoes the
+--- panel flip the held shoulder's own press made when the chord began, so the gesture
+--- leaves both panels exactly as it found them. Holding one shoulder and tapping the
+--- other repeatedly keeps cycling. Returns true when the press toggled or cycled.
+function Game:handle_shoulder_role_press(role)
+    local other = (role == "shoulder_l") and "shoulder_r" or "shoulder_l"
+    local chord = self:_shoulder_role_down(other)
+    if type(self._shoulder_down) ~= "table" then self._shoulder_down = {} end
+    self._shoulder_down[role] = true
+    if chord then
+        if self._shoulder_chord_undo == other then
+            self._shoulder_chord_undo = nil
+            if other == "shoulder_l" then self:toggle_jokers_pulled() else self:toggle_consumables_pulled() end
+        end
+        self:cycle_game_speed(1)
+        return true
+    end
+    local flipped
+    if role == "shoulder_l" then flipped = self:toggle_jokers_pulled() else flipped = self:toggle_consumables_pulled() end
+    self._shoulder_chord_undo = flipped and role or nil
+    return flipped and true or false
+end
+
 --- Master volume scales both music and SFX.
 function Game:get_master_volume()
     local sound = self.SETTINGS and self.SETTINGS.SOUND
@@ -4209,6 +4500,20 @@ function Game:set_joker_display_enabled(enabled)
     -- Nothing has been recomputed while the readouts were off, so the first frame after
     -- turning them on must not trust the cached signature.
     JokerDisplay.invalidate()
+    self:save_settings()
+end
+
+--- Balatro Preview toggle; see `Game:simulate_selected_play`.
+---@return boolean
+function Game:preview_score_enabled()
+    return (self.SETTINGS and self.SETTINGS.PREVIEW_SCORE) == true
+end
+
+---@param enabled boolean
+function Game:set_preview_score_enabled(enabled)
+    if not self.SETTINGS then return end
+    self.SETTINGS.PREVIEW_SCORE = enabled == true
+    self._preview_cache = nil
     self:save_settings()
 end
 
@@ -5024,6 +5329,7 @@ function Game:build_run_snapshot()
         resume_state = self:current_resume_state(),
         stage = self.STAGES.RUN,
         selected_deck_id = self:get_run_deck_id(),
+        selected_sleeve_id = self:get_run_sleeve_id(),
         selected_stake_id = self:get_run_stake_id(),
         challenge_id = self.challenge_id,
         challenge_rules = copy_table(self.challenge_rules or {}),
@@ -5125,19 +5431,23 @@ function Game:build_run_snapshot()
     }
 end
 
-function Game:write_run_snapshot(snapshot)
+--- Write a snapshot; `path` defaults to the profile's main run save. Slot writes
+--- (Brainstorm) pass their own path and skip the main save's presence memo.
+function Game:write_run_snapshot(snapshot, path)
     if type(snapshot) ~= "table" then return false, "invalid_snapshot" end
     if not (love and love.filesystem and love.filesystem.write and love.filesystem.createDirectory) then
         return false, "filesystem_unavailable"
     end
     love.filesystem.createDirectory(RUN_SAVE_DIR)
     local encoded = "return " .. serialize_lua_value(snapshot)
-    local path = self:run_save_path()
+    path = path or self:run_save_path()
     local ok, err = love.filesystem.write(path, encoded)
     if not ok then
         return false, tostring(err or "write_failed")
     end
-    self:note_saved_run(path, true)
+    if path == self:run_save_path() then
+        self:note_saved_run(path, true)
+    end
     return true
 end
 
@@ -5563,6 +5873,9 @@ end
 ---@return boolean written
 function Game:autosave_run()
     if self.STAGE ~= self.STAGES.RUN then return false end
+    -- A Preview dry run plays a whole hand inside the snapshot sandbox; its state
+    -- transitions must never reach the disk.
+    if self._simulating == true then return false end
     -- Loading a run replays state transitions; do not write back over the file mid-restore.
     if self._restoring_run_snapshot == true then return false end
     if self:is_hand_scoring_active() then return false end
@@ -5615,7 +5928,7 @@ function Game:get_base_requirement_for_ante(ante)
     local stake_offset = tonumber(self._stake_ante_mult) or 0
     local max_ante = 8
     local deckMult = 1
-    if self._deck_special == "plasma" then
+    if self:deck_special_active("plasma") then
         deckMult = 2
     end
     local table_ante = requested_ante + (max_ante + 1) * stake_offset
@@ -8959,6 +9272,54 @@ function Game:draw_bottom_pause()
                 (cr.h - love.graphics.getFont():getHeight()) * 0.5 + 0.5) - 1, cr.w - box - 14, "left")
 
             draw_btn(self._pause_back_rect, I18N.text("common.back", nil, "Back"), self.C.MULT, is_pause_focused("back"))
+        elseif self._pause_settings_tab == "slots" then
+            -- ===== SAVE STATES PAGE (Brainstorm) =====
+            love.graphics.printf(I18N.text("pause.save_states", nil, "Save States"), panel_x, panel_y + 10, panel_w, "center")
+            if not self._pause_slot_infos then self:refresh_pause_slot_infos() end
+            local infos = self._pause_slot_infos or {}
+            if self._pause_save_error then
+                love.graphics.setColor(self.C.RED)
+                love.graphics.setFont(self.FONTS.PIXEL.SMALL)
+                love.graphics.printf(tostring(self._pause_save_error), panel_x + 8, panel_y + 30, panel_w - 16, "center")
+            else
+                love.graphics.setColor(self.C.GREY)
+                love.graphics.setFont(self.FONTS.PIXEL.SMALL)
+                love.graphics.printf(I18N.text("pause.slots_hint", nil, "Slots hold a full snapshot of this run."),
+                    panel_x + 8, panel_y + 30, panel_w - 16, "center")
+            end
+            local can_save = not self:is_hand_scoring_active()
+            self._pause_slot_save_rects = {}
+            self._pause_slot_load_rects = {}
+            for i = 1, Game.RUN_SLOT_COUNT do
+                local row_y = panel_y + 48 + (i - 1) * 44
+                local save_r = { x = panel_x + 8, y = row_y, w = 140, h = 24 }
+                local load_r = { x = panel_x + 156, y = row_y, w = 140, h = 24 }
+                self._pause_slot_save_rects[i] = save_r
+                self._pause_slot_load_rects[i] = load_r
+                draw_btn(save_r, string.format(I18N.text("pause.slot_save", nil, "Save Slot %d"), i),
+                    can_save and self.C.GREEN or self.C.GREY, is_pause_focused("slot_save", i))
+                local info = infos[i]
+                draw_btn(load_r, string.format(I18N.text("pause.slot_load", nil, "Load Slot %d"), i),
+                    info and self.C.BLUE or self.C.GREY, is_pause_focused("slot_load", i))
+                love.graphics.setColor(self.C.GREY)
+                love.graphics.setFont(self.FONTS.PIXEL.SMALL)
+                local detail = I18N.text("pause.slot_empty", nil, "Empty")
+                if info then
+                    detail = string.format(I18N.text("pause.slot_info", nil, "Ante %d - Round %d - $%d"),
+                        info.ante, info.round, info.money)
+                end
+                love.graphics.printf(detail, panel_x + 8, row_y + 28, panel_w - 16, "center")
+            end
+            self._pause_restart_seed_rect = {
+                x = panel_x + 82, y = panel_y + 182, w = panel_w - 164, h = 22,
+            }
+            draw_btn(self._pause_restart_seed_rect, I18N.text("pause.restart_seed", nil, "Restart Same Seed"),
+                self.C.ORANGE, is_pause_focused("restart_seed"))
+            self._pause_back_rect = {
+                x = panel_x + math.floor((panel_w - 140) * 0.5 + 0.5), y = panel_y + 208,
+                w = 140, h = 18,
+            }
+            draw_btn(self._pause_back_rect, I18N.text("common.back", nil, "Back"), self.C.MULT, is_pause_focused("back"))
         else
             -- ===== SETTINGS GAME TAB =====
             love.graphics.printf(I18N.text("settings.title", nil, "Settings"), panel_x, panel_y + 10, panel_w, "center")
@@ -9022,6 +9383,7 @@ function Game:draw_bottom_pause()
                 toggle_row[#toggle_row + 1] = { key = "tilt", label = "Tilt", on = self:tilt_enabled() }
             end
             toggle_row[#toggle_row + 1] = { key = "joker_display", label = "Joker Info", on = jd_on }
+            toggle_row[#toggle_row + 1] = { key = "preview_score", label = "Preview", on = self:preview_score_enabled() }
 
             local toggle_h = 20
             local toggle_margin = 2
@@ -9033,6 +9395,7 @@ function Game:draw_bottom_pause()
             self._pause_reduced_motion_rect = nil
             self._pause_tilt_rect = nil
             self._pause_joker_display_rect = nil
+            self._pause_preview_score_rect = nil
             self._pause_skip_tutorial_rect = nil
             for i, t in ipairs(toggle_row) do
                 local r = {
@@ -9052,10 +9415,20 @@ function Game:draw_bottom_pause()
                     self._pause_reduced_motion_rect = r
                 elseif t.key == "tilt" then
                     self._pause_tilt_rect = r
+                elseif t.key == "preview_score" then
+                    self._pause_preview_score_rect = r
                 else
                     self._pause_joker_display_rect = r
                 end
             end
+
+            -- The in-run speed hotkey (Handy remainder): noted here where the speed it
+            -- cycles is set, since the chord itself has no other discoverable surface.
+            love.graphics.setColor(self.C.GREY)
+            love.graphics.setFont(self.FONTS.PIXEL.SMALL)
+            love.graphics.printf(I18N.text("settings.game_speed_hotkey", nil,
+                "In a run: hold L and tap R (or hold R and tap L) to cycle speed"),
+                panel_x + 8, panel_y + 148, panel_w - 16, "center")
 
             if self.SETTINGS and self.SETTINGS.TUTORIAL_COMPLETE ~= true then
                 self._pause_skip_tutorial_rect = {
@@ -9112,32 +9485,37 @@ function Game:draw_bottom_pause()
         love.graphics.setFont(self.FONTS.PIXEL.MEDIUM)
         love.graphics.printf(I18N.text("pause.title", nil, "Paused"), panel_x, panel_y + 10, panel_w, "center")
 
-        -- Five rows now: the reference offers the collection from its in-run options overlay
+        -- Six rows: the reference offers the collection from its in-run options overlay
         -- (`UI_definitions.lua:2223`), so a Joker you are being offered can be looked up
-        -- mid-run. Rows are 30 px apart rather than 36 to keep the panel the same height.
-        local btn_w, btn_h = 176, 26
+        -- mid-run, and Save States carries Brainstorm's slots. Rows are 25 px apart
+        -- rather than 36 to keep the panel the same height.
+        -- Six rows now (Save States joined for Brainstorm's slots + seed restart), so
+        -- the pitch tightens to 25 px and the buttons to 24 tall.
+        local btn_w, btn_h = 176, 24
         local btn_x = panel_x + math.floor((panel_w - btn_w) * 0.5 + 0.5)
-        self._pause_continue_rect   = { x = btn_x, y = panel_y + 36,  w = btn_w, h = btn_h }
-        self._pause_settings_rect   = { x = btn_x, y = panel_y + 66,  w = btn_w, h = btn_h }
-        self._pause_collection_rect = { x = btn_x, y = panel_y + 96,  w = btn_w, h = btn_h }
-        self._pause_new_run_rect    = { x = btn_x, y = panel_y + 126, w = btn_w, h = btn_h }
-        self._pause_save_quit_rect  = { x = btn_x, y = panel_y + 156, w = btn_w, h = btn_h }
+        self._pause_continue_rect   = { x = btn_x, y = panel_y + 34,  w = btn_w, h = btn_h }
+        self._pause_settings_rect   = { x = btn_x, y = panel_y + 59,  w = btn_w, h = btn_h }
+        self._pause_collection_rect = { x = btn_x, y = panel_y + 84,  w = btn_w, h = btn_h }
+        self._pause_slots_rect      = { x = btn_x, y = panel_y + 109, w = btn_w, h = btn_h }
+        self._pause_new_run_rect    = { x = btn_x, y = panel_y + 134, w = btn_w, h = btn_h }
+        self._pause_save_quit_rect  = { x = btn_x, y = panel_y + 159, w = btn_w, h = btn_h }
 
         local can_save = not self:is_hand_scoring_active()
         draw_btn(self._pause_continue_rect,   I18N.text("common.continue", nil, "Continue"),      self.C.GREEN, is_pause_focused("continue"))
         draw_btn(self._pause_settings_rect,   I18N.text("settings.title", nil, "Settings"),      self.C.BOOSTER, is_pause_focused("settings"))
         draw_btn(self._pause_collection_rect, I18N.text("collection.title", nil, "Collection"),    self.C.PURPLE, is_pause_focused("collection"))
+        draw_btn(self._pause_slots_rect,      I18N.text("pause.save_states", nil, "Save States"), self.C.BLUE, is_pause_focused("slots_open"))
         draw_btn(self._pause_new_run_rect,    I18N.text("menu.new_run", nil, "New Run"),        self.C.RED, is_pause_focused("new_run"))
         draw_btn(self._pause_save_quit_rect,  I18N.text("pause.save_quit", nil, "Save and Quit"),  can_save and self.C.BLUE or self.C.GREY, is_pause_focused("save_quit"))
 
         if not can_save then
             love.graphics.setColor(self.C.GREY)
             love.graphics.setFont(self.FONTS.PIXEL.SMALL)
-            love.graphics.printf(I18N.text("pause.finish_scoring", nil, "Finish scoring before saving."), panel_x, panel_y + 182, panel_w, "center")
+            love.graphics.printf(I18N.text("pause.finish_scoring", nil, "Finish scoring before saving."), panel_x, panel_y + 187, panel_w, "center")
         elseif self._pause_save_error then
             love.graphics.setColor(self.C.RED)
             love.graphics.setFont(self.FONTS.PIXEL.SMALL)
-            love.graphics.printf(tostring(self._pause_save_error), panel_x + 8, panel_y + 182, panel_w - 16, "center")
+            love.graphics.printf(tostring(self._pause_save_error), panel_x + 8, panel_y + 187, panel_w - 16, "center")
         end
     end
 end
@@ -9923,8 +10301,13 @@ function Game:update(dt, real_dt)
     if self.STATE == self.STATES.PAUSED then
         return
     end
-    TutorialUI.update(self)
-    Milestones.update(self, real_dt)
+    -- While a Preview dry run fast-forwards the sequencer through this same update,
+    -- the tutorial and the milestone toasts stand still: they are presentation, and
+    -- the sim's fixed steps would burn their lifetimes down in a burst.
+    if not self._simulating then
+        TutorialUI.update(self)
+        Milestones.update(self, real_dt)
+    end
     if self._voucher_callout then
         self._voucher_callout.t = self._voucher_callout.t - real_dt
         if self._voucher_callout.t <= 0 or self.STATE ~= self.STATES.SHOP then
@@ -9970,6 +10353,9 @@ function Game:update(dt, real_dt)
     end
     if self.update_dpad_horizontal_repeat then
         self:update_dpad_horizontal_repeat(real_dt)
+    end
+    if self.update_shop_reroll_hold then
+        self:update_shop_reroll_hold(real_dt)
     end
     if self.STATE == self.STATES.MENU and MainMenuUI.update then
         MainMenuUI.update(self, real_dt)
@@ -11954,7 +12340,7 @@ function Game:initialize_run_loop()
     self.consumables = {}
     self.tags = {}
     self.last_consumable_use_id = nil
-    G:apply_deck_config(G._pending_deck_id   or "b_red")
+    G:apply_deck_config(G._pending_deck_id or "b_red", G._pending_sleeve_id)
     G:apply_stake_config(G._pending_stake_id or "stake_white")
     G:apply_pending_challenge()
     if self.deck and self.deck.assign_reference_sort_ids then
@@ -13536,9 +13922,14 @@ function Game:roll_shop_offers()
     self:sync_shop_offer_nodes()
 end
 
-function Game:reroll_shop_offers()
+--- Reroll the shop shelf. `opts.fast` (Brainstorm hold-to-reroll) skips the pop-in
+--- animation and the coin sounds and tolerates the entry slide still running: the
+--- offers are rebuilt either way, and a held button should feel like a slot machine,
+--- not a slideshow. Money, the reroll counter and the Joker event are identical.
+function Game:reroll_shop_offers(opts)
+    local fast = opts == true or (type(opts) == "table" and opts.fast == true)
     if self.STATE ~= self.STATES.SHOP then return false end
-    if self._shop_slide then return false end
+    if self._shop_slide and not fast then return false end
     local cost = self:shop_current_reroll_cost()
     if not self:can_afford_price(cost) then
         return false
@@ -13550,7 +13941,7 @@ function Game:reroll_shop_offers()
         self.shop_free_rerolls_used = (tonumber(self.shop_free_rerolls_used) or 0) + 1
     end
     self:record_shop_reroll()
-    if Sfx and Sfx.play then
+    if not fast and Sfx and Sfx.play then
         -- Reference `functions/button_callbacks.lua:2880-2881`.
         Sfx.play("coin2")
         Sfx.play("other1")
@@ -13563,8 +13954,67 @@ function Game:reroll_shop_offers()
     self.active_tooltip_shop_voucher_slot = nil
     self:roll_shop_offers()
     self:clear_shop_selection()
-    self:begin_shop_pop_in(self.shop_offer_nodes)
+    if not fast then
+        self:begin_shop_pop_in(self.shop_offer_nodes)
+    end
     return true
+end
+
+--- Desktop keyboard aliases for the gamepad buttons, mirroring main.lua's table for
+--- the polled hold below (the pad path is the real one; this is testing convenience).
+local SHOP_REROLL_KEY_FOR_BUTTON = {
+    a = "z", b = "x", x = "c", y = "v",
+    leftshoulder = "q", rightshoulder = "e",
+}
+
+--- Is the reroll gesture (the discard role) physically held? Polled like the D-pad
+--- repeat: role holds only track confirm/cancel, so the pad is read directly.
+function Game:_shop_reroll_held()
+    local bindings = InputBindings.get_bindings(self)
+    local buttons = InputBindings.get_role_buttons("discard", bindings)
+    if love and love.joystick and love.joystick.getJoysticks then
+        local joysticks = love.joystick.getJoysticks()
+        local joy = joysticks and joysticks[1]
+        if joy then
+            for _, btn in ipairs(buttons) do
+                if InputBindings.safe_is_gamepad_down(joy, btn) then return true end
+            end
+        end
+    end
+    if love and love.keyboard and love.keyboard.isDown then
+        for _, btn in ipairs(buttons) do
+            local key = SHOP_REROLL_KEY_FOR_BUTTON[btn]
+            if key and love.keyboard.isDown(key) then return true end
+        end
+    end
+    return false
+end
+
+local SHOP_REROLL_HOLD_DELAY = 0.4
+local SHOP_REROLL_REPEAT_INTERVAL = 0.12
+
+--- Hold-to-reroll (Brainstorm): the press itself already rerolled once through the
+--- shop input handlers; while the button stays down past the delay, keep rerolling
+--- on the fast path until the money runs out, then stop until the next press.
+function Game:update_shop_reroll_hold(dt)
+    if self.STATE ~= self.STATES.SHOP or self:modal_overlay_open()
+        or not self:_shop_reroll_held() then
+        self._shop_reroll_hold_t = nil
+        self._shop_reroll_repeat_t = nil
+        self._shop_reroll_hold_blocked = nil
+        return
+    end
+    if self._shop_reroll_hold_blocked then return end
+    self._shop_reroll_hold_t = (self._shop_reroll_hold_t or 0) + dt
+    if self._shop_reroll_hold_t < SHOP_REROLL_HOLD_DELAY then return end
+    self._shop_reroll_repeat_t = (self._shop_reroll_repeat_t or 0) + dt
+    if self._shop_reroll_repeat_t < SHOP_REROLL_REPEAT_INTERVAL then return end
+    self._shop_reroll_repeat_t = 0
+    if not self:reroll_shop_offers({ fast = true }) then
+        self._shop_reroll_hold_blocked = true
+    elseif self.sync_shop_gamepad_focus then
+        self:sync_shop_gamepad_focus()
+    end
 end
 
 function Game:roll_skips()
@@ -15017,8 +15467,8 @@ function Game:_finish_round_win_eval(ctx, hands_left)
         end
         if SMODS and SMODS.tag_moment then SMODS.tag_moment(self, "eval", ctx) end
 
-        -- If Anaglyph Deck - Add Double Tag
-        if (G._deck_special or nil) == "anaglyph" then
+        -- If Anaglyph Deck (or an Anaglyph sleeve) - Add Double Tag
+        if G:deck_special_active("anaglyph") then
             self:addTag("double")
         end
     end
@@ -15587,6 +16037,189 @@ function Game:readout_hand_level()
     if not self.selectedHand or self.selectedHand == -1 then return nil end
     if self.selectedHandHidden == true then return "?" end
     return self.selectedHandLevel or 1
+end
+
+--------------------------------------------------------------------------------
+-- Balatro Preview: the exact score of the current selection, before it is played.
+--
+-- There is no pure evaluate function in this engine -- scoring is the animation
+-- sequencer -- so the preview plays the hand for real inside the snapshot sandbox:
+-- snapshot, fast-forward the sequencer, read `last_hand_score`, restore. The
+-- snapshot carries both RNG states, so the restore rewinds every roll the sim
+-- consumed and the real play afterwards reproduces the previewed score bit-for-bit,
+-- Lucky and Glass rolls included. That makes this preview exact where the PC mod
+-- can only show a range for random effects.
+--
+-- The snapshot does NOT carry profile-level state, so everything a simulated hand
+-- could leak into the profile is suppressed behind `_simulating` at its choke
+-- point: career stats and bests, unlock evaluation, item discovery, the autosave,
+-- SFX, popups, and the milestone/tutorial tickers in `Game:update`. A handful of
+-- presentation fields the finalize phase writes are not snapshot fields either
+-- (the chip-total readout pair, the staggered emit queue, two overlay timers);
+-- those are saved and restored by hand below.
+--------------------------------------------------------------------------------
+
+local SIM_STEP_CAP = 20000 -- the sequencer bound the equivalence battery uses
+
+--- Key-sorted serialization for the preview signature: `serialize_lua_value`
+--- walks `pairs` in hash order, so the same state can spell two different
+--- strings; a cache key cannot. Ability tables are plain data, so a plain
+--- recursive walk suffices.
+local function stable_serialize(v, out)
+    local t = type(v)
+    if t == "table" then
+        local keys = {}
+        for k in pairs(v) do keys[#keys + 1] = k end
+        table.sort(keys, function(a, b) return tostring(a) < tostring(b) end)
+        out[#out + 1] = "{"
+        for _, k in ipairs(keys) do
+            out[#out + 1] = "["
+            stable_serialize(k, out)
+            out[#out + 1] = "]="
+            stable_serialize(v[k], out)
+            out[#out + 1] = ","
+        end
+        out[#out + 1] = "}"
+    elseif t == "string" then
+        out[#out + 1] = string.format("%q", v)
+    else
+        out[#out + 1] = tostring(v)
+    end
+end
+
+--- Everything the score of the current selection can depend on, serialized: a
+--- change anywhere in it means the cached preview is stale. False positives (a
+--- needless re-simulation) are harmless; the fields are chosen so the inputs to
+--- scoring are all here -- played AND held cards, the Joker row with its live
+--- ability tables, hand type/level and play counts, money, boss, deck special.
+---@return string
+function Game:_score_preview_signature()
+    -- Empty tables normalize to absent: a snapshot restore materializes fields
+    -- like `challenge_modifiers` from nil to {}, which changes nothing the score
+    -- can see but would defeat the cache.
+    local challenge = self.challenge_modifiers
+    if challenge and not next(challenge) then challenge = nil end
+    local play_counts = self.hand_play_counts
+    if play_counts and not next(play_counts) then play_counts = nil end
+    local sig = {
+        hand_index = self.selectedHand,
+        hand_level = self.selectedHandLevel,
+        money = self.money,
+        hands = self.hands,
+        discards = self.discards,
+        boss = self.current_boss_blind_id,
+        special = self._deck_special,
+        special_sleeve = self._deck_special_sleeve,
+        play_counts = play_counts,
+        round_hands_played = self.round_hands_played,
+        challenge = challenge,
+        cards = {},
+        jokers = {},
+        consumables = {},
+    }
+    local hand = self.hand
+    if hand and hand.card_nodes then
+        for i, node in ipairs(hand.card_nodes) do
+            local d = node.card_data or {}
+            sig.cards[i] = {
+                uid = node.uid, rank = d.rank, suit = d.suit,
+                enhancement = d.enhancement, seal = d.seal, edition = d.edition,
+                debuff = node.debuffed or d.debuffed,
+                selected = node.selected == true or nil,
+            }
+        end
+    end
+    for i, j in ipairs(self.jokers or {}) do
+        local ability = j.ability
+        if ability and not next(ability) then ability = nil end
+        sig.jokers[i] = {
+            id = j.def and j.def.id, edition = j.edition,
+            ability = ability, debuff = j.debuffed,
+        }
+    end
+    for i, c in ipairs(self.consumables or {}) do
+        sig.consumables[i] = c.def and c.def.id
+    end
+    local out = {}
+    stable_serialize(sig, out)
+    return table.concat(out)
+end
+
+--- Play the current selection inside the snapshot sandbox and return its exact
+--- score (a Totals value), or nil when there is nothing scoreable to preview.
+--- The run is restored before this returns, whatever the sim did; a sim error is
+--- recorded in `_preview_error` and also yields nil rather than crashing the frame
+--- that asked for a preview.
+---@return number|table|nil
+function Game:simulate_selected_play()
+    if self._simulating then return nil end
+    if self:is_hand_scoring_active() then return nil end
+    local hand = self.hand
+    if not hand or not hand.play_selected then return nil end
+    if #(hand.selected or {}) == 0 then return nil end
+
+    local snapshot = self:build_run_snapshot()
+    -- Presentation fields the finalize phase writes that the snapshot does not carry.
+    local saved_chip_total_display = self.chip_total_display
+    local saved_chip_total_drain = self.chip_total_drain
+    local saved_emit_queue = self._joker_emit_queue
+    local saved_emit_next = self._joker_emit_next
+    local saved_emit_timer = self._joker_emit_timer
+    local saved_tag_activation = self._tag_activation
+    local saved_voucher_callout = self._voucher_callout
+
+    self._simulating = true
+    local started = false
+    local ok, err = pcall(function()
+        hand:play_selected()
+        if not hand._play_sequence then return end -- refused (no hands left, boss lock)
+        started = true
+        local steps = 0
+        while hand._play_sequence and steps < SIM_STEP_CAP do
+            hand:update(1 / 60)
+            self:update(1 / 60)
+            steps = steps + 1
+        end
+    end)
+    local value = nil
+    if ok and started and not hand._play_sequence then
+        -- A completed sequence always lands its final score here (a voided hand
+        -- lands zero), so this read is this play's score, never a stale one.
+        value = Totals.read(self.last_hand_score, 0)
+    end
+    self._simulating = false
+    if not ok then
+        self._preview_error = tostring(err)
+    end
+    self:load_run_snapshot(snapshot)
+    self.chip_total_display = saved_chip_total_display
+    self.chip_total_drain = saved_chip_total_drain
+    self._joker_emit_queue = saved_emit_queue
+    self._joker_emit_next = saved_emit_next
+    self._joker_emit_timer = saved_emit_timer
+    self._tag_activation = saved_tag_activation
+    self._voucher_callout = saved_voucher_callout
+    return value
+end
+
+--- The exact score the current selection will produce, cached by signature so a
+--- selection costs one simulation no matter how many frames draw it. Nil when the
+--- preview is off, nothing is selected, a hand is already scoring, or the hand's
+--- contents are hidden (the base readout hides its numbers too).
+---@return number|table|nil
+function Game:score_preview()
+    if not self:preview_score_enabled() then return nil end
+    if self.STATE ~= self.STATES.SELECTING_HAND then return nil end
+    if self._simulating or self:is_hand_scoring_active() then return nil end
+    if self.selectedHandHidden == true then return nil end
+    local hand = self.hand
+    if not hand or #(hand.selected or {}) == 0 then return nil end
+    local sig = self:_score_preview_signature()
+    local cache = self._preview_cache
+    if cache and cache.sig == sig then return cache.value end
+    local value = self:simulate_selected_play()
+    self._preview_cache = { sig = sig, value = value }
+    return value
 end
 
 --- Beat between cards in a conversion ripple. The reference queues one `after` event per card
@@ -16989,6 +17622,45 @@ end
 ---@param x number
 ---@param y number
 function Game:handle_pause_settings_touch(x, y)
+        if self._pause_settings_tab == "slots" then
+            for i, r in ipairs(self._pause_slot_save_rects or {}) do
+                if self:_point_in_rect_simple(x, y, r) then
+                    local ok, err = self:save_run_slot(i)
+                    if ok then
+                        self:refresh_pause_slot_infos()
+                        if Sfx and Sfx.play then Sfx.play("button", 1, 0.3) end
+                    elseif err == "scoring" then
+                        self._pause_save_error = I18N.text("save.scoring_blocked", nil, "Cannot save while scoring.")
+                    else
+                        self._pause_save_error = I18N.text("save.failed_prefix", nil, "Save failed: ") .. tostring(err)
+                    end
+                    return
+                end
+            end
+            for i, r in ipairs(self._pause_slot_load_rects or {}) do
+                if self:_point_in_rect_simple(x, y, r) then
+                    if (self._pause_slot_infos or {})[i] then
+                        local ok, err = self:load_run_slot(i)
+                        if not ok then
+                            self._pause_save_error = err == "scoring"
+                                and I18N.text("save.scoring_blocked", nil, "Cannot save while scoring.")
+                                or (I18N.text("save.failed_prefix", nil, "Save failed: ") .. tostring(err))
+                        end
+                    end
+                    return
+                end
+            end
+            if self._pause_restart_seed_rect and self:_point_in_rect_simple(x, y, self._pause_restart_seed_rect) then
+                self:restart_run_with_same_seed()
+                return
+            end
+            if self._pause_back_rect and self:_point_in_rect_simple(x, y, self._pause_back_rect) then
+                self._pause_save_error = nil
+                self:leave_settings_panel()
+                return
+            end
+            return
+        end
         if self._pause_settings_tab == "performance" then
             for _, r in ipairs(self._perf_toggle_rects or {}) do
                 if self:_point_in_rect_simple(x, y, r) then
@@ -17105,6 +17777,12 @@ function Game:handle_pause_settings_touch(x, y)
             self:set_joker_display_enabled(not self:joker_display_enabled())
             return
         end
+        if self._pause_preview_score_rect
+            and self:_point_in_rect_simple(x, y, self._pause_preview_score_rect) then
+            self:end_pause_slider_drag()
+            self:set_preview_score_enabled(not self:preview_score_enabled())
+            return
+        end
         if self._pause_art_open_rect and self:_point_in_rect_simple(x, y, self._pause_art_open_rect) then
             self:open_card_art_panel()
             return
@@ -17196,6 +17874,13 @@ function Game:touchpressed(id, x, y)
         end
         if self._pause_collection_rect and self:_point_in_rect_simple(x, y, self._pause_collection_rect) then
             self:open_collection_over_run()
+            return
+        end
+        if self._pause_slots_rect and self:_point_in_rect_simple(x, y, self._pause_slots_rect) then
+            self._pause_show_settings = true
+            self._pause_settings_tab = "slots"
+            self._pause_save_error = nil
+            self:refresh_pause_slot_infos()
             return
         end
         if self._pause_new_run_rect and self:_point_in_rect_simple(x, y, self._pause_new_run_rect) then

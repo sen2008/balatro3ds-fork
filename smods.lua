@@ -1250,6 +1250,31 @@ function SMODS.Joker(t)
         check(fn == nil or type(fn) == "function", "Joker '" .. t.key .. "': " .. name .. " must be a function")
     end
 
+    -- The JokerDisplay readout spec: declarative, because the native readout port
+    -- never dry-runs `calculate`. `field` names a live instance field (a stored
+    -- counter), `config` a config key (the config table, then its `extra`), `kind`
+    -- one of the readout's formatters, `note` a static reminder line. Validated
+    -- here so a typo fails the load instead of silently showing nothing.
+    local display = nil
+    if t.display ~= nil then
+        check(type(t.display) == "table", "Joker '" .. t.key .. "': display must be a table")
+        check(t.display.field == nil or type(t.display.field) == "string",
+            "Joker '" .. t.key .. "': display.field must be a string")
+        check(t.display.config == nil or type(t.display.config) == "string",
+            "Joker '" .. t.key .. "': display.config must be a string")
+        check(t.display.value == nil or type(t.display.value) == "number",
+            "Joker '" .. t.key .. "': display.value must be a number")
+        local kinds = { mult = true, chips = true, xmult = true, money = true, count = true, plain = true }
+        check(t.display.kind == nil or kinds[t.display.kind] == true,
+            "Joker '" .. t.key .. "': display.kind must be mult, chips, xmult, money, count or plain")
+        check(t.display.note == nil or type(t.display.note) == "string",
+            "Joker '" .. t.key .. "': display.note must be a string")
+        display = {
+            field = t.display.field, config = t.display.config, value = t.display.value,
+            kind = t.display.kind, note = t.display.note,
+        }
+    end
+
     -- The art: the card, the floating layer Legendaries have, and the Negative version. The PC
     -- game recolours a Negative card in a shader; the PICA200 cannot, so vanilla ships a separate
     -- negative image per Joker and a mod does the same. Without one, the plain art is used.
@@ -1274,6 +1299,7 @@ function SMODS.Joker(t)
         cost = cost,
         sell_cost = math.max(1, math.floor(cost / 2)),
         config = deep_copy(type(t.config) == "table" and t.config or {}),
+        display = display,
         pos = { atlas = SMODS.MOD_ATLAS, index = sprite },
         sub_pos = soul and { atlas = SMODS.MOD_ATLAS, index = soul } or nil,
         negative_pos = negative and { atlas = SMODS.MOD_ATLAS, index = negative } or nil,

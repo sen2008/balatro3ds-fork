@@ -172,6 +172,27 @@ The extended total fields Steamodded added are here too, applied to the running 
 
 A return may also ask for retriggers, as in Steamodded: `repetitions = n` runs this Joker's effect `n` more times, and `retrigger_joker = <a held Joker>` (or `true`, for this Joker) runs that Joker's effect again -- once, or `repetitions` times when both are given. The extra passes see `context.retrigger_joker`, are announced with "Again!", and run on the spot inside this Joker's own beat rather than being queued for a beat of their own. A pass that is itself a retrigger never retriggers, and one return buys at most 100 extra passes, so a Joker that always asks cannot loop forever.
 
+### Live readouts (`display`)
+
+With **Settings → Joker Info** on, every Joker shows its current value under the row. Vanilla Jokers have hand-written readouts; a mod Joker gets one declaratively — the readout never calls your `calculate` (it runs while the player is still deciding, and must not be able to change anything). Declare where the number lives:
+
+```lua
+SMODS.Joker {
+    key = "charged",
+    config = { extra = { mult = 0 } },
+    display = { field = "my_counter", kind = "mult", note = "Charged" },
+    -- ...
+}
+```
+
+- `field = "name"` reads that field off the live Joker instance — the stored-counter shape, for Jokers whose value accumulates on the card itself.
+- `config = "key"` reads a config key instead (the config table first, then its `extra` table).
+- `value = n` shows a constant, when neither applies.
+- `kind` is how the number is written: `mult` and `chips` as `+N`, `xmult` as `XN`, `money` as `$N`, `count` as a bare number, `plain` as-is. It defaults to `mult`.
+- `note = "text"` adds a short reminder line under the value.
+
+With no `display` at all, a Joker whose config carries a standard key still gets a readout: `x_mult`/`Xmult`, `mult`, `chips` or `dollars`, in that order, from the config or its `extra`. A Joker with neither shows nothing — the panel stays blank rather than guessing at what your `calculate` would do.
+
 ### Big numbers
 
 Scores are plain Lua numbers until an effect would push one past the double range (about 1.8e308) -- the point where the PC game needs Talisman. At that moment the total *promotes* to a big number: a value that keeps an exact exponent of any size, so `e_mult` chains, `x_mult = 1e100` configs and Cryptid-scale Jokers score finite values instead of overflowing to infinity. Below that range nothing changes: every total is the plain double it always was.
@@ -761,6 +782,12 @@ Deck skins are cosmetic. If the mod is removed, a suit that used one goes back t
 A run remembers exactly which mods, and which versions, it was played with. It can only be continued with that same set installed and turned on. If a mod is missing, turned off, at a different version, or newly added, **Continue** opens the Mods screen and lists what to install, turn on, or turn off. The save is kept, not deleted, and works again once the mods match. Switching mods on that screen updates the list as you go.
 
 This is why `version` matters: bump it when a change would break a run in progress (adding or removing a card, changing what `config` holds), and keep it when it wouldn't.
+
+## Score preview dry runs
+
+The **Preview** setting (pause menu → Settings → General, off by default) shows the exact score of the current selection before it is played. There is no pure evaluate function in this engine, so the preview plays the hand inside a snapshot and restores the run afterwards — RNG streams included, so random effects (Lucky, Glass) preview to the exact number the real play then produces.
+
+For mod authors this means `calculate` runs during a dry run too. Run state is restored bit-for-bit afterwards, and profile-level effects (career stats, unlocks, discovery) are suppressed while it runs — but treat `calculate` as a pure query, the way the contexts section above already asks: anything your code changes **outside** the run (files, globals your mod keeps between calls) is not rewound.
 
 ## What doesn't work (yet)
 

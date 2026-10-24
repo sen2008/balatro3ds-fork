@@ -2042,7 +2042,7 @@ function Hand:_update_play_sequence(dt)
                 chips = Totals.min_plain(chips, math.max(0, tonumber(G.money) or 0))
             end
 
-            if (G._deck_special or nil) == "plasma" and not seq.voided then
+            if G:deck_special_active("plasma") and not seq.voided then
                 local avg = Totals.floor(Big.half_sum(chips, mult))
                 chips = avg
                 mult = avg

@@ -206,6 +206,7 @@ end
 ---@param vol number|nil cue volume 0-1, before the master/sfx settings scale
 ---@return boolean played True if a voice was found and :play() was called
 function M.play(code, pitch, vol)
+    if G and G._simulating then return false end -- a Preview dry run is silent
     if G and G.F_MUTE then return false end
     if type(code) ~= "string" then return false end
     if STREAMED[code] then

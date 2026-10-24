@@ -724,6 +724,17 @@ function DeckViewUI.draw_top(screen, game)
     love.graphics.setColor(game.C.JOKER_GREY)
     TextCache.printf(stake_rule, 224, 40, 168, "left")
 
+    -- The sleeve (CardSleeves), when the run has one: named under the stake chip,
+    -- clear of both rule blocks and the matrix below.
+    local sleeve_id = game.selected_sleeve_id
+    if sleeve_id then
+        local sleeve_def = DECK_DEFS_BY_ID and DECK_DEFS_BY_ID[sleeve_id]
+        love.graphics.setFont(game.FONTS.PIXEL.SMALL)
+        love.graphics.setColor(game.C.JOKER_GREY)
+        TextCache.print(I18N.text("deck_view.sleeve", nil, "Sleeve") .. ": "
+            .. (sleeve_def and I18N.content_name("deck", sleeve_def.id, sleeve_def.name) or sleeve_id), 190, 66)
+    end
+
     DeckViewUI.draw_matrix(game, 0, 86, TOP_W, { label_w = 44, cell_h = 26, head_h = 30 })
 
     local readout = DeckViewUI.readout(game)

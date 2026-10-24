@@ -372,4 +372,112 @@ suite.test("the settings toggle round-trips through the save", function()
     T.assert_true(g:normalize_settings(snapshot).JOKER_DISPLAY, "and read back")
 end)
 
+--------------------------------------------------------------------------------
+-- Mod Jokers (Wave 2): the declarative spec and the config fallback.
+--------------------------------------------------------------------------------
+
+local ModLoader = require("mod_loader")
+
+local function install_display_fixture()
+    local fs = love.filesystem
+    local function rm(path)
+        for _, item in ipairs(fs.getDirectoryItems(path)) do
+            local child = path .. "/" .. item
+            if fs.getInfo(child, "file") then fs.remove(child) else rm(child); fs.remove(child) end
+        end
+    end
+    if fs.getInfo(ModLoader.DIR) then rm(ModLoader.DIR) end
+    ModLoader.reset()
+    local base = ModLoader.DIR .. "/DispFix"
+    fs.createDirectory(base)
+    fs.write(base .. "/DispFix.json",
+        '{"id": "DispFix", "name": "Display Fixture", "prefix": "dispfix", "main_file": "main.lua", "version": "1"}')
+    fs.write(base .. "/main.lua", [[
+SMODS.Joker {
+    key = "counter", loc_txt = { name = "Counter", text = { "+#1# Mult" } },
+    config = { extra = { mult = 0 } }, rarity = 1, cost = 2, sprite = "counter.png",
+    display = { field = "my_counter", kind = "mult", note = "Charged" },
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = card.my_counter or 0 } end
+    end,
+}
+SMODS.Joker {
+    key = "flat", loc_txt = { name = "Flat", text = { "+#1# Mult" } },
+    config = { mult = 6 }, rarity = 1, cost = 2, sprite = "flat.png",
+    display = { config = "mult" },
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = 6 } end
+    end,
+}
+SMODS.Joker {
+    key = "fallback_x", loc_txt = { name = "Fallback X", text = { "X#1# Mult" } },
+    config = { extra = { x_mult = 2.5 } }, rarity = 1, cost = 2, sprite = "fallback_x.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { x_mult = 2.5 } end
+    end,
+}
+SMODS.Joker {
+    key = "fallback_cash", loc_txt = { name = "Fallback Cash", text = { "+$#1#" } },
+    config = { extra = { dollars = 3 } }, rarity = 1, cost = 2, sprite = "fallback_cash.png",
+    calculate = function(self, card, context) end,
+}
+SMODS.Joker {
+    key = "opaque", loc_txt = { name = "Opaque", text = { "?" } },
+    config = { extra = { mystery = 9 } }, rarity = 1, cost = 2, sprite = "opaque.png",
+    calculate = function(self, card, context) end,
+}
+]])
+    for _, file in ipairs({ "counter.png", "flat.png", "fallback_x.png", "fallback_cash.png", "opaque.png" }) do
+        fs.write(base .. "/assets/1x/" .. file, "png")
+    end
+    ModLoader.load_all()
+end
+
+local fixture_ready = false
+local function game_with_fixture(seed)
+    if not fixture_ready then
+        install_display_fixture()
+        fixture_ready = true
+    end
+    local g = game_with_display(seed)
+    G = g
+    return g
+end
+
+suite.test("a mod Joker's declared field spec reads the live counter", function()
+    local g = game_with_fixture(5150)
+    T.assert_true(g:add_joker_by_def("j_dispfix_counter") and true or false, "fixture Joker added")
+    local j = g.jokers[1]
+    j.my_counter = 7
+    local main, note = readout(g)
+    T.assert_eq(main, "+7")
+    T.assert_eq(note, "Charged")
+    -- The signature folds the counter in: an unforced refresh sees the change.
+    j.my_counter = 12
+    JokerDisplay.refresh(g)
+    T.assert_eq(j._jd_main, "+12", "the readout tracks the counter without a forced rebuild")
+end)
+
+suite.test("a mod Joker's declared config spec reads its config", function()
+    local g = game_with_fixture(5151)
+    T.assert_true(g:add_joker_by_def("j_dispfix_flat") and true or false)
+    T.assert_eq(readout(g), "+6")
+end)
+
+suite.test("spec-less mod Jokers fall back to their standard config keys", function()
+    local g = game_with_fixture(5152)
+    T.assert_true(g:add_joker_by_def("j_dispfix_fallback_x") and true or false)
+    T.assert_eq(readout(g), "X2.5", "extra.x_mult reads as an X-mult")
+    for i = #g.jokers, 1, -1 do g:remove_owned_joker_at(i, true, true) end
+    T.assert_true(g:add_joker_by_def("j_dispfix_fallback_cash") and true or false)
+    T.assert_eq(readout(g), "$3", "extra.dollars reads as money")
+end)
+
+suite.test("a mod Joker with no spec and no standard keys stays blank", function()
+    local g = game_with_fixture(5153)
+    T.assert_true(g:add_joker_by_def("j_dispfix_opaque") and true or false)
+    local main = readout(g)
+    T.assert_nil(main, "nothing declarative to show, so nothing is shown")
+end)
+
 return suite

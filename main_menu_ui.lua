@@ -337,6 +337,7 @@ end
 function MainMenuUI.open_deck_select(game)
     game._deck_select_idx = game._deck_select_idx or 1
     game._stake_select_idx = game._stake_select_idx or 1
+    game._sleeve_select_idx = game._sleeve_select_idx or 1
     game._menu_sub_state = "deck_select"
     Sfx.play("paper1")
 end
@@ -1184,6 +1185,33 @@ function MainMenuUI.draw_stake_carousel_sprite(game, def, x, y, w, h, p, unlocke
     return false
 end
 
+--- The sleeve choices on the deck-select screen (CardSleeves): index 1 is always
+--- "No sleeve"; the rest are the player's unlocked decks, in catalog order. A sleeve
+--- equal to the primary deck is allowed here and collapses at run start — the pair
+--- is just the deck — so the list never has to change as the deck carousel moves.
+---@return table array of deck ids with a leading nil
+function MainMenuUI.sleeve_options(game)
+    local options = { false }
+    local deck_list = DECK_SELECT_DEFS or DECK_DEFS or {}
+    for _, def in ipairs(deck_list) do
+        if def and def.id and game:is_deck_unlocked(def.id) then
+            options[#options + 1] = def.id
+        end
+    end
+    return options
+end
+
+--- The sleeve deck id the current selection names, or nil for "No sleeve". The
+--- stored index is clamped against the live options, as the deck/stake indices are.
+---@return string|nil
+function MainMenuUI.selected_sleeve_id(game)
+    local options = MainMenuUI.sleeve_options(game)
+    local idx = math.max(1, math.min(#options, tonumber(game._sleeve_select_idx) or 1))
+    game._sleeve_select_idx = idx
+    local id = options[idx]
+    return id or nil
+end
+
 function MainMenuUI._start_run(game)
     local deck_list = DECK_SELECT_DEFS or DECK_DEFS or {}
     local stake_list = STAKE_DEFS or {}
@@ -1197,6 +1225,7 @@ function MainMenuUI._start_run(game)
     Sfx.play_button()
     game._pending_deck_id = deck_def.id
     game._pending_stake_id = stake_def.id
+    game._pending_sleeve_id = MainMenuUI.selected_sleeve_id(game)
     -- The sub-state is retired by the first run-start step instead, under the cover: this
     -- screen keeps drawing through the wipe's fade-in (`Game:_run_start_leave_menu`).
     if game.start_new_run_from_main_menu then
@@ -1236,7 +1265,9 @@ function MainMenuUI.draw_deck_select(game)
     local deck_unlocked = game:is_deck_unlocked(def.id)
 
     local startX, startY = 24, 4
-    local endX, endY = W - 24, H - 128
+    -- The frame ends 24 px higher than it used to: the sleeve row (CardSleeves) sits
+    -- between the stake block and the PLAY row, and the stake card keeps its height.
+    local endX, endY = W - 24, H - 152
     local padding = 4
     local buttonW = 24
 
@@ -1418,6 +1449,33 @@ function MainMenuUI.draw_deck_select(game)
         end
         love.graphics.circle("fill", x, stake_dot_y, 2)
     end
+
+    -- Sleeve Select (CardSleeves): a compact third carousel under the stake block.
+    -- One row only — the sleeve's effects are listed in the deck view once the run
+    -- starts; here the name is the decision.
+    local sleeve_id = MainMenuUI.selected_sleeve_id(game)
+    local sleeve_y = prev_y + stakeH + 2
+    local sleeve_h = 20
+    game._sleeve_select_rects = {
+        prev = { x = prev_x, y = sleeve_y, w = buttonW, h = sleeve_h, action = "prev" },
+        next = { x = next_x, y = sleeve_y, w = buttonW, h = sleeve_h, action = "next" },
+    }
+    draw_button_with_shadow(prev_x, sleeve_y, buttonW, sleeve_h, 4, 4, G.C.MULT, G.C.BLOCK.SHADOW, 2)
+    draw_button_with_shadow(next_x, sleeve_y, buttonW, sleeve_h, 4, 4, G.C.MULT, G.C.BLOCK.SHADOW, 2)
+    love.graphics.setColor(C.WHITE)
+    love.graphics.setFont(font_s)
+    love.graphics.printf("<", prev_x, sleeve_y + 5, buttonW, "center")
+    love.graphics.printf(">", next_x, sleeve_y + 5, buttonW, "center")
+    love.graphics.setColor(C.BLOCK.BACK)
+    love.graphics.rectangle("fill", card_x, sleeve_y, card_w, sleeve_h, 8, 8)
+    local sleeve_def = sleeve_id and DECK_DEFS_BY_ID and DECK_DEFS_BY_ID[sleeve_id] or nil
+    local sleeve_name = sleeve_def
+        and I18N.content_name("deck", sleeve_def.id, sleeve_def.name)
+        or I18N.text("menu.no_sleeve", nil, "No sleeve")
+    love.graphics.setColor(C.WHITE)
+    love.graphics.printf(
+        I18N.text("menu.sleeve", nil, "Sleeve") .. ": " .. sleeve_name,
+        card_x, sleeve_y + 5, card_w, "center")
 
     love.graphics.setFont(font_s)
     love.graphics.setColor(C.WHITE)
@@ -1668,9 +1726,11 @@ end
 function MainMenuUI._touch_deck_select(game, x, y)
     local deck_rects = game._deck_select_rects or {}
     local stake_rects = game._stake_select_rects or {}
+    local sleeve_rects = game._sleeve_select_rects or {}
     local stake_list = STAKE_DEFS or {}
     local deck_idx = tonumber(game._deck_select_idx) or 1
     local stake_idx = tonumber(game._stake_select_idx) or 1
+    local sleeve_idx = tonumber(game._sleeve_select_idx) or 1
 
     if deck_rects.prev and game:_point_in_rect_simple(x, y, deck_rects.prev) then
         MainMenuUI.set_deck_index(game, deck_idx - 1)
@@ -1691,6 +1751,21 @@ function MainMenuUI._touch_deck_select(game, x, y)
     if stake_rects.next and game:_point_in_rect_simple(x, y, stake_rects.next) then
         game._stake_select_idx = math.min(#stake_list, stake_idx + 1)
         click_focus_move(stake_idx, game._stake_select_idx)
+        return true
+    end
+
+    -- The sleeve carousel clamps at both ends like the other two; its list is the
+    -- live options (No sleeve + unlocked decks), so the count is recomputed here.
+    local sleeve_count = #MainMenuUI.sleeve_options(game)
+    if sleeve_rects.prev and game:_point_in_rect_simple(x, y, sleeve_rects.prev) then
+        game._sleeve_select_idx = math.max(1, sleeve_idx - 1)
+        click_focus_move(sleeve_idx, game._sleeve_select_idx)
+        return true
+    end
+
+    if sleeve_rects.next and game:_point_in_rect_simple(x, y, sleeve_rects.next) then
+        game._sleeve_select_idx = math.min(sleeve_count, sleeve_idx + 1)
+        click_focus_move(sleeve_idx, game._sleeve_select_idx)
         return true
     end
 
@@ -1903,6 +1978,12 @@ function MainMenuUI._button_deck_select(game, btn)
         game._stake_select_idx = math.min(#stake_list, stake_idx + 1)
     elseif btn == "dpdown" or btn == "down" then
         game._stake_select_idx = math.max(1, stake_idx - 1)
+    elseif btn == "leftshoulder" then
+        local sleeve_idx = tonumber(game._sleeve_select_idx) or 1
+        game._sleeve_select_idx = math.max(1, sleeve_idx - 1)
+    elseif btn == "rightshoulder" then
+        local sleeve_idx = tonumber(game._sleeve_select_idx) or 1
+        game._sleeve_select_idx = math.min(#MainMenuUI.sleeve_options(game), sleeve_idx + 1)
     elseif game.is_menu_activate and game:is_menu_activate(btn) then
         MainMenuUI._start_run(game)
         return

@@ -378,6 +378,11 @@ end
 
 local DEFS = {}
 
+--- Resolved below, after the mod-Joker routes: the readout definition for any Joker
+--- instance (vanilla table, declared spec, or config fallback). Forward-declared because
+--- the Blueprint copy path, defined with the table, resolves through it too.
+local def_for
+
 --- Reminder helpers. The strings are the mod's, via the base game's localisation keys:
 --- `suits_plural`, `poker_hands`, `k_face_cards`, `k_aces`, `k_round`, `k_gold`, `k_uncommon`.
 local function note_text(s, kind)
@@ -1203,7 +1208,7 @@ end
 local function copy_readout(joker, ctx)
     local target = copy_target(joker, ctx)
     if not target then return "N/A", "plain" end
-    local def = DEFS[(target.def or {}).id]
+    local def = def_for(target)
     if not def then return "copy", "plain" end
     return def.main(target, ctx)
 end
@@ -1213,12 +1218,93 @@ DEFS.j_blueprint = {
     note = function(joker, ctx)
         local target = copy_target(joker, ctx)
         if not target then return nil end
-        local def = DEFS[(target.def or {}).id]
+        local def = def_for(target)
         if def and def.note then return def.note(target, ctx) end
         return tostring(target.name or (target.def or {}).name or "?"), "plain"
     end,
 }
 DEFS.j_brainstorm = DEFS.j_blueprint
+
+-- ---------------------------------------------------------------------------------------------
+-- Mod Jokers
+--
+-- A mod Joker's values live in its `calculate`, which this port never dry-runs — the analytic
+-- table above is the whole design. Two declarative routes give mod Jokers readouts instead,
+-- both resolved by `def_for` below so the vanilla table stays the only hand-written one:
+--
+--  * An explicit spec on the registration — `display = { field = "my_counter", kind = "mult" }`
+--    or `display = { config = "mult" }` — validated by `SMODS.Joker` and carried onto the
+--    stored def. `field` reads a live instance field (a stored counter), `config` reads a
+--    config key (the config table, then its `extra`), and `value` is a constant last resort.
+--  * A config fallback for spec-less mod Jokers: the standard scoring keys a PC-style config
+--    carries, read live off the instance's effective config. No calculate call either way.
+--
+-- Vanilla ids never reach either route: the DEFS lookup runs first.
+-- ---------------------------------------------------------------------------------------------
+
+local function spec_raw_value(joker, spec)
+    if spec.field then return joker[spec.field] end
+    if spec.config then
+        local v = config_of(joker)[spec.config]
+        if v == nil then v = extra_of(joker)[spec.config] end
+        return v
+    end
+    return spec.value
+end
+
+local FALLBACK_KEYS = {
+    { key = "x_mult", kind = "xmult" }, { key = "Xmult", kind = "xmult" },
+    { key = "mult", kind = "mult" },
+    { key = "chips", kind = "chips" },
+    { key = "dollars", kind = "money" },
+}
+
+local function fallback_raw(joker)
+    local cfg = config_of(joker)
+    local extra = extra_of(joker)
+    for _, f in ipairs(FALLBACK_KEYS) do
+        local v = cfg[f.key]
+        if v == nil then v = extra[f.key] end
+        if tonumber(v) ~= nil then return v, f.kind end
+    end
+    return nil, nil
+end
+
+--- Spec-built readouts, one per spec table (specs are static per stored def).
+local spec_def_cache = setmetatable({}, { __mode = "k" })
+
+--- The readout definition for any Joker instance: the vanilla table first, then a mod's
+--- declared spec, then the config fallback. Nil means no readout, as before.
+def_for = function(joker)
+    local id = (joker.def or {}).id
+    local def = type(id) == "string" and DEFS[id] or nil
+    if def then return def end
+    local spec = (joker.def or {}).display
+    if type(spec) == "table" then
+        local built = spec_def_cache[spec]
+        if not built then
+            built = {
+                main = function(j) return spec_raw_value(j, spec), spec.kind or "mult" end,
+                note = spec.note and note_text(spec.note) or nil,
+            }
+            spec_def_cache[spec] = built
+        end
+        return built
+    end
+    if fallback_raw(joker) ~= nil then
+        return { main = function(j) return fallback_raw(j) end }
+    end
+    return nil
+end
+
+--- The raw number a mod readout would show right now. The refresh signature folds this in
+--- for Jokers the vanilla table does not cover: a stored counter or config value a mod
+--- mutates has to move the signature or the readout under it goes stale.
+local function mod_raw_value(joker)
+    local spec = (joker.def or {}).display
+    if type(spec) == "table" then return tonumber(spec_raw_value(joker, spec)) end
+    return tonumber((fallback_raw(joker)))
+end
 
 -- ---------------------------------------------------------------------------------------------
 -- Refresh
@@ -1246,6 +1332,12 @@ local function signature(g)
                 + (tonumber(j.runtime_counter) or 0) * 29
                 + (tonumber(j.sell_cost) or 0) * 5
             )
+            -- Mod Jokers keep their live values in their own fields and configs; fold
+            -- the number their readout would show so a change re-reads the row.
+            local jid = (j.def or {}).id
+            if not (type(jid) == "string" and DEFS[jid]) then
+                s = s + (mod_raw_value(j) or 0) * 37
+            end
         end
     end
     return s
@@ -1281,7 +1373,7 @@ function JokerDisplay.refresh(game, force)
         joker._jd_note, joker._jd_note_kind, joker._jd_note_dim = nil, nil, nil
         joker._jd_fit_w = nil
         local id = (joker.def or {}).id
-        local def = type(id) == "string" and DEFS[id] or nil
+        local def = def_for(joker)
         -- A Joker the Blind has switched off contributes nothing, so a number under it would be
         -- a lie; `Joker:is_sticker_debuffed` covers a spent Perishable the same way.
         local disabled = (joker.is_sticker_debuffed and joker:is_sticker_debuffed())

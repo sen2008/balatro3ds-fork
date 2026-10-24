@@ -563,7 +563,14 @@ function TopUI:draw(screen)
     -- operands carry nothing: collapse the pair into one panel and give the number the full width,
     -- which is also what the arithmetic means. `fit` is the backstop for a run with a huge product.
     local total_value = self.chip_total_value
-    local showing_total = total_value and Totals.cmp(total_value, 0) > 0
+    -- Balatro Preview: with no landed total and a selection on the table, the same
+    -- collapsed panel carries the exact score the selection will produce, in money
+    -- gold rather than white so it never reads as a score already banked.
+    local preview_value = nil
+    if not total_value and G.STATE == G.STATES.SELECTING_HAND and G.score_preview then
+        preview_value = G:score_preview()
+    end
+    local showing_total = (total_value and Totals.cmp(total_value, 0) > 0) or preview_value ~= nil
 
     if not showing_total then
         love.graphics.setFont(G.FONTS.PIXEL.MEDIUM)
@@ -584,11 +591,11 @@ function TopUI:draw(screen)
         -- a coloured panel spanning the row reads as one of them having grown.
         draw_rect_with_shadow(ChipX, ChipY, totalW, ChipHeight, 4, 2,
             G.C.BLOCK.BACK, G.C.BLOCK.SHADOW, 2, depthOffset)
-        local total_text = NumberFormat.format(Totals.floor(total_value))
+        local total_text = NumberFormat.format(Totals.floor(total_value or preview_value))
         love.graphics.setFont(Fonts.fit(G, G.FONTS.PIXEL.MEDIUM, total_text, totalW - 8))
-        love.graphics.setColor(G.C.WHITE)
+        love.graphics.setColor(total_value and G.C.WHITE or G.C.MONEY)
         TopUI.center_text_juiced(total_text, ChipX - sysDepth * textHeight, ChipY - 1,
-            totalW, ChipHeight, self.total_juice)
+            totalW, ChipHeight, total_value and self.total_juice or nil)
     else
         -- While a level-up is pushing a value in, the reference covers that readout with a
         -- mostly-green plate carrying the delta rather than letting the number silently change
@@ -790,6 +797,18 @@ function TopUI:draw(screen)
                 popup:draw(popupDepthOffset)
             end
         end
+    end
+
+    -- Game-speed hotkey confirmation: a transient label under the panel, stamped by
+    -- `Game:cycle_game_speed` with a real-time expiry so game speed never stretches it.
+    local flash = G and G._game_speed_flash
+    if flash and ((G.TIMERS and G.TIMERS.REAL) or 0) < (flash.until_real or 0) then
+        love.graphics.setFont(G.FONTS.PIXEL.MEDIUM)
+        local label = I18N.text("hud.game_speed", nil, "Speed ") .. tostring(flash.label)
+        love.graphics.setColor(G.C.BLOCK.SHADOW)
+        love.graphics.printf(label, 1 - sysDepth * textHeight, panelY + panelHeight + 5, 400, "center")
+        love.graphics.setColor(G.C.WHITE)
+        love.graphics.printf(label, 0 - sysDepth * textHeight, panelY + panelHeight + 4, 400, "center")
     end
 
 end
@@ -1260,6 +1279,7 @@ function TopUI:mult_readout(v)
 end
 
 function TopUI:addPopup(node)
+    if G and G._simulating then return end -- dry-run scoring shows no popups
     if Popup and node and node.is and node:is(Popup) then
         table.insert(self.popups, node)
     end
