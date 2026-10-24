@@ -1383,6 +1383,30 @@ function Card:trigger_sources(held, seq, out, held_first_pass_effect_applied)
     return G:collect_retrigger_sources(held, ctx, out)
 end
 
+--- The effective config of a vanilla enhancement center (`SMODS.center_config`):
+--- the base numbers, folded with any held Joker's `center_overrides` (Wave 5).
+--- Nil when the SMODS layer is absent, in which case every reader below uses
+--- the same hardcoded vanilla number it always used.
+local function center_config(enh)
+    if SMODS and SMODS.center_config then return SMODS.center_config("m_" .. enh) end
+    return nil
+end
+
+local function center_h_dollars(enh)
+    local cfg = center_config(enh)
+    return cfg and tonumber(cfg.h_dollars) or 0
+end
+
+--- Whether an override has given this center any held-in-hand scoring numbers
+--- (Stone / Gold have none in vanilla, so this is false in a vanilla run and
+--- the held route below stays shut).
+local function center_has_held_effects(enh)
+    local cfg = center_config(enh)
+    if not cfg then return false end
+    return (tonumber(cfg.h_chips) or 0) ~= 0 or (tonumber(cfg.h_mult) or 0) ~= 0
+        or (tonumber(cfg.h_x_mult) or 1) ~= 1
+end
+
 --- Dispatch a hand/scoring event to this card (e.g. `"card_played"` → `do_enhancement` / `do_seal` when it matches).
 --- Known events: `"card_played"`, `"held_in_hand"`, `"on_round_end"` (e.g. Gold card, Blue seal — see `do_enhancement` / `do_seal`).
 --- Juices the card when an enhancement or seal actually triggers (same animation as a scored card).
@@ -1410,6 +1434,20 @@ function Card:emit_hand_event(event_name, ctx)
             trigger = true
 
         elseif (self.enhancement == "bonus" or self.enhancement == "mult" or  self.enhancement == "glass" or self.enhancement == "lucky" or self.enhancement == "stone") and ev == "card_played" then
+            self:do_enhancement(ctx)
+            trigger = true
+
+        elseif self.enhancement == "stone" and ev == "on_round_end" and center_h_dollars("stone") > 0 then
+            -- An override lent Stone a held dollars value (Bunco's Dwarven):
+            -- it pays at round end like Gold's, through the same branch.
+            self:do_enhancement(ctx)
+            trigger = true
+
+        elseif (self.enhancement == "stone" or self.enhancement == "gold") and ev == "held_in_hand"
+            and center_has_held_effects(self.enhancement) then
+            -- An override lent Stone / Gold held scoring numbers (Dwarven /
+            -- Metallurgist); vanilla configs carry none, so this route only
+            -- opens while such an override is held.
             self:do_enhancement(ctx)
             trigger = true
 
@@ -1466,45 +1504,102 @@ function Card:do_enhancement(ctx)
     local card_center_x = self.VT.x + self.collision_offset.x + (self.VT.w / 2) * self.VT.scale
     local card_center_y = self.VT.y + self.collision_offset.y + (self.VT.h / 2) * self.VT.scale
     
+    -- The center's effective config (Wave 5): with no override held these are
+    -- the vanilla numbers each branch below has always used.
+    local cfg = center_config(self.enhancement) or {}
+    local ev = ctx.event_name
+    -- Held-in-hand scoring numbers an override lent this center (Steel's own
+    -- route is its branch below; this serves Stone and Gold). One popup per
+    -- field, as the reference announces them.
+    local function apply_held_fields()
+        local h_chips = tonumber(cfg.h_chips) or 0
+        local h_mult = tonumber(cfg.h_mult) or 0
+        local h_x_mult = tonumber(cfg.h_x_mult) or 1
+        if h_chips ~= 0 then
+            ctx.chips = Big.add_values(Totals.read(ctx.chips, 0), h_chips)
+            local hp = Popup()
+            hp:spawn(h_chips, "chips", card_center_x, card_center_y)
+            G:addPopup(hp)
+            Sfx.play_chips(scoring_pitch())
+        end
+        if h_mult ~= 0 then
+            ctx.mult = Big.add_values(Totals.read(ctx.mult, 1), h_mult)
+            local hp = Popup()
+            hp:spawn(h_mult, "mult", card_center_x, card_center_y)
+            G:addPopup(hp)
+            Sfx.play_mult(scoring_pitch())
+        end
+        if h_x_mult ~= 1 then
+            ctx.mult = Big.mul_values(Totals.read(ctx.mult, 1), h_x_mult)
+            local hp = Popup()
+            hp:spawn(h_x_mult, "xmult", card_center_x, card_center_y)
+            G:addPopup(hp)
+            Sfx.play_mult2(scoring_pitch(), 0.7)
+        end
+    end
+    -- Round-end dollars while held, Gold's own shape: the amount is the
+    -- config's `h_dollars` (an override may lend it to Stone, or raise Gold's).
+    local function pay_held_dollars()
+        local dollars = tonumber(cfg.h_dollars) or (self.enhancement == "gold" and 3 or 0)
+        if dollars == 0 then return end
+        G.money = G.money + dollars
+        if G._emit_money_altered then G:_emit_money_altered(dollars) end
+        p:spawn(dollars, "money", card_center_x, card_center_y)
+        G:addPopup(p)
+        Sfx.play_money(scoring_pitch())
+    end
+
     if self.enhancement == "bonus" then
         --+30 chips
-        ctx.chips = Big.add_values(chips, 30)
-        p:spawn(30, "chips", card_center_x, card_center_y)
+        local n = tonumber(cfg.bonus) or 30
+        ctx.chips = Big.add_values(chips, n)
+        p:spawn(n, "chips", card_center_x, card_center_y)
         G:addPopup(p)
         Sfx.play_chips(scoring_pitch())
     elseif self.enhancement == "mult" then
         --+4 mult
-        p:spawn(4, "mult", card_center_x, card_center_y)
+        local n = tonumber(cfg.mult) or 4
+        p:spawn(n, "mult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = Big.add_values(mult, 4)
+        ctx.mult = Big.add_values(mult, n)
         -- reference/Balatro/functions/common_events.lua:821 — flat mult plays multhit1.
         Sfx.play_mult(scoring_pitch())
     elseif self.enhancement == "glass" then
-        -- x2 mult, 1 in 4 chance to break
-        p:spawn(2, "xmult", card_center_x, card_center_y)
+        -- x2 mult, 1 in 4 chance to break (the odds live in the config's
+        -- `extra`, read by the break roll in `hand.lua`)
+        local x = tonumber(cfg.Xmult) or 2
+        p:spawn(x, "xmult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = Big.mul_values(mult, 2)
+        ctx.mult = Big.mul_values(mult, x)
         -- reference/Balatro/functions/common_events.lua:828 — x_mult plays multhit2 at 0.7.
         Sfx.play_mult2(scoring_pitch(), 0.7)
     elseif self.enhancement == "steel" then
-        p:spawn(1.5, "xmult", card_center_x, card_center_y)
+        local x = tonumber(cfg.h_x_mult) or 1.5
+        p:spawn(x, "xmult", card_center_x, card_center_y)
         G:addPopup(p)
-        ctx.mult = Big.mul_values(mult, 1.5)
+        ctx.mult = Big.mul_values(mult, x)
         -- reference/Balatro/functions/common_events.lua:828 — x_mult plays multhit2 at 0.7.
         Sfx.play_mult2(scoring_pitch(), 0.7)
     elseif self.enhancement == "stone" then
-        -- +50 chip
-        ctx.chips = Big.add_values(chips, 50)
-        p:spawn(50, "chips", card_center_x, card_center_y)
-        G:addPopup(p)
-        Sfx.play_chips(scoring_pitch())
+        if ev == "held_in_hand" then
+            apply_held_fields()
+        elseif ev == "on_round_end" then
+            pay_held_dollars()
+        else
+            -- +50 chip
+            local n = tonumber(cfg.chips) or 50
+            ctx.chips = Big.add_values(chips, n)
+            p:spawn(n, "chips", card_center_x, card_center_y)
+            G:addPopup(p)
+            Sfx.play_chips(scoring_pitch())
+        end
     elseif self.enhancement == "gold" then
-        -- +$3 when held in hand
-        G.money = G.money + 3
-        if G._emit_money_altered then G:_emit_money_altered(3) end
-        p:spawn(3, "money", card_center_x, card_center_y)
-        G:addPopup(p)
-        Sfx.play_money(scoring_pitch())
+        if ev == "held_in_hand" then
+            apply_held_fields()
+        else
+            -- +$3 when held in hand (paid on the round-end pass)
+            pay_held_dollars()
+        end
     elseif self.enhancement == "lucky" then
         -- Each roll can fire more than once (`Game:chance_triggers`); repeats fold into one
         -- popup so the card still takes a single beat of the scoring sequence.

@@ -845,8 +845,17 @@ function Hand:_discard_selected_impl(reason, opts)
                 to_try[#to_try + 1] = node
             end
         end
+        -- The break odds are the Glass center config's `extra` (1 in 4); a
+        -- held Joker's override may rewrite them (Bunco's Sledgehammer
+        -- divides them by 4, so its stronger Glass always breaks). With no
+        -- override the roll is the vanilla one, on the same stream.
+        local glass_odds = 4
+        if SMODS and SMODS._any_center_overrides and SMODS.center_config then
+            local cfg = SMODS.center_config("m_glass")
+            if cfg then glass_odds = math.max(1, tonumber(cfg.extra) or 4) end
+        end
         for _, node in ipairs(to_try) do
-            if node and node.enhancement == "glass" and self.game.do_random and self.game:do_random(1, 4, 1, "glass") then
+            if node and node.enhancement == "glass" and self.game.do_random and self.game:do_random(1, glass_odds, 1, "glass") then
                 -- The shatter is two layers: the pane and a body hit under it
                 -- (`reference/Balatro/card.lua:2104`).
                 Sfx.play_glass_break(0.9 + sfx_jitter() * 0.2, 0.5)

@@ -253,6 +253,7 @@ local EVENT_CONTEXT = {
     on_hand_level_up = "level_up_hand",
     on_game_over = "game_over",
     on_money_gain = "money_transform",
+    on_joker_debuffed = "joker_debuffed",
 }
 SMODS.EVENT_CONTEXT = EVENT_CONTEXT
 
@@ -311,6 +312,12 @@ function SMODS.build_context(event_name, ctx, joker)
     if kind == "debuff_card" then
         c.card = refresh_card_view(ctx.card_node)
         c.permanent = ctx.permanent == true
+    end
+    -- A Joker's mod debuff changed (Wave 5): `context.card` is the Joker whose
+    -- state changed and `context.debuffed` the state it changed TO.
+    if kind == "joker_debuffed" then
+        c.card = ctx.joker
+        c.debuffed = ctx.debuffed == true
     end
     if kind == "blind_disabled" then c.blind = ctx.blind end
     if kind == "setting_ability" then
@@ -532,6 +539,7 @@ local function build_effect(center, def)
                 SMODS.build_context(event_name, ctx, joker))
             SMODS.apply_return(joker, ctx, ret, kind)
             retrigger_return_passes(joker, ctx, ret)
+            SMODS.apply_debuff_return(joker, ret)
         end
         -- Steamodded pays this at cash-out; the port's cash-out is the round-end payout table.
         if kind == "end_of_round" and not ctx.blueprint and type(center.calc_dollar_bonus) == "function" then
@@ -631,6 +639,10 @@ function SMODS.ask_jokers(make, each)
         local id = j.def and j.def.id
         local source = j
         if id == "j_blueprint" or id == "j_brainstorm" then source = JokerEffects.resolve_copy_target(j) end
+        -- A debuffed Joker does not calculate, and neither does a copy of one:
+        -- these seats ask `calculate` directly, so the gate that
+        -- `Joker:matches_trigger` applies to the event dispatch is repeated here.
+        if SMODS.joker_debuffed(j) or SMODS.joker_debuffed(source) then source = nil end
         local center = type(source) == "table" and source.def and source.def.smods
         if center and type(center.calculate) == "function" then
             local c = make()
@@ -1283,6 +1295,64 @@ function SMODS.Joker(t)
     local negative = t.negative_sprite ~= nil
         and register_sprite(mod, t.negative_sprite, "Joker", t.key, "negative_sprite") or nil
 
+    -- Suit aliasing (Wave 5): while this Joker is held and not debuffed, a card
+    -- whose printed suit is a key of `suit_aliases` also counts as the named
+    -- suit at the `JokerEffects.is_suit` choke (Bunco's Myopia / Astigmatism).
+    local suit_aliases = nil
+    if t.suit_aliases ~= nil then
+        check(type(t.suit_aliases) == "table", "Joker '" .. t.key .. "': suit_aliases must be a table")
+        suit_aliases = {}
+        for from, to in pairs(t.suit_aliases) do
+            check(type(from) == "string" and type(to) == "string",
+                "Joker '" .. t.key .. "': suit_aliases maps suit names to suit names")
+            suit_aliases[from] = to
+        end
+        if next(suit_aliases) == nil then suit_aliases = nil end
+    end
+    if suit_aliases then SMODS._any_suit_aliases = true end
+
+    -- Vanilla center-config overrides (Wave 5): declarative rewrites of named
+    -- numeric fields of a center's config, applied while this Joker is held
+    -- (see `SMODS.center_config`). Validated here so a typo fails the load.
+    local center_overrides = nil
+    if t.center_overrides ~= nil then
+        check(type(t.center_overrides) == "table",
+            "Joker '" .. t.key .. "': center_overrides must be a list of tables")
+        center_overrides = {}
+        for i, entry in ipairs(t.center_overrides) do
+            check(type(entry) == "table" and type(entry.center) == "string"
+                and type(entry.field) == "string",
+                "Joker '" .. t.key .. "': center_overrides[" .. i .. "] needs center and field strings")
+            local ops = 0
+            for _, op in ipairs({ "add", "set", "multiply", "divide" }) do
+                if entry[op] ~= nil then
+                    ops = ops + 1
+                    check(type(entry[op]) == "number",
+                        "Joker '" .. t.key .. "': center_overrides[" .. i .. "]." .. op .. " must be a number")
+                end
+            end
+            if entry.add_from ~= nil then
+                ops = ops + 1
+                check(type(entry.add_from) == "table" and type(entry.add_from.center) == "string"
+                    and type(entry.add_from.field) == "string",
+                    "Joker '" .. t.key .. "': center_overrides[" .. i
+                        .. "].add_from needs center and field strings")
+            end
+            check(ops == 1, "Joker '" .. t.key .. "': center_overrides[" .. i
+                .. "] needs exactly one of add / set / multiply / divide / add_from")
+            center_overrides[#center_overrides + 1] = {
+                center = entry.center, field = entry.field,
+                add = entry.add, set = entry.set, multiply = entry.multiply,
+                divide = entry.divide,
+                add_from = entry.add_from and { center = entry.add_from.center,
+                    field = entry.add_from.field } or nil,
+                once = entry.once == true or nil,
+            }
+        end
+        if #center_overrides == 0 then center_overrides = nil end
+    end
+    if center_overrides then SMODS._any_center_overrides = true end
+
     local loc = loc_for(t.loc_txt, "en") or {}
     next_order = next_order + 1
     local def = {
@@ -1300,6 +1370,8 @@ function SMODS.Joker(t)
         sell_cost = math.max(1, math.floor(cost / 2)),
         config = deep_copy(type(t.config) == "table" and t.config or {}),
         display = display,
+        suit_aliases = suit_aliases,
+        center_overrides = center_overrides,
         pos = { atlas = SMODS.MOD_ATLAS, index = sprite },
         sub_pos = soul and { atlas = SMODS.MOD_ATLAS, index = soul } or nil,
         negative_pos = negative and { atlas = SMODS.MOD_ATLAS, index = negative } or nil,
@@ -1777,7 +1849,9 @@ function SMODS.card_center_event(node, event_name, ctx)
     local enh = node.enhancement or data.enhancement
     local eentry = enh and SMODS.EnhancementByValue[enh]
     if eentry then
-        local cfg = eentry.config
+        -- A held Joker's `center_overrides` may rewrite this center's fields;
+        -- with none registered this is the entry's own config, untouched.
+        local cfg = SMODS.center_config("m_" .. eentry.id) or eentry.config
         if event_name == "card_played" then
             local chips = tonumber(cfg.chips) or tonumber(cfg.bonus) or 0
             local mult = tonumber(cfg.mult) or 0
@@ -2740,6 +2814,263 @@ function SMODS.set_debuff(card, debuffed)
 end
 
 --------------------------------------------------------------------------------
+-- Joker debuff (Wave 5): a mod-settable debuff on a Joker, beside the two
+-- channels the base game already has (Crimson Heart's disable, the Perishable
+-- sticker). A debuffed Joker does not calculate -- the gate sits in
+-- `Joker:matches_trigger` / `Joker:apply_effect`, in the retrigger queries,
+-- and in every mod seat below that asks Jokers questions directly
+-- (`ask_jokers`, the money-transform and game-over passes, `blueprint_effect`).
+-- It renders debuffed through the same display predicate as the boss channel
+-- (`joker_is_debuffed_for_display`). Passive `config` modifiers and edition
+-- steps are NOT gated, matching PC, where debuff gates `calculate_joker` only.
+--------------------------------------------------------------------------------
+
+--- Whether a Joker is debuffed through ANY channel: the boss predicate
+--- (Crimson Heart), the Perishable sticker, or a mod debuff set through
+--- `SMODS.set_joker_debuff`. Safe to call on any value.
+function SMODS.joker_debuffed(joker)
+    if type(joker) ~= "table" then return false end
+    if joker.mod_debuffed == true then return true end
+    if joker.is_sticker_debuffed and joker:is_sticker_debuffed() then return true end
+    if G and G.boss_is_joker_debuffed and G:boss_is_joker_debuffed(joker) then return true end
+    return false
+end
+
+--- Debuff or un-debuff a Joker (Bunco's Gameplan / Conquest seat). The state
+--- lives on the Joker itself (`mod_debuffed`), so it saves with the run and
+--- ends when the Joker leaves play -- there is no global patch to leak. A
+--- change fires `context.joker_debuffed` to every held Joker, with
+--- `context.card` the Joker and `context.debuffed` the new state; setting the
+--- state the Joker already has fires nothing. Returns true when the Joker's
+--- state is now the requested one.
+function SMODS.set_joker_debuff(joker, debuffed)
+    if type(joker) ~= "table" then return false end
+    debuffed = debuffed == true
+    if G and G.set_joker_debuff then return G:set_joker_debuff(joker, debuffed, "smods") end
+    if (joker.mod_debuffed == true) == debuffed then return true end
+    joker.mod_debuffed = debuffed or nil
+    return true
+end
+
+--- The debuff fields of a `calculate` return, applied by the mod dispatch
+--- after the score fields: `debuff_joker = <a Joker>` (or `true`, for the
+--- Joker itself) debuffs it, `undebuff_joker` clears it. This is the honest
+--- seat for effects that debuff in reaction to an event (Conquest picks its
+--- victim at `setting_blind`); a Joker that debuffs on a schedule of its own
+--- calls `SMODS.set_joker_debuff` from `add_to_deck` / contexts instead.
+function SMODS.apply_debuff_return(joker, ret)
+    if type(ret) ~= "table" then return end
+    for _, spec in ipairs({ { "debuff_joker", true }, { "undebuff_joker", false } }) do
+        local target = ret[spec[1]]
+        if target == true then target = joker end
+        if type(target) == "table" then SMODS.set_joker_debuff(target, spec[2]) end
+    end
+end
+
+--------------------------------------------------------------------------------
+-- Copying Jokers (Wave 5): `SMODS.blueprint_effect` dispatch and the exact
+-- clone `SMODS.copy_joker`. Read from the PC sources of the six Jokers that
+-- were waiting on this seat: Cryptid's ERROR and Nostalgic Googol Play Card
+-- clone Jokers outright (`copy_card` on sell), Old Blueprint and Paperback's
+-- Forgery / Master Plan / Photocopy only ever dispatch through
+-- `SMODS.blueprint_effect`. So both halves exist, and neither is wider than
+-- the targets need.
+--------------------------------------------------------------------------------
+
+--- Run `other`'s calculate as if `caller` were doing it, Steamodded's
+--- `SMODS.blueprint_effect(caller, other, context)`:
+---   * The copied Joker must be held, must not be the caller, and its def must
+---     be `blueprint_compat` -- the same gate the vanilla Blueprint applies.
+---   * A debuffed target (any channel) does not fire; the call returns nil.
+---   * The copied calculate sees a copy of `context` with `blueprint = true`,
+---     `blueprint_card = caller` and `no_blueprint = true`. That last flag is
+---     the one-level rule: a copier copied by a copier still runs its own
+---     logic, but its own `blueprint_effect` calls return nil, exactly as on
+---     PC, so copy chains can never recurse. A call made with a context that
+---     already has `no_blueprint` set returns nil at once.
+---   * A MOD target's calculate return is returned untouched -- the caller's
+---     own calculate returns it (possibly rewritten, as Forgery does) and the
+---     dispatch applies it once, at the caller's slot.
+---   * A VANILLA target has no calculate table in this engine: its effect
+---     fires in place through the same delegate path the vanilla Blueprint
+---     uses (into `context.port`, the raw event), and the call returns nil.
+---     Return-rewriting copiers therefore only rewrite mod targets' returns.
+function SMODS.blueprint_effect(caller, other, context)
+    if type(caller) ~= "table" or type(other) ~= "table" or caller == other then return nil end
+    if type(context) ~= "table" then context = {} end
+    if context.no_blueprint then return nil end
+    local held = false
+    for _, j in ipairs(G and type(G.jokers) == "table" and G.jokers or EMPTY) do
+        if j == other then held = true break end
+    end
+    if not held then return nil end
+    if SMODS.joker_debuffed(other) then return nil end
+    local def = other.def
+    if type(def) ~= "table" or def.blueprint_compat ~= true then return nil end
+
+    local derived = {}
+    for k, v in pairs(context) do derived[k] = v end
+    derived.blueprint = true
+    derived.blueprint_card = caller
+    derived.no_blueprint = true
+
+    local center = def.smods
+    if center and type(center.calculate) == "function" then
+        return SMODS.call(center.mod, center.calculate, center, other, derived)
+    end
+    -- Vanilla target: fire in place through the engine's own copy delegate.
+    local port = derived.port
+    if type(port) == "table" and JokerEffects and JokerEffects.delegate_joker_effect then
+        JokerEffects.delegate_joker_effect(caller, other, port)
+    end
+    return nil
+end
+
+--- An exact copy of a held Joker: same def, same edition and stickers, and a
+--- deep copy of its live state -- a mod Joker's `ability`, a vanilla Joker's
+--- runtime counters -- the way PC's `copy_card` clones the card it is handed
+--- (Cryptid's ERROR sells into a row of duplicates; Nostalgic Googol Play Card
+--- sells into two copies of the leftmost Joker). The copy joins the END of
+--- the Joker row and hears its `add_to_deck` / `card_added` AFTER its state
+--- is in place, as PC's explicit `card:add_to_deck()` does.
+--- Slot rules, as PC: `copy_card` + `CardArea:emplace` never check the Joker
+--- limit (the limit gates purchases and `SMODS.add_card`, not clones), so a
+--- copy is created even when the row is full. Limits of this port's clone:
+--- it does not copy a mod debuff (a fresh copy's debuff is re-derived from
+--- the boss / sticker channels, as PC re-derives `card.debuff`), and a copy
+--- of a Negative Joker keeps the edition -- and so grants its slot -- exactly
+--- as the source does. Returns the new Joker, or nil when `view` is not a
+--- held Joker.
+function SMODS.copy_joker(view)
+    if type(view) ~= "table" or not (G and G.copy_joker_node) then return nil end
+    local held = false
+    for _, j in ipairs(type(G.jokers) == "table" and G.jokers or EMPTY) do
+        if j == view then held = true break end
+    end
+    if not held then return nil end
+    return G:copy_joker_node(view)
+end
+
+--------------------------------------------------------------------------------
+-- Vanilla center-config overrides (Wave 5). PC mods like Bunco's trio rewrite
+-- a center's config in `add_to_deck` / `remove_from_deck` (Sledgehammer makes
+-- Glass X3 and always-break, Dwarven lends Stone Steel's held XMult and
+-- Gold's held dollars, Metallurgist gives Gold +10 held Mult) and mutate
+-- every live card's ability to match. This engine never materialised a
+-- per-card copy of an enhancement's config -- the numbers are read at the
+-- card's scoring step -- so the honest seat is the read: a Joker declares
+-- `center_overrides` on its def and `SMODS.center_config` folds the held
+-- Jokers' entries over the base config at every read. Nothing is written
+-- anywhere, so the override is per-run and reversible by construction: sell
+-- the Joker and the next read is vanilla again. With no override registered
+-- the base table itself is returned and every reader sees vanilla numbers.
+--------------------------------------------------------------------------------
+
+--- The vanilla enhancement configs, in PC's field names (`G.P_CENTERS`):
+--- these are the numbers `Card:do_enhancement` and the Glass break roll have
+--- always used, named so an override rewrites the field a PC mod rewrites.
+local VANILLA_CENTER_CONFIG = {
+    m_bonus = { bonus = 30 },
+    m_mult = { mult = 4 },
+    m_glass = { Xmult = 2, extra = 4 },
+    m_steel = { h_x_mult = 1.5 },
+    m_stone = { chips = 50 },
+    m_gold = { h_dollars = 3 },
+}
+SMODS.VANILLA_CENTER_CONFIG = VANILLA_CENTER_CONFIG
+
+--- The canonical key a center is addressed by in overrides: its PC key
+--- (`"m_glass"`, `"m_<prefix>_<key>"` for a registered enhancement), or a
+--- registered enhancement's bare value (`"copper"`). Nil when nothing by
+--- that name exists.
+local function center_config_key(id)
+    if type(id) ~= "string" then return nil end
+    if VANILLA_CENTER_CONFIG[id] then return id end
+    local bare = id:gsub("^m_", "")
+    if VANILLA_CENTER_CONFIG["m_" .. bare] then return "m_" .. bare end
+    local entry = SMODS.EnhancementByValue[id] or SMODS.EnhancementByValue[bare]
+        or SMODS.Enhancements[bare] or SMODS.Enhancements[id]
+    if entry then return "m_" .. entry.id end
+    return nil
+end
+SMODS.center_config_key = center_config_key
+
+--- The base (unmodified) config behind a canonical key: the vanilla table,
+--- or a registered enhancement's own `config`.
+local function center_base_config(key)
+    if VANILLA_CENTER_CONFIG[key] then return VANILLA_CENTER_CONFIG[key] end
+    for _, entry in pairs(SMODS.EnhancementByValue) do
+        if "m_" .. entry.id == key then return entry.config end
+    end
+    return nil
+end
+
+--- The config a center's numbers should be read from right now: its base
+--- config with every held Joker's matching `center_overrides` folded over it
+--- in slot order. An entry applies once per held copy of its Joker, unless it
+--- declares `once = true` (Sledgehammer's break-odds division is the PC
+--- behaviour: the first copy divides, later copies only add their XMult).
+--- `add_from = { center, field }` adds the BASE value of another center's
+--- field (Dwarven reads Steel's and Gold's own configs). A field a config
+--- does not carry counts as 0 for `add` / `add_from`. Returns nil for an
+--- unknown center.
+function SMODS.center_config(id)
+    local key = center_config_key(id)
+    if not key then return nil end
+    local base = center_base_config(key)
+    if not base then return nil end
+    if not SMODS._any_center_overrides then return base end
+    -- Only a HELD Joker's override folds in; with none matching this center
+    -- the base table itself is returned, so an unheld registration is
+    -- indistinguishable from vanilla at every read.
+    local matching = false
+    for _, j in ipairs(G and type(G.jokers) == "table" and G.jokers or EMPTY) do
+        local overrides = j and j.def and j.def.center_overrides
+        if type(overrides) == "table" then
+            for _, entry in ipairs(overrides) do
+                if center_config_key(entry.center) == key then matching = true break end
+            end
+        end
+        if matching then break end
+    end
+    if not matching then return base end
+    local out = {}
+    for k, v in pairs(base) do out[k] = v end
+    local applied_once = {}
+    for _, j in ipairs(G and type(G.jokers) == "table" and G.jokers or EMPTY) do
+        local overrides = j and j.def and j.def.center_overrides
+        if type(overrides) == "table" then
+            for idx, entry in ipairs(overrides) do
+                if center_config_key(entry.center) == key then
+                    local skip = false
+                    if entry.once then
+                        local mark = tostring(j.def.id) .. ":" .. idx
+                        if applied_once[mark] then skip = true else applied_once[mark] = true end
+                    end
+                    if not skip then
+                        local current = tonumber(out[entry.field]) or 0
+                        if entry.add ~= nil then
+                            out[entry.field] = current + entry.add
+                        elseif entry.set ~= nil then
+                            out[entry.field] = entry.set
+                        elseif entry.multiply ~= nil then
+                            out[entry.field] = current * entry.multiply
+                        elseif entry.divide ~= nil and entry.divide ~= 0 then
+                            out[entry.field] = current / entry.divide
+                        elseif entry.add_from ~= nil then
+                            local src_key = center_config_key(entry.add_from.center)
+                            local src = src_key and center_base_config(src_key) or nil
+                            out[entry.field] = current + (src and tonumber(src[entry.add_from.field]) or 0)
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+--------------------------------------------------------------------------------
 -- Randomness and text helpers mods expect
 --------------------------------------------------------------------------------
 
@@ -2819,7 +3150,7 @@ function SMODS.transform_money_gain(game, amount, opts)
         for _, j in ipairs(game.jokers) do
             local impl = j and j.effect_impl
             if impl and type(impl.transform_money) == "function"
-                and not (game.boss_is_joker_debuffed and game:boss_is_joker_debuffed(j)) then
+                and not SMODS.joker_debuffed(j) then
                 local new = impl.transform_money(j, amount,
                     { from_shop = opts and opts.from_shop or nil })
                 if tonumber(new) then amount = math.floor(tonumber(new)) end
@@ -2855,7 +3186,7 @@ function SMODS.game_over_saved(game)
         end
         local impl = eff and eff.effect_impl
         if impl and type(impl.game_over_save) == "function"
-            and not (game.boss_is_joker_debuffed and game:boss_is_joker_debuffed(eff)) then
+            and not SMODS.joker_debuffed(eff) then
             raw.blueprint = is_copy or nil
             raw.blueprint_card = is_copy and j or nil
             if impl.game_over_save(eff, raw) then return i end

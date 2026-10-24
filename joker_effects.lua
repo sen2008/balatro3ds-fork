@@ -259,6 +259,35 @@ local function rank_is_odd(rank)
     return rank and (rank == 14 or rank % 2 == 1) 
 end
 
+--- Whether a Joker is debuffed through any channel the game has: the boss
+--- predicate (Crimson Heart), the Perishable sticker, or a mod debuff
+--- (`SMODS.set_joker_debuff`). The one predicate the copy / alias seats share.
+local function joker_is_debuffed(j)
+    if type(j) ~= "table" then return false end
+    if j.mod_debuffed == true then return true end
+    if j.is_sticker_debuffed and j:is_sticker_debuffed() then return true end
+    if G and G.boss_is_joker_debuffed and G:boss_is_joker_debuffed(j) then return true end
+    return false
+end
+
+--- Suit aliasing (Wave 5): a held, non-debuffed Joker whose def declares
+--- `suit_aliases = { Spades = "Halberds", ... }` makes a card printed `suit`
+--- also count as `check` (Bunco's Myopia / Astigmatism, which on PC patch
+--- `Card:is_suit` with exactly this per-held-Joker scan). The alias set is
+--- derived from the held row on every call, so a Joker leaving play -- or
+--- being debuffed -- ends its alias with no cleanup and no global patch.
+local function suit_alias_match(suit, check)
+    if suit == nil or check == nil or suit == check then return false end
+    if not (SMODS and SMODS._any_suit_aliases) then return false end
+    for _, j in ipairs(G and type(G.jokers) == "table" and G.jokers or {}) do
+        local aliases = j and j.def and j.def.suit_aliases
+        if type(aliases) == "table" and aliases[suit] == check and not joker_is_debuffed(j) then
+            return true
+        end
+    end
+    return false
+end
+
 --- Suit match; with Smeared Joker, Hearts↔Diamonds and Spades↔Clubs count as the same.
 --- Does a card count as `check`? `card` is a card node, its card data, or a bare suit string.
 --- Given the card, a Wild Card is every suit and a Stone Card none, as `Card:is_suit` has it
@@ -273,6 +302,9 @@ local function is_suit(card, check)
         suit = data.suit
         if suit == nil then return false end
     end
+    -- Mod suit aliases sit where Bunco's PC patch sits: ahead of Smeared, and
+    -- only ever adding a match, never removing one.
+    if suit_alias_match(suit, check) then return true end
     local smeared = G and G.hasJoker and G:hasJoker("j_smeared")
     if smeared then
         if check == "Hearts" or check == "Diamonds" then
@@ -2209,6 +2241,11 @@ JokerEffects.has_hand_type = has_hand_type
 --- The Joker a Blueprint or Brainstorm is copying right now (through chains), or `src` itself
 --- for any other Joker; nil when there is nothing copyable.
 JokerEffects.resolve_copy_target = resolve_copy_target
+--- The copy delegate the vanilla Blueprint / Brainstorm effects run through,
+--- exported for `SMODS.blueprint_effect`'s vanilla targets (Wave 5).
+JokerEffects.delegate_joker_effect = delegate_joker_effect
+JokerEffects.joker_is_debuffed = joker_is_debuffed
+JokerEffects.suit_alias_match = suit_alias_match
 
 function JokerEffects.begin_apply_context(ctx)
     if type(ctx) ~= "table" then return end

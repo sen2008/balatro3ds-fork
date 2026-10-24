@@ -1236,6 +1236,92 @@ function Game:boss_is_joker_debuffed(node)
     return self:boss_crimson_disabled_joker_node() == node
 end
 
+--- Whether a Joker is debuffed through ANY channel: the boss predicate above,
+--- the Perishable sticker, or a mod debuff. The boss predicate's callers keep
+--- asking it directly; this is the predicate for seats that mean "debuffed,
+--- however it happened" (display, copy dispatch, the mod seats).
+function Game:joker_is_debuffed(node)
+    if not node then return false end
+    if node.mod_debuffed == true then return true end
+    if node.is_sticker_debuffed and node:is_sticker_debuffed() then return true end
+    return self:boss_is_joker_debuffed(node)
+end
+
+--- The canonical setter for a mod debuff on a Joker (`SMODS.set_joker_debuff`
+--- routes here), the Joker counterpart of `set_card_debuff` for playing
+--- cards. The flag lives on the Joker, so it saves with the run and dies
+--- with the Joker. A change notifies every held Joker through
+--- `on_joker_debuffed` (`context.joker_debuffed`, `context.card` the Joker,
+--- `context.debuffed` the new state); setting the state the Joker already
+--- has notifies nothing. Notifications nest at most 8 deep, like
+--- `money_altered`: a Joker that debuffs in answer to a debuff cannot loop
+--- the row forever. Returns true when the Joker's state is now as requested.
+function Game:set_joker_debuff(node, debuffed, source)
+    if type(node) ~= "table" then return false end
+    debuffed = debuffed == true
+    if (node.mod_debuffed == true) == debuffed then return true end
+    node.mod_debuffed = debuffed or nil
+    local depth = self._joker_debuff_notify_depth or 0
+    if depth < 8 and self.emit_joker_event then
+        self._joker_debuff_notify_depth = depth + 1
+        self:emit_joker_event("on_joker_debuffed",
+            { joker = node, debuffed = debuffed, source = source })
+        self._joker_debuff_notify_depth = depth
+    end
+    return true
+end
+
+--- An exact copy of a held Joker (`SMODS.copy_joker` routes here): same def,
+--- same edition, and the source's live runtime state deep-copied over the
+--- fresh instance, the clone the Ankh and Invisible Joker effects build by
+--- hand. Two PC `copy_card` rules differ from an ordinary creation: the
+--- Joker limit is not checked (`CardArea:emplace` never checks it), and the
+--- copy's `add_to_deck` runs AFTER its state is in place, so the add hooks
+--- `add_joker_by_def` would normally fire are held back and fired here.
+--- Returns the new Joker, or nil when the source is not held.
+function Game:copy_joker_node(src)
+    if type(src) ~= "table" or type(self.jokers) ~= "table" then return nil end
+    local held = false
+    for _, j in ipairs(self.jokers) do if j == src then held = true break end end
+    if not held then return nil end
+    local src_id = src.def and src.def.id
+    if type(src_id) ~= "string" then return nil end
+    local edition = Joker and Joker.normalize_edition(src.edition) or src.edition
+    self._joker_capacity_bypass = true
+    self._copying_joker = true
+    local ok = self:add_joker_by_def(src_id, { edition = edition })
+    self._joker_capacity_bypass = nil
+    self._copying_joker = nil
+    if not ok then return nil end
+    local clone = self.jokers[#self.jokers]
+    if not clone then return nil end
+    for k, v in pairs(src) do
+        if type(v) ~= "function" and k ~= "def" and k ~= "params" and k ~= "effect_impl"
+            and k ~= "_sort_id" and k ~= "mod_debuffed"
+            and k ~= "T" and k ~= "VT" and k ~= "velocity" and k ~= "drag"
+            and k ~= "hovering" and k ~= "_hover_last" and k ~= "_touch_state"
+            and k ~= "children" and k ~= "parent" and k ~= "front_quads"
+            and k ~= "back_quads" and k ~= "sprite_batch" then
+            if type(v) == "table" then
+                clone[k] = self:deep_copy_card_data(v)
+            else
+                clone[k] = v
+            end
+        end
+    end
+    -- `ability` and `effect_config` are one table on a live Joker; the field
+    -- copy above deep-copied them separately, so re-alias them.
+    if type(clone.ability) == "table" then clone.effect_config = clone.ability end
+    clone.edition = edition
+    if clone.refresh_quads then clone:refresh_quads() end
+    self:refresh_joker_capacity_from_negatives()
+    if src.def.smods and SMODS and SMODS.on_joker_added then SMODS.on_joker_added(clone) end
+    if not self._restoring_run_snapshot then
+        self:emit_joker_event("on_joker_added", { joker = clone })
+    end
+    return clone
+end
+
 function Game:boss_apply_hand_base_modifiers(chips, mult)
     local boss_id = self:get_active_boss_blind_id()
     chips = tonumber(chips) or 0
@@ -5328,6 +5414,8 @@ function Game:build_run_snapshot()
                 face_down = j.face_up == false or nil,
                 -- A mod Joker's per-copy `card.ability` (`smods.lua`).
                 ability = j.ability and SMODS.deep_copy(j.ability) or nil,
+                -- A mod debuff on the Joker (`SMODS.set_joker_debuff`).
+                mod_debuffed = j.mod_debuffed == true or nil,
             }
         end
     end
@@ -5704,6 +5792,7 @@ function Game:load_run_snapshot(snapshot)
                     j.ability = SMODS.deep_copy(jrec.ability)
                     j.effect_config = j.ability
                 end
+                if jrec.mod_debuffed == true then j.mod_debuffed = true end
                 if tonumber(jrec.sort_id) then
                     j._sort_id = tonumber(jrec.sort_id)
                     self._next_joker_sort_id = math.max(self._next_joker_sort_id, j._sort_id + 1)
@@ -11386,7 +11475,9 @@ function Game:add_joker_by_def(def_id, create_params, arrive_from)
     end
     local new_is_neg = Joker.normalize_edition(merged.edition) == "negative"
     local cap_after = self:joker_base_capacity() + neg_owned + (new_is_neg and 1 or 0)
-    if #self.jokers >= cap_after then return false end
+    -- An exact clone (`Game:copy_joker_node`) is the one creation that skips
+    -- the limit, as PC's `copy_card` + `emplace` do.
+    if not self._joker_capacity_bypass and #self.jokers >= cap_after then return false end
 
     local j = Joker(0, 0, self.joker_slot_w, self.joker_slot_h, def, merged)
     j._sort_id = math.max(1, math.floor(tonumber(self._next_joker_sort_id) or 1))
@@ -11401,8 +11492,10 @@ function Game:add_joker_by_def(def_id, create_params, arrive_from)
     self:discover_edition(merged.edition)
     self:check_unlock("modify_jokers")
     -- A restored save already carries whatever the mod's add_to_deck changed.
-    if def.smods and not self._restoring_run_snapshot then SMODS.on_joker_added(j) end
-    if not self._restoring_run_snapshot then self:emit_joker_event("on_joker_added", { joker = j }) end
+    -- A clone's add hooks are likewise held back: `Game:copy_joker_node` fires
+    -- them itself, after the source's state has been copied over the clone.
+    if def.smods and not self._restoring_run_snapshot and not self._copying_joker then SMODS.on_joker_added(j) end
+    if not self._restoring_run_snapshot and not self._copying_joker then self:emit_joker_event("on_joker_added", { joker = j }) end
 
     -- Snap immediately if we're not in a DPAD slide transition.
     if self.jokers_sliding ~= true then

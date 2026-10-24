@@ -4084,6 +4084,399 @@ suite.test("wave1: game_over reaches mod Jokers and saved = true rescues the run
 end)
 
 --------------------------------------------------------------------------------
+-- Wave 5: blueprint_effect dispatch + exact Joker copies, Joker debuff,
+-- is_suit aliasing, vanilla center-config overrides
+--------------------------------------------------------------------------------
+
+local WAVE5 = [[
+local function seen()
+    G.w5_seen = G.w5_seen or {}
+    return G.w5_seen
+end
+local function neighbor(card, off)
+    for i, j in ipairs(G.jokers) do if j == card then return G.jokers[i + off] end end
+    return nil
+end
+SMODS.Suit { key = "Halberds", loc_txt = { name = "Halberds" }, ui_colour = "#888888" }
+SMODS.Joker {
+    key = "target", rarity = 1, cost = 2, sprite = "target.png", blueprint_compat = true,
+    config = { extra = { mult = 7 } },
+    calculate = function(self, card, context)
+        local s = seen()
+        if context.blueprint then s.target_blueprint = true end
+        if context.joker_main then
+            s.target_calls = (s.target_calls or 0) + 1
+            return { mult = card.ability.extra.mult }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "copier", rarity = 1, cost = 2, sprite = "copier.png", blueprint_compat = true,
+    calculate = function(self, card, context)
+        if context.joker_main then
+            return SMODS.blueprint_effect(card, neighbor(card, 1), context)
+        end
+    end,
+}
+SMODS.Joker {
+    key = "doubler", rarity = 1, cost = 2, sprite = "doubler.png", blueprint_compat = true,
+    calculate = function(self, card, context)
+        if context.joker_main then
+            local ret = SMODS.blueprint_effect(card, neighbor(card, 1), context)
+            if ret and ret.mult then ret.mult = ret.mult * 2 end
+            return ret
+        end
+    end,
+}
+SMODS.Joker {
+    key = "watcher", rarity = 1, cost = 2, sprite = "watcher.png",
+    calculate = function(self, card, context)
+        if context.joker_debuffed then
+            local s = seen()
+            s.debuff_events = s.debuff_events or {}
+            s.debuff_events[#s.debuff_events + 1] = { card = context.card, debuffed = context.debuffed }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "conqueror", rarity = 1, cost = 2, sprite = "conqueror.png",
+    calculate = function(self, card, context)
+        if context.setting_blind and G.w5_victim then
+            return { debuff_joker = G.w5_victim }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "myopia", rarity = 2, cost = 8, sprite = "myopia.png",
+    suit_aliases = { Spades = "Halberds", Clubs = "Halberds" },
+}
+SMODS.Joker {
+    key = "sledge", rarity = 2, cost = 5, sprite = "sledge.png",
+    center_overrides = {
+        { center = "m_glass", field = "Xmult", add = 1 },
+        { center = "m_glass", field = "extra", divide = 4, once = true },
+    },
+}
+SMODS.Joker {
+    key = "dwarf", rarity = 2, cost = 8, sprite = "dwarf.png",
+    center_overrides = {
+        { center = "m_stone", field = "h_x_mult", add_from = { center = "m_steel", field = "h_x_mult" }, once = true },
+        { center = "m_stone", field = "h_dollars", add_from = { center = "m_gold", field = "h_dollars" }, once = true },
+    },
+}
+SMODS.Joker {
+    key = "metal", rarity = 1, cost = 6, sprite = "metal.png",
+    center_overrides = {
+        { center = "m_gold", field = "h_mult", add = 10 },
+    },
+}
+SMODS.Joker {
+    key = "clonewatch", rarity = 1, cost = 2, sprite = "clonewatch.png", blueprint_compat = true,
+    config = { extra = { mult = 7 } },
+    add_to_deck = function(self, card)
+        local s = seen()
+        s.added = s.added or {}
+        s.added[#s.added + 1] = card.ability.extra.mult
+    end,
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = card.ability.extra.mult } end
+    end,
+}
+]]
+
+local function install_wave5(seed)
+    wipe_mods()
+    write_mod("Wave5", {
+        id = "Wave5Mod", name = "Wave5", prefix = "w5", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, WAVE5)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave5Mod.status, "loaded", tostring(ModLoader.by_id.Wave5Mod.error))
+    local game = bootstrap.new_game(seed or 4406)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+local function playing_node(game, rank, suit, enhancement)
+    game.hand = game.hand or Hand(game)
+    -- The hand keeps its nodes sorted, so the new card is not necessarily last:
+    -- `add_card` returns the node itself.
+    return SMODS.add_card { set = "Playing", rank = rank, suit = suit, enhancement = enhancement }
+end
+
+suite.test("wave5: blueprint_effect dispatches a mod target and returns its return", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_copier")
+    game:add_joker_by_def("j_w5_target")
+    local copier = game.jokers[1]
+    local ctx = scored(copier)
+    T.assert_eq(ctx.mult, 9, "the copier scores the target's +7 as its own")
+    T.assert_true(game.w5_seen.target_blueprint == true, "the target saw context.blueprint")
+    T.assert_eq(game.w5_seen.target_calls, 1)
+
+    local game2 = install_wave5()
+    game2:add_joker_by_def("j_w5_doubler")
+    game2:add_joker_by_def("j_w5_target")
+    local ctx2 = scored(game2.jokers[1])
+    T.assert_eq(ctx2.mult, 16, "a return-rewriting copier rewrites the copied return (7 x 2)")
+    wipe_mods()
+end)
+
+suite.test("wave5: a copier copying a copier resolves one level", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_copier")
+    game:add_joker_by_def("j_w5_copier")
+    game:add_joker_by_def("j_w5_target")
+    local a, b = game.jokers[1], game.jokers[2]
+    local ctx = scored(a)
+    T.assert_eq(ctx.mult, 2, "the chain stops after one level: the target never fires through A")
+    T.assert_eq(game.w5_seen.target_calls or 0, 0, "the target's calculate never ran")
+    local ctx2 = scored(b)
+    T.assert_eq(ctx2.mult, 9, "dispatching the middle copier directly reaches the target")
+    T.assert_eq(game.w5_seen.target_calls, 1)
+    wipe_mods()
+end)
+
+suite.test("wave5: blueprint_effect respects debuff, compat, self and the held row", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_copier")
+    game:add_joker_by_def("j_w5_target")
+    local copier, target = game.jokers[1], game.jokers[2]
+    local direct = SMODS.blueprint_effect(copier, target, { joker_main = true })
+    T.assert_eq(type(direct), "table", "a compat mod target returns its table")
+    T.assert_eq(direct.mult, 7)
+    T.assert_eq(SMODS.blueprint_effect(target, target, { joker_main = true }), nil, "no self-copy")
+    game:add_joker_by_def("j_w5_watcher")
+    local watcher = game.jokers[3]
+    T.assert_eq(SMODS.blueprint_effect(copier, watcher, { joker_main = true }), nil,
+        "a non-blueprint_compat target does not fire")
+    SMODS.set_joker_debuff(target, true)
+    T.assert_eq(SMODS.blueprint_effect(copier, target, { joker_main = true }), nil,
+        "a debuffed target does not fire")
+    local ctx = scored(copier)
+    T.assert_eq(ctx.mult, 2, "and the dispatch agrees during a real scoring pass")
+    SMODS.set_joker_debuff(target, false)
+    game:remove_owned_joker_at(2)
+    T.assert_eq(SMODS.blueprint_effect(copier, target, { joker_main = true }), nil,
+        "a Joker that left the row cannot be copied")
+    wipe_mods()
+end)
+
+suite.test("wave5: blueprint_effect fires a vanilla target in place and returns nil", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_copier")
+    game:add_joker_by_def("j_joker")
+    local ctx = scored(game.jokers[1])
+    T.assert_eq(ctx.mult, 6, "the vanilla Joker's +4 landed once, in place (2 + 4, not 2 + 4 + 4)")
+    wipe_mods()
+end)
+
+suite.test("wave5: copy_joker clones def, edition and live ability state", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_clonewatch")
+    local src = game.jokers[1]
+    T.assert_eq(game.w5_seen.added[1], 7, "the original's add_to_deck saw its fresh config")
+    src.ability.extra.mult = 42
+    src.edition = "foil"
+    local clone = SMODS.copy_joker(src)
+    T.assert_true(clone ~= nil and clone ~= src, "a distinct Joker joins the row")
+    T.assert_eq(clone.def.id, "j_w5_clonewatch")
+    T.assert_eq(Joker.normalize_edition(clone.edition), "foil", "the edition is copied")
+    T.assert_eq(clone.ability.extra.mult, 42, "the live ability state is copied")
+    T.assert_eq(game.w5_seen.added[2], 42, "the clone's add_to_deck ran after the state landed")
+    clone.ability.extra.mult = 1
+    T.assert_eq(src.ability.extra.mult, 42, "the copy is deep: the source is untouched")
+    T.assert_eq(scored(clone).mult, 3, "the clone scores with its own state")
+    T.assert_eq(SMODS.copy_joker({}), nil, "a non-Joker cannot be copied")
+    game:remove_owned_joker_at(1)
+    T.assert_eq(SMODS.copy_joker(src), nil, "a Joker that left the row cannot be copied")
+    wipe_mods()
+end)
+
+suite.test("wave5: copy_joker is not stopped by the Joker limit, as PC copy_card is not", function()
+    local game = install_wave5()
+    local n = 0
+    while game:add_joker_by_def("j_w5_clonewatch") do n = n + 1 end
+    T.assert_true(n >= 1)
+    local clone = SMODS.copy_joker(game.jokers[1])
+    T.assert_true(clone ~= nil, "the clone is created over the limit")
+    T.assert_eq(#game.jokers, n + 1)
+    wipe_mods()
+end)
+
+suite.test("wave5: set_joker_debuff gates calculate, fires the context and saves", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_watcher")
+    game:add_joker_by_def("j_w5_target")
+    local target = game.jokers[2]
+    T.assert_eq(scored(target).mult, 9, "the target scores while up")
+    T.assert_true(SMODS.set_joker_debuff(target, true))
+    T.assert_true(target.mod_debuffed == true)
+    T.assert_true(game:joker_is_debuffed(target), "the combined predicate sees the mod channel")
+    T.assert_eq(scored(target).mult, 2, "a debuffed Joker does not calculate")
+    local events = game.w5_seen.debuff_events
+    T.assert_eq(#events, 1, "one joker_debuffed context fired")
+    T.assert_eq(events[1].card, target)
+    T.assert_eq(events[1].debuffed, true)
+    SMODS.set_joker_debuff(target, true)
+    T.assert_eq(#game.w5_seen.debuff_events, 1, "re-setting the same state fires nothing")
+
+    game:add_joker_by_def("j_joker")
+    local vanilla = game.jokers[3]
+    SMODS.set_joker_debuff(vanilla, true)
+    T.assert_false(vanilla:matches_trigger("on_hand_scored", {}), "vanilla Jokers are gated too")
+    local vctx = { event = "on_hand_scored", event_name = "on_hand_scored", chips = 10, mult = 2 }
+    vanilla:apply_effect(vctx)
+    T.assert_eq(vctx.mult, 2, "a direct apply is gated as well")
+
+    local snap = game:build_run_snapshot()
+    T.assert_true(game:load_run_snapshot(snap))
+    local restored
+    for _, j in ipairs(game.jokers) do if j.def.id == "j_w5_target" then restored = j end end
+    T.assert_true(restored ~= nil and restored.mod_debuffed == true, "the debuff saves with the run")
+
+    SMODS.set_joker_debuff(restored, false)
+    T.assert_eq(game.w5_seen.debuff_events[#game.w5_seen.debuff_events].debuffed, false,
+        "clearing the debuff fires the context the other way")
+    T.assert_eq(scored(restored).mult, 9, "and the Joker calculates again")
+    wipe_mods()
+end)
+
+suite.test("wave5: a calculate return can debuff another Joker", function()
+    local game = install_wave5()
+    game:add_joker_by_def("j_w5_conqueror")
+    game:add_joker_by_def("j_w5_target")
+    local target = game.jokers[2]
+    game.w5_victim = target
+    game:emit_joker_event("on_blind_selected", {})
+    T.assert_true(target.mod_debuffed == true, "debuff_joker in the setting_blind return landed")
+    T.assert_eq(scored(target).mult, 2, "the victim no longer calculates")
+    wipe_mods()
+end)
+
+suite.test("wave5: suit aliasing is scoped to the held, undebuffed alias Joker", function()
+    local game = install_wave5()
+    T.assert_false(JokerEffects.is_suit("Spades", "Halberds"), "no alias without the Joker")
+    game:add_joker_by_def("j_w5_myopia")
+    local myopia = game.jokers[1]
+    T.assert_true(JokerEffects.is_suit("Spades", "Halberds"), "Spades counts as Halberds")
+    T.assert_true(JokerEffects.is_suit("Clubs", "Halberds"), "Clubs counts as Halberds")
+    T.assert_false(JokerEffects.is_suit("Hearts", "Halberds"), "red suits are not aliased")
+    T.assert_false(JokerEffects.is_suit("Halberds", "Spades"), "the alias is one-way")
+    T.assert_true(JokerEffects.is_suit("Spades", "Spades"), "the printed suit still counts")
+    local node = playing_node(game, 9, "Spades")
+    T.assert_true(node:is_suit("Halberds"), "a card view answers through the same choke")
+    SMODS.set_joker_debuff(myopia, true)
+    T.assert_false(JokerEffects.is_suit("Spades", "Halberds"), "a debuffed alias Joker aliases nothing")
+    SMODS.set_joker_debuff(myopia, false)
+    T.assert_true(JokerEffects.is_suit("Spades", "Halberds"), "and clearing the debuff restores it")
+    game:remove_owned_joker_at(1)
+    T.assert_false(JokerEffects.is_suit("Spades", "Halberds"), "no leak once the Joker leaves play")
+    wipe_mods()
+end)
+
+suite.test("wave5: center overrides rewrite Glass, Stone and Gold at the read", function()
+    local game = install_wave5()
+    local base = SMODS.center_config("m_glass")
+    T.assert_eq(base.Xmult, 2)
+    T.assert_eq(base.extra, 4)
+    T.assert_eq(base, SMODS.VANILLA_CENTER_CONFIG.m_glass,
+        "with nothing held the base table itself is read: vanilla untouched")
+    T.assert_eq(SMODS.center_config("m_nope"), nil, "an unknown center has no config")
+
+    game:add_joker_by_def("j_w5_sledge")
+    local cfg = SMODS.center_config("m_glass")
+    T.assert_eq(cfg.Xmult, 3, "Sledgehammer: Glass Xmult +1")
+    T.assert_eq(cfg.extra, 1, "and the break odds divided by 4")
+    local glass = playing_node(game, 9, "Hearts", "glass")
+    local gctx = { chips = 0, mult = 1 }
+    glass:emit_hand_event("card_played", gctx)
+    T.assert_eq(gctx.mult, 3, "a Glass card scores with the overridden Xmult")
+    game:add_joker_by_def("j_w5_sledge")
+    cfg = SMODS.center_config("m_glass")
+    T.assert_eq(cfg.Xmult, 4, "a second copy adds its Xmult")
+    T.assert_eq(cfg.extra, 1, "but the odds divide only once")
+    game:remove_owned_joker_at(2)
+    game:remove_owned_joker_at(1)
+    T.assert_eq(SMODS.center_config("m_glass").Xmult, 2, "selling the Jokers reverts the center")
+
+    game:add_joker_by_def("j_w5_dwarf")
+    local stone_cfg = SMODS.center_config("m_stone")
+    T.assert_eq(stone_cfg.h_x_mult, 1.5, "Dwarven: Stone gains Steel's held Xmult")
+    T.assert_eq(stone_cfg.h_dollars, 3, "and Gold's held dollars")
+    local stone = playing_node(game, 9, "Clubs", "stone")
+    local sctx = { chips = 0, mult = 2 }
+    stone:emit_hand_event("held_in_hand", sctx)
+    T.assert_eq(sctx.mult, 3, "a held Stone card multiplies with the borrowed Xmult")
+    local money = game.money
+    stone:emit_hand_event("on_round_end", { chips = 0, mult = 1 })
+    T.assert_eq(game.money, money + 3, "a held Stone card pays the borrowed dollars at round end")
+    local pctx = { chips = 0, mult = 1 }
+    stone:emit_hand_event("card_played", pctx)
+    T.assert_eq(pctx.chips, 50, "Stone's own +50 Chips is unchanged")
+
+    game:add_joker_by_def("j_w5_metal")
+    local gold = playing_node(game, 9, "Diamonds", "gold")
+    local hctx = { chips = 0, mult = 1 }
+    gold:emit_hand_event("held_in_hand", hctx)
+    T.assert_eq(hctx.mult, 11, "Metallurgist: a held Gold card gives +10 Mult")
+    local money2 = game.money
+    gold:emit_hand_event("on_round_end", { chips = 0, mult = 1 })
+    T.assert_eq(game.money, money2 + 3, "Gold's own $3 is unchanged")
+    wipe_mods()
+end)
+
+suite.test("wave5: bad suit_aliases and center_overrides are load errors that say why", function()
+    wipe_mods()
+    write_mod("Wave5Bad", { id = "Wave5Bad", prefix = "w5b", main_file = "main.lua", version = "1" }, [[
+        SMODS.Joker { key = "bad", rarity = 1, sprite = "a.png",
+            center_overrides = { { center = "m_glass", field = "Xmult" } } }
+    ]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave5Bad.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.Wave5Bad.error):find("center_overrides", 1, true) ~= nil,
+        tostring(ModLoader.by_id.Wave5Bad.error))
+    wipe_mods()
+    write_mod("Wave5Bad2", { id = "Wave5Bad2", prefix = "w5c", main_file = "main.lua", version = "1" }, [[
+        SMODS.Joker { key = "bad", rarity = 1, sprite = "a.png", suit_aliases = { Spades = 3 } }
+    ]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave5Bad2.status, "error")
+    T.assert_true(tostring(ModLoader.by_id.Wave5Bad2.error):find("suit_aliases", 1, true) ~= nil,
+        tostring(ModLoader.by_id.Wave5Bad2.error))
+    wipe_mods()
+end)
+
+suite.test("wave5: seeded invariance -- unheld registrations change no score and no draw", function()
+    local function line(install)
+        local game
+        if install then
+            game = install_wave5(4406)
+        else
+            wipe_mods()
+            game = bootstrap.new_game(4406)
+            G = game
+            G.play = G.play or SMODS.PLAY
+            _G.Top = _G.Top or { addPopup = function() end }
+        end
+        game:add_joker_by_def("j_blueprint")
+        game:add_joker_by_def("j_joker")
+        local ctx = scored(game.jokers[1])
+        local glass = playing_node(game, 9, "Hearts", "glass")
+        local gctx = { chips = 0, mult = 1 }
+        glass:emit_hand_event("card_played", gctx)
+        local draws = {}
+        for i = 1, 3 do draws[i] = game:random("wave5_invariance", 1, 1000000) end
+        return table.concat({ ctx.mult, gctx.mult, draws[1], draws[2], draws[3] }, ",")
+    end
+    T.assert_eq(line(true), line(false),
+        "a mod registering blueprint_compat / override Jokers it never fields is invisible")
+    wipe_mods()
+end)
+
+--------------------------------------------------------------------------------
 -- SMODS.Back: registered decks join the catalog, the carousel, the unlock
 -- gates and run start exactly like vanilla decks.
 --------------------------------------------------------------------------------

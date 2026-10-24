@@ -276,6 +276,10 @@ local function joker_is_debuffed_for_display(joker)
     if joker and joker.is_sticker_debuffed and joker:is_sticker_debuffed() then
         return true
     end
+    -- A mod debuff (Wave 5) draws through this same wash + X overlay.
+    if joker and joker.mod_debuffed == true then
+        return true
+    end
     return G and G.boss_is_joker_debuffed and G:boss_is_joker_debuffed(joker) == true
 end
 
@@ -1360,6 +1364,11 @@ function Joker:matches_trigger(event_name, ctx)
     if self:is_sticker_debuffed() then
         return false
     end
+    -- A mod debuff (`SMODS.set_joker_debuff`) gates calculate exactly as the
+    -- sticker channel does; the boss channel is filtered by the collector.
+    if self.mod_debuffed == true then
+        return false
+    end
     if self.effect_impl and type(self.effect_impl.matches_trigger) == "function" then
         return self.effect_impl.matches_trigger(self, event_name, ctx) == true
     end
@@ -1418,6 +1427,10 @@ function Joker:apply_edition_on_hand_scored(ctx, after_effect)
 end
 
 function Joker:apply_effect(ctx)
+    -- Direct callers (the retrigger pass, the sold / destroyed seats, the
+    -- Blueprint delegate) reach here without `matches_trigger`; a mod-debuffed
+    -- Joker does not calculate through any of them either.
+    if self.mod_debuffed == true then return end
     ctx = ctx or {}
     ctx.VT = self.VT
     local before = capture_joker_runtime_snapshot(self)
@@ -1459,6 +1472,7 @@ end
 ---@param ctx table|nil
 ---@return number
 function Joker:query_retrigger(ctx)
+    if self.mod_debuffed == true then return 0 end
     if self.effect_impl and type(self.effect_impl.query_retrigger) == "function" then
         return tonumber(self.effect_impl.query_retrigger(self, ctx)) or 0
     end
@@ -1469,6 +1483,7 @@ end
 ---@param ctx table `{ key, numerator, denominator }`
 ---@return number
 function Joker:query_probability_retrigger(ctx)
+    if self.mod_debuffed == true then return 0 end
     if self.effect_impl and type(self.effect_impl.query_probability_retrigger) == "function" then
         return tonumber(self.effect_impl.query_probability_retrigger(self, ctx)) or 0
     end

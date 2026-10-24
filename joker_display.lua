@@ -209,6 +209,11 @@ local function is_suit(g, card, check)
         suit = data.suit
         if suit == nil then return false end
     end
+    -- Mod suit aliases (Wave 5), mirrored from `joker_effects.lua`'s choke so
+    -- a readout that counts suits predicts the same game the engine plays.
+    if JokerEffects and JokerEffects.suit_alias_match and JokerEffects.suit_alias_match(suit, check) then
+        return true
+    end
     if joker_owned(g, "j_smeared") then
         if check == "Hearts" or check == "Diamonds" then
             return suit == "Hearts" or suit == "Diamonds"

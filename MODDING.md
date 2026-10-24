@@ -113,6 +113,8 @@ SMODS.Joker {
 | `in_pool(self, args)` | Return `false` to keep the Joker out of the shop and every random roll. `args` is an empty table. |
 | `set_ability(self, card, initial)` | Called whenever a copy of the Joker is created (including shop cards), after `config` has been copied into `card.ability`. A loaded run then restores the saved `card.ability` over it. |
 | `add_to_deck(self, card, from_debuff)`, `remove_from_deck(...)` | Called when the Joker is gained or lost. Not called when a saved run is loaded, because the save already includes their effects. |
+| `suit_aliases = { Spades = "Halberds" }` | While this Joker is held and not debuffed, a card printed with a key suit also counts as the named suit at every `is_suit` check. See [Suit aliasing](#suit-aliasing). |
+| `center_overrides = { { center = "m_glass", field = "Xmult", add = 1 } }` | Rewrites named numeric fields of a center's config while this Joker is held. See [Center-config overrides](#center-config-overrides). |
 
 **Description markup:** `{C:mult}`, `{C:chips}`, `{C:money}`, `{C:attention}`, `{C:green}`, `{C:red}`, `{C:purple}` and `{C:inactive}` work, and `{}` resets the colour. `{X:...}` uses its colour for the text. `{s:...}` and `{V:n}` are ignored.
 
@@ -155,6 +157,7 @@ SMODS.Joker {
 | `context.level_up_hand` | A hand's level rose, from any source (a Planet, a `level_up` return, an effect). `context.level_up_hand` is the hand's NAME (a string, Steamodded's shape), `context.level` the new level and `context.amount` the rise (1 per funnel call). A Joker that levels a hand in answer is heard, but chains cap at 4 deep. |
 | `context.game_over` | A lost Blind is about to end the run. Also carries `context.end_of_round = true`; `context.port.round_score` and `context.port.blind_target` hold the final numbers. Return `{ saved = true }` to rescue the run: the first saver in slot order wins (a Blueprint/Brainstorm copying a saver counts at the copy's slot, and Mr. Bones competes by the same order). The engine does not spend the saver -- its consequences are its own. |
 | `context.money_transform` | Asked of each held Joker, in slot order, before a money GAIN lands (never for spending). `context.amount` is the gain as the previous Joker left it; return `{ amount = n }` to replace it. Gains through `Game:ease_dollars`, Joker `dollars` returns, card-center dollars and `perma_p_dollars` all pass through here; a round-win payout row is transformed once, when the payout table flushes. Boss-debuffed Jokers are skipped, and a Blueprint copying a transformer does not transform (Bunco's PC wrapper keys off the held Joker itself). |
+| `context.joker_debuffed` | A Joker's mod debuff changed (see [Joker debuff](#joker-debuff)). `context.card` is the Joker and `context.debuffed` is the state it changed to. Setting the state a Joker already has fires nothing, and clearing a boss or sticker debuff fires nothing either: this context is only the mod channel's. |
 
 Also available on `context`:
 - `blueprint` and `blueprint_card`: set when Blueprint or Brainstorm is copying this Joker.
@@ -171,6 +174,8 @@ Playing cards support `:get_id()` (2 to 14, where Jack is 11 and Ace is 14), `:i
 The extended total fields Steamodded added are here too, applied to the running totals in this order, after the fields above: `x_chips` (also `xchips`: Chips x n), `e_mult` (also `emult`: Mult = Mult ^ n) and `e_chips` (also `echips`: Chips = Chips ^ n) -- the exponent fields land between them, in Steamodded's order chips, mult, x_mult, e_mult, e_chips, x_chips. Then `xlog_chips = b` (Talisman's field, via MoreFluff) multiplies Chips by log base `b` of Chips, but only when that log is at least 1. Then `swap = true` exchanges Chips and Mult, `balance = true` sets both to the larger of the two (a numeric `balance = f`, 0 < f < 1, moves each total the fraction `f` of the way toward that same target -- the partial form Paperback's plasma-style Jokers use), and `level_up = n` (or `true` for 1) levels the hand being scored: the stored level rises as a Planet would raise it, and the running totals gain the level's Chips/Mult delta, so earlier contributions are kept. Outside a scoring context `level_up` still raises the level and moves no totals. Enhancement, seal and edition `calculate` returns accept the same fields. Past the double range the totals become [big numbers](#big-numbers), which these readers feed transparently.
 
 A return may also ask for retriggers, as in Steamodded: `repetitions = n` runs this Joker's effect `n` more times, and `retrigger_joker = <a held Joker>` (or `true`, for this Joker) runs that Joker's effect again -- once, or `repetitions` times when both are given. The extra passes see `context.retrigger_joker`, are announced with "Again!", and run on the spot inside this Joker's own beat rather than being queued for a beat of their own. A pass that is itself a retrigger never retriggers, and one return buys at most 100 extra passes, so a Joker that always asks cannot loop forever.
+
+A return may also debuff: `debuff_joker = <a held Joker>` (or `true`, for this Joker) debuffs it and `undebuff_joker` clears a mod debuff, applied after the score fields land. See [Joker debuff](#joker-debuff).
 
 ### Live readouts (`display`)
 
@@ -260,6 +265,81 @@ SMODS.destroy_card(n)    -- true when the card is gone
 `SMODS.destroy_joker(joker)` removes a held Joker for good: a mod Joker's `remove_from_deck` runs and its art frees, exactly as when the game itself removes one. It forces past the eternal sticker -- destroying means it, where selling an eternal Joker is refused. `SMODS.destroy_card(card)` destroys a playing card: it leaves the game entirely and never reaches the discard pile. `card` may be a hand card's node, its `card_data`, or a `card_data` in the deck or discard pile. Both return whether anything was actually removed. Steamodded's batch `SMODS.destroy_cards` is not here; destroy one card at a time.
 
 `SMODS.set_debuff(card, true)` debuffs a playing card through the same canonical setter the game's effects use (see `context.debuff_card` above); pass `false` to clear it. On a bare `card_data` the flag is set with no context, since there is no card to show the other Jokers.
+
+## Copying Jokers
+
+```lua
+local ret = SMODS.blueprint_effect(card, other_joker, context)  -- other_joker's return, or nil
+local clone = SMODS.copy_joker(joker)                          -- a new held Joker, or nil
+```
+
+**`SMODS.blueprint_effect(caller, other, context)`** is Steamodded's copy dispatch, callable from a mod Joker's `calculate` (Paperback's Forgery / Master Plan / Photocopy and Cryptid's Old Blueprint are all this one call with a different neighbour). It runs `other`'s calculate with the caller as the acting Joker:
+
+- `other` must be held, must not be the caller, and its def must be `blueprint_compat` -- the same gate the vanilla Blueprint applies. Anything else returns `nil` and nothing fires.
+- A debuffed target (boss, Perishable sticker, or a mod debuff) does not fire; the call returns `nil`.
+- The copied calculate sees a copy of `context` with `blueprint = true`, `blueprint_card = caller` and `no_blueprint = true`. That last flag is the one-level rule, as on PC: a copier copied by a copier still runs its own logic, but its own `blueprint_effect` calls return `nil`, so copy chains never recurse. Calling `blueprint_effect` with a context that already has `no_blueprint` set returns `nil` at once (Forgery's own guard on PC).
+- A **mod** target's calculate return is returned untouched. Return it (or a rewrite of it) from your own `calculate` and the dispatch applies it once, at your slot.
+- A **vanilla** target has no calculate table in this engine, so its effect fires in place, through the same delegate path the vanilla Blueprint uses, and the call returns `nil`. Return-rewriting copiers therefore only rewrite mod targets' returns.
+
+**`SMODS.copy_joker(view)`** is an exact clone of a held Joker, PC's `copy_card` (Cryptid's ERROR sells into a row of duplicates; Nostalgic Googol Play Card sells into two copies of the leftmost Joker). The copy has the same def, edition and stickers, and a deep copy of the source's live state -- a mod Joker's `ability`, a vanilla Joker's runtime counters -- and joins the end of the row. Its `add_to_deck` and the other Jokers' `card_added` fire after the state is in place, as PC's explicit `card:add_to_deck()` does. Slot rules, as PC: `copy_card` + `emplace` never check the Joker limit (the limit gates purchases and `SMODS.add_card`, not clones), so a copy is created even when the row is full. Two limits: the copy does not inherit a mod debuff (its debuff state is re-derived from the boss and sticker channels, as PC re-derives `card.debuff`), and a copy of a Negative Joker keeps the edition, and so grants its slot, exactly as the source does. Returns the new Joker, or `nil` when `view` is not a held Joker.
+
+The vanilla Blueprint and Brainstorm are untouched by all of this: they keep copying through the engine's own delegate, chains and all, whether or not any mod registers a `blueprint_compat` Joker.
+
+## Joker debuff
+
+```lua
+SMODS.set_joker_debuff(joker, true)    -- debuff; false clears. Returns whether the state now holds.
+SMODS.joker_debuffed(joker)            -- true when debuffed through ANY channel
+```
+
+A mod can debuff a Joker (Bunco's Gameplan debuffs its neighbours; Conquest debuffs a random other Joker). The state lives on the Joker itself, so it saves with the run and ends when the Joker leaves play -- there is no global patch to leak. A debuffed Joker:
+
+- **does not calculate**, through any seat: the event dispatch, its retrigger and probability-retrigger queries, the `post_trigger` / `retrigger_joker_check` / probability passes, the money-transform and game-over questions, and as a `blueprint_effect` target. A vanilla Blueprint copying a debuffed Joker copies nothing. This applies to vanilla Jokers debuffed by a mod exactly as to mod Jokers.
+- **renders debuffed** through the existing display path, the same wash and red X the boss and sticker channels draw.
+- **keeps its editions and its passive `config` modifiers** (slots, hand size, `debt_limit`): as on PC, debuff gates `calculate` only.
+
+`SMODS.joker_debuffed(joker)` reads every channel at once: the boss predicate (Crimson Heart), the Perishable sticker, and the mod channel. Boss-blind Joker debuffs are unchanged -- they were always predicates over the active Blind, and they neither set nor clear the mod flag.
+
+Two ways to set it:
+
+- **`SMODS.set_joker_debuff(joker, debuffed)`** from anywhere (an `add_to_deck`, a consumable's `use`, another Joker's `calculate`). Setting the state the Joker already has does nothing.
+- **A `calculate` return**: `debuff_joker = <a held Joker>` (or `true` for the Joker itself) debuffs it, `undebuff_joker` clears it, applied after the return's score fields land. This is the seat for debuffing in reaction to the event being answered (Conquest picks its victim at `setting_blind`).
+
+Either way, a change fires `context.joker_debuffed` to every held Joker, with `context.card` the Joker and `context.debuffed` the state it changed to. Notifications nest at most 8 deep, like `money_altered`, so a Joker that debuffs in answer to a debuff cannot loop the row forever.
+
+## Suit aliasing
+
+```lua
+SMODS.Joker {
+    key = "myopia",
+    suit_aliases = { Spades = "Halberds", Clubs = "Halberds" },
+    -- ...
+}
+```
+
+While a Joker declaring `suit_aliases` is held and not debuffed, a card whose printed suit is a key also counts as the named suit at the game's single `is_suit` choke -- every Joker effect, every `card:is_suit(...)` a mod makes, and the Joker Info readouts (which mirror the same helper) agree. This is Bunco's Myopia / Astigmatism: on PC they patch `Card:is_suit` with a per-held-Joker scan, and the scan here is the same shape, so the alias set is derived from the held row on every check: a Joker leaving play, or being debuffed, ends its alias with no cleanup and no leak. The alias only ever adds a match, never removes one, and sits ahead of Smeared Joker's collapsing, as Bunco's patch sits ahead of it on PC. One honest limit: hand-type grouping (which cards a Flush claims) reads suits directly, not through `is_suit`, so an alias does not make a Flush out of mixed printed suits; it speaks to suit checks, which is what the PC Jokers' scoring effects use it for.
+
+## Center-config overrides
+
+```lua
+SMODS.Joker {
+    key = "sledgehammer",
+    center_overrides = {
+        { center = "m_glass", field = "Xmult", add = 1 },
+        { center = "m_glass", field = "extra", divide = 4, once = true },
+    },
+    -- ...
+}
+local cfg = SMODS.center_config("m_glass")   -- the config to read right now, or nil
+```
+
+On PC, Bunco's Sledgehammer, Dwarven and Metallurgist rewrite a vanilla center's `config` in `add_to_deck` / `remove_from_deck` and patch every live card's ability to match. This engine never materialised a per-card copy of an enhancement's config -- the numbers are read at the card's scoring step -- so the override lives at the read instead: a Joker declares `center_overrides` and `SMODS.center_config(center)` folds every held Joker's matching entries over the center's base config, in slot order, at every read. Nothing is written anywhere, so an override is per-run and reversible by construction: sell the Joker and the next read is vanilla again, and with no matching Joker held the base config itself is returned.
+
+- **`center`** names the center by its PC key (`"m_glass"`, `"m_stone"`, `"m_steel"`, `"m_gold"`, `"m_bonus"`, `"m_mult"`, or a registered enhancement's `"m_<prefix>_<key>"`) or a registered enhancement's bare value (`"copper"`).
+- **`field`** is a config field in PC's names. The vanilla bases are `m_glass = { Xmult = 2, extra = 4 }` (the `extra` is the break odds: 1 in 4), `m_steel = { h_x_mult = 1.5 }`, `m_stone = { chips = 50 }`, `m_gold = { h_dollars = 3 }`, `m_bonus = { bonus = 30 }`, `m_mult = { mult = 4 }`; a registered enhancement's base is its own `config`.
+- **Exactly one operation** per entry: `add = n`, `set = n`, `multiply = n`, `divide = n`, or `add_from = { center = ..., field = ... }`, which adds the BASE value of another center's field (Dwarven lends Stone Steel's `h_x_mult` and Gold's `h_dollars` this way). A field the config does not carry counts as 0 for `add` / `add_from`.
+- Entries apply **once per held copy** of their Joker, unless `once = true`, when only the first held copy applies them (Sledgehammer's odds divide once no matter how many are held; each copy still adds its own XMult).
+- The readers are the scoring steps themselves: Glass reads `Xmult` when it scores and `extra` at the break roll; Bonus / Mult read their flats; Steel reads `h_x_mult` while held; Stone reads `chips` when played and -- only while an override lends them -- `h_chips` / `h_mult` / `h_x_mult` while held and `h_dollars` at round end; Gold reads `h_dollars` at round end and any lent `h_*` while held. A registered enhancement's `config` readers go through the same fold. Card tooltips keep the vanilla text; the numbers on the table are the overridden ones.
 
 ## Negative art
 
