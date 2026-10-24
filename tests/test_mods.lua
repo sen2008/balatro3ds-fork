@@ -4083,4 +4083,196 @@ suite.test("wave1: game_over reaches mod Jokers and saved = true rescues the run
     T.assert_eq(#game2.jokers, 1, "the saver is not spent by the engine")
 end)
 
+--------------------------------------------------------------------------------
+-- SMODS.Back: registered decks join the catalog, the carousel, the unlock
+-- gates and run start exactly like vanilla decks.
+--------------------------------------------------------------------------------
+
+local BACKS = [[
+SMODS.Joker {
+    key = "marker",
+    loc_txt = { name = "Marker", text = { "{C:mult}+#1#{} Mult" } },
+    config = { extra = { mult = 1 } },
+    rarity = 1, cost = 2, sprite = "marker.png",
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = card.ability.extra.mult } end
+    end,
+}
+
+SMODS.Back {
+    key = "filtered",
+    loc_txt = { name = "Filtered Deck", text = { "Only {C:attention}Hearts{},", "start with a {C:attention}Marker{}" } },
+    config = { discards = 1, ante_scale = 2 },
+    unlocked = true,
+    pos = { x = 5, y = 2 },
+    sprite = "filtered.png",
+    apply = function(game, back, is_sleeve)
+        game.bk_seen = game.bk_seen or {}
+        game.bk_seen[#game.bk_seen + 1] = { id = back.id, sleeve = is_sleeve == true }
+        for i = #game.deck.cards, 1, -1 do
+            if game.deck.cards[i].suit ~= "Hearts" then table.remove(game.deck.cards, i) end
+        end
+        SMODS.add_card { set = "Joker", key = "j_bk_marker" }
+    end,
+}
+
+SMODS.Back {
+    key = "gated",
+    loc_txt = { name = "Gated Deck", text = { "{C:blue}+1{} hand every round" } },
+    config = { hands = 1 },
+    unlock_condition = { type = "discover_amount", amount = 2, text = "Discover 2 cards" },
+}
+
+SMODS.Back {
+    key = "winner",
+    loc_txt = { name = "Winner Deck", text = { "Win to open" } },
+    unlock_condition = { type = "deck_win", deck_id = "b_red" },
+}
+]]
+
+local function install_backs(seed)
+    wipe_mods()
+    write_mod("Backs", {
+        id = "BacksMod", name = "Backs", prefix = "bk", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, BACKS)
+    ModLoader.load_all()
+    local game = bootstrap.new_game(seed or 5150)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    -- A real run builds the deck before apply_deck_config; new_game does not.
+    local cards = {}
+    for _, suit in ipairs({ "Spades", "Hearts", "Clubs", "Diamonds" }) do
+        for rank = 2, 14 do cards[#cards + 1] = { rank = rank, suit = suit } end
+    end
+    game.deck = { cards = cards }
+    return game
+end
+
+suite.test("backs: registration joins the catalog after the vanilla decks", function()
+    install_backs()
+    local entry = SMODS.Backs["b_bk_filtered"]
+    T.assert_true(entry ~= nil, "the entry is registered")
+    T.assert_eq(entry.id, "b_bk_filtered")
+    local def = DECK_DEFS_BY_ID["b_bk_filtered"]
+    T.assert_true(def ~= nil, "the catalog knows the deck")
+    T.assert_eq(def.pos, 19, "pos {x=5,y=2} in the 7-wide atlas grid")
+    T.assert_eq(def.name, "Filtered Deck")
+    T.assert_eq(def.description, "Only Hearts, start with a Marker")
+    T.assert_true(def.smods_back == entry, "the def carries its entry")
+    T.assert_eq(DECK_DEFS[#DECK_DEFS].id, "b_bk_winner", "mod decks sort after vanilla")
+    local in_select = false
+    for _, d in ipairs(DECK_SELECT_DEFS) do if d.id == "b_bk_filtered" then in_select = true end end
+    T.assert_true(in_select, "the deck-select list carries it")
+    local names = {}
+    local catalog = require("collection_catalog")
+    for _, e in ipairs(catalog.build_deck_entries()) do names[e.id] = e.name end
+    T.assert_eq(names["b_bk_filtered"], "Filtered Deck", "the collection lists it by name")
+end)
+
+suite.test("backs: run start merges config, scales the ante and fires apply once", function()
+    local game = install_backs()
+    local base_req = game:get_base_requirement_for_ante(1)
+    game:apply_deck_config("b_bk_filtered")
+    T.assert_eq(game.selected_deck_id, "b_bk_filtered")
+    T.assert_eq(game:get_effective_discards_per_round(), 4, "base 3 + the deck's +1 discard")
+    T.assert_eq(game._deck_ante_scale, 2)
+    T.assert_eq(game:get_base_requirement_for_ante(1), base_req * 2, "ante_scale doubles the requirement")
+    T.assert_eq(#game.bk_seen, 1, "apply fired exactly once")
+    T.assert_eq(game.bk_seen[1].id, "b_bk_filtered")
+    T.assert_eq(game.bk_seen[1].sleeve, false)
+    T.assert_eq(#game.deck.cards, 13, "the filter kept only the Hearts")
+    for _, c in ipairs(game.deck.cards) do
+        T.assert_eq(c.suit, "Hearts")
+    end
+    T.assert_eq(#game.jokers, 1, "the starter Joker was granted")
+    T.assert_eq(game.jokers[1].def.id, "j_bk_marker")
+end)
+
+suite.test("backs: a registered deck merges as a sleeve under the Wave-2 rules", function()
+    local game = install_backs()
+    game:apply_deck_config("b_red", "b_bk_filtered")
+    T.assert_eq(game.selected_deck_id, "b_red")
+    T.assert_eq(game.selected_sleeve_id, "b_bk_filtered")
+    T.assert_eq(game:get_effective_discards_per_round(), 5, "red's +1 and the sleeve's +1 add")
+    T.assert_eq(game._deck_ante_scale, 2, "the sleeve's ante_scale applies")
+    T.assert_eq(#game.bk_seen, 1)
+    T.assert_eq(game.bk_seen[1].sleeve, true, "the hook hears it is the sleeve")
+    T.assert_eq(#game.deck.cards, 13, "the sleeve's filter still runs")
+end)
+
+suite.test("backs: snapshot restore reapplies modifiers but never refires apply", function()
+    local game = install_backs()
+    game:apply_deck_config("b_bk_filtered")
+    local discards = game:get_effective_discards_per_round()
+    local req = game:get_base_requirement_for_ante(1)
+    game:apply_deck_config("b_red")
+    T.assert_eq(game:get_effective_discards_per_round(), 4)
+    game:restore_run_deck_stake_from_snapshot({ selected_deck_id = "b_bk_filtered" })
+    T.assert_eq(game.selected_deck_id, "b_bk_filtered")
+    T.assert_eq(game:get_effective_discards_per_round(), discards, "modifiers restored")
+    T.assert_eq(game:get_base_requirement_for_ante(1), req, "ante scale restored")
+    T.assert_eq(#game.bk_seen, 1, "apply did not fire again on restore")
+end)
+
+suite.test("backs: unlock gates follow the vanilla passes", function()
+    local game = install_backs()
+    local unlocks = game:build_unlocks()
+    T.assert_eq(unlocks["b_bk_filtered"].unlocked, true, "unlocked = true starts open")
+    T.assert_eq(unlocks["b_bk_gated"].unlocked, false, "a gated deck starts shut")
+    T.assert_eq(unlocks["b_bk_winner"].unlocked, false)
+    game:apply_unlocks(unlocks)
+    T.assert_false(game:is_deck_unlocked("b_bk_gated"))
+    game.Discovered = { j_joker = true, j_greedy_joker = true }
+    game:refresh_discovery_deck_unlocks()
+    T.assert_true(game:is_deck_unlocked("b_bk_gated"), "discover_amount opens it")
+    T.assert_false(game:is_deck_unlocked("b_bk_winner"), "a win gate ignores discoveries")
+
+    local game2 = install_backs()
+    game2:apply_unlocks(game2:build_unlocks())
+    game2:apply_deck_config("b_red")
+    game2.selected_stake_id = "stake_white"
+    T.assert_true(game2:record_stake_victory())
+    T.assert_true(game2:is_deck_unlocked("b_bk_winner"), "a Red Deck win opens it")
+    T.assert_false(game2:is_deck_unlocked("b_bk_gated"), "a win does not open the discovery gate")
+end)
+
+suite.test("backs: rollback takes the decks out of every list", function()
+    install_backs()
+    T.assert_true(DECK_DEFS_BY_ID["b_bk_filtered"] ~= nil)
+    local vanilla_count = 0
+    for _, d in ipairs(DECK_DEFS) do if not d.smods_back then vanilla_count = vanilla_count + 1 end end
+    wipe_mods()
+    T.assert_eq(next(SMODS.Backs), nil, "the registry empties")
+    T.assert_eq(DECK_DEFS_BY_ID["b_bk_filtered"], nil)
+    T.assert_eq(#DECK_DEFS, vanilla_count, "the catalog is back to vanilla only")
+    for _, d in ipairs(DECK_SELECT_DEFS) do
+        T.assert_true(d.smods_back == nil, "no mod deck survives in the select list")
+    end
+end)
+
+suite.test("backs: blind target and debt limit seats", function()
+    local game = install_backs()
+    game.current_blind_target = 300
+    T.assert_eq(SMODS.adjust_blind_target(-120), 180)
+    T.assert_eq(game.current_blind_target, 180)
+    T.assert_eq(SMODS.adjust_blind_target(-999), 0, "the target floors at 0")
+    T.assert_eq(SMODS.adjust_blind_target(50), 50)
+
+    -- Debt: no Joker declares a limit, so the vanilla money rules hold.
+    game.money = 5
+    T.assert_eq(SMODS.debt_limit(game), 0)
+    T.assert_true(game:can_afford_price(5))
+    T.assert_false(game:can_afford_price(6))
+    T.assert_eq(game:get_money_loss_floor(), 0)
+    -- A held Joker whose ability declares debt_limit opens the floor.
+    game.jokers = game.jokers or {}
+    game.jokers[#game.jokers + 1] = { ability = { debt_limit = 100 } }
+    T.assert_eq(SMODS.debt_limit(game), 100)
+    T.assert_true(game:can_afford_price(105), "spending may reach -$100")
+    T.assert_false(game:can_afford_price(106))
+    T.assert_eq(game:get_money_loss_floor(), -100)
+end)
+
 return suite

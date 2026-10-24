@@ -756,6 +756,73 @@ no two mods may register the same one, and none may reuse a vanilla name
 - **Collection.** Registered packs list in the Boosters category after
   the vanilla packs, under the name and art of the registration.
 
+## Custom decks
+
+**`SMODS.Back { key, loc_txt, config, unlocked, unlock_condition, pos, sprite, apply, start_consumables, start_vouchers, omit }`**
+
+```lua
+SMODS.Back {
+    key = "hearts_only",
+    loc_txt = { name = "Hearts Only", text = { "Start with only {C:attention}Hearts{}" } },
+    config = { discards = 1 },
+    unlocked = true,
+    pos = { x = 5, y = 2 },
+    apply = function(game, back, is_sleeve)
+        for i = #game.deck.cards, 1, -1 do
+            if game.deck.cards[i].suit ~= "Hearts" then
+                table.remove(game.deck.cards, i)
+            end
+        end
+    end,
+}
+```
+
+A registered deck's id is `b_<prefix>_<key>`, the shape vanilla deck ids
+already have. It joins the deck catalog after the vanilla decks: the
+deck-select carousel (and the sleeve carousel) lists it, the collection
+shows it, and snapshots record it by id like any deck.
+
+- **`config`** is in the catalog's own terms: `hands`, `discards`,
+  `dollars`, `hand_size`, `joker_slots`, `consumable_slots`,
+  `extra_hand_bonus`, `extra_discard_bonus`, `no_interest`,
+  `spectral_rate`, and the deck rewrites `no_face_cards`, `suit_filter`
+  and `suit_split` (a run applies at most one rewrite: the primary
+  deck's, or the sleeve's when the primary has none). One term is this
+  port's own: `ante_scale`, a multiplier on the blind requirement
+  (Plasma's doubling is the vanilla precedent). Numbers merge the way
+  sleeves merge: modifiers add, `no_interest` ORs, `ante_scale`
+  multiplies.
+- **`apply(game, back, is_sleeve)`** fires once at run setup, after the
+  deck is built, any rewrite ran, and `start_consumables` /
+  `start_vouchers` were given. `game.deck.cards` holds the raw
+  `card_data` tables (`rank`, `suit`, `enhancement`, `seal`, `edition`),
+  so a deck that keeps only some cards, or stamps the rest, edits that
+  list; starters beyond the start lists go through `SMODS.add_card`.
+  Loading a saved run never refires it: restore reapplies the modifiers
+  only, like a vanilla deck.
+- **Unlocks.** `unlocked = true` starts open. Otherwise declare the
+  gate vanilla decks use: `unlock_condition = { type =
+  "discover_amount", amount = N }` opens at N discoveries, and
+  `{ type = "deck_win", deck_id = ..., stake_id = ... }` (either field
+  nil means any) opens on a run win. With neither, the deck starts
+  locked and nothing opens it.
+- **Art.** `pos` is the playing-card back the deck wears in a run: a
+  vanilla `centers` index, or `{ x, y }` in that atlas' 7-wide grid.
+  `sprite = "Name.png"` is a card-sized image in `assets/1x` the deck
+  carousel draws instead of the atlas back; a locked deck still shows
+  the locked back. In-run backs stay atlas backs either way.
+
+Two scoring/money seats registered decks and Jokers share:
+
+- **`SMODS.adjust_blind_target(delta)`** moves the current blind's
+  requirement by `delta` (negative lowers it), Big-aware and floored at
+  0, and returns the new target.
+- **`debt_limit`** in a Joker's `config` (so it lands on its ability):
+  while that Joker is held, the player may spend that far below $0. It
+  adds to the Credit Card's limit, and the money-loss floor drops with
+  it. Vanilla Jokers never declare it, so a run without one plays by
+  the vanilla money rules.
+
 ## Card faces
 
 ```lua
@@ -791,7 +858,7 @@ For mod authors this means `calculate` runs during a dry run too. Run state is r
 
 ## What doesn't work (yet)
 
-- **No other content yet.** Decks and blinds can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals, editions, tags and booster packs can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types), [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions), [Custom tags](#custom-tags) and [Custom booster packs](#custom-booster-packs).) Vouchers have no `calculate`, and deck skins cover only the face cards.
+- **No other content yet.** Blinds can't be added. (Rarities, suits, poker hands, consumable types, enhancements, seals, editions, tags, booster packs and decks can: see [Custom rarities, suits, poker hands and consumable types](#custom-rarities-suits-poker-hands-and-consumable-types), [Custom enhancements, seals and editions](#custom-enhancements-seals-and-editions), [Custom tags](#custom-tags), [Custom booster packs](#custom-booster-packs) and [Custom decks](#custom-decks).) Vouchers have no `calculate`, and deck skins cover only the face cards.
 - **No `G.GAME`, `G.jokers.cards`, `G.E_MANAGER`, `SMODS.destroy_cards` (the one-card `SMODS.destroy_card` above exists), `SMODS.calculate_effect`, hooks into `Game:init_game_object`, or `reset_game_globals`.** The port's game state is laid out differently. Code that touches these raises a runtime error. The error is caught: that Joker does nothing for that call, and the error appears on the Mods screen and in `mods_log.txt`.
 - **No shaders.** Foil, Holographic and Polychrome mod Jokers are drawn with the port's own additive texture passes, like vanilla Jokers. Negative needs its own art (see [Negative art](#negative-art)).
 - **`yes_pool_flag`, `no_pool_flag` and `info_queue` are ignored.** `in_pool` returns only whether the Joker can roll; a second `allow_duplicates` return is ignored.

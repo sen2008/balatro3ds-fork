@@ -320,6 +320,7 @@ function Game:reset_deck_modifiers()
     self._deck_no_interest = false
     self.deck_joker_slots = 0
     self.deck_spectral_rate = 0
+    self._deck_ante_scale = 1
     self._deck_special = nil
     self._deck_special_sleeve = nil
     self.selected_sleeve_id = nil
@@ -341,6 +342,13 @@ function Game:merge_deck_modifiers(def, is_sleeve)
     self._deck_no_interest = self._deck_no_interest or cfg.no_interest == true
     self.deck_joker_slots = self.deck_joker_slots + (tonumber(cfg.joker_slots) or 0)
     self.deck_spectral_rate = self.deck_spectral_rate + (tonumber(cfg.spectral_rate) or 0)
+    -- `ante_scale` (a registered deck's blind-requirement multiplier) merges
+    -- multiplicatively, the way the numeric fields merge additively. Vanilla
+    -- decks never set it, so the product stays 1.
+    local ante_scale = tonumber(cfg.ante_scale) or 1
+    if ante_scale ~= 1 then
+        self._deck_ante_scale = (tonumber(self._deck_ante_scale) or 1) * ante_scale
+    end
     if def.special then
         if is_sleeve then
             if self._deck_special ~= def.special then
@@ -446,6 +454,18 @@ function Game:apply_deck_config(deck_id, sleeve_id)
 
     if self.refresh_playing_card_backs then
         self:refresh_playing_card_backs()
+    end
+
+    -- A registered deck's own run-start work (SMODS.Back `apply`): once, here,
+    -- with the deck built, transformed and stocked. The restore path never
+    -- comes through apply_deck_config, so the hook cannot fire twice for one
+    -- run. Sleeves get the hook too, after the primary's.
+    if SMODS and SMODS.call then
+        for _, d in ipairs({ def, sleeve }) do
+            if d and d.smods_back and type(d.smods_back.apply) == "function" then
+                SMODS.call(d.smods_back.mod, d.smods_back.apply, self, d.smods_back, d == sleeve)
+            end
+        end
     end
 end
 

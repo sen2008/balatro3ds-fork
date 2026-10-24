@@ -3397,6 +3397,151 @@ function SMODS.booster_profile_entries()
 end
 
 --------------------------------------------------------------------------------
+-- Backs (decks)
+--------------------------------------------------------------------------------
+
+SMODS.Backs = SMODS.Backs or {}
+
+local next_back_order = 100
+
+--- `SMODS.Back { key, loc_txt, config, unlocked, unlock_condition, pos, sprite,
+--- apply, start_consumables, start_vouchers, omit }`: a deck of this mod's own.
+--- Its id is `b_<prefix>_<key>`, the shape vanilla deck ids already have, and it
+--- joins `DECK_DEFS` (and the deck-select carousel, unless `omit`) after the
+--- vanilla decks, so run start, sleeves, unlocks, snapshots and the collection
+--- treat it exactly like a vanilla deck.
+---
+--- `config` is in deck terms (`hands`, `discards`, `dollars`, `hand_size`,
+--- `joker_slots`, `consumable_slots`, `extra_hand_bonus`,
+--- `extra_discard_bonus`, `no_interest`, `spectral_rate`, `no_face_cards`,
+--- `suit_filter`, `suit_split`, plus one this port adds: `ante_scale`, a
+--- multiplier on the blind requirement, merged multiplicatively like the rest
+--- merge additively). `apply(game, back, is_sleeve)` fires once at run setup,
+--- after the deck is built and any transform ran and start items were given,
+--- with the deck in `game.deck.cards` (raw card_data tables): a deck that
+--- filters or rewrites its cards, or grants starters beyond
+--- `start_consumables` / `start_vouchers`, does it there.
+---
+--- Unlocks follow the vanilla gates: `unlocked = true` starts open;
+--- `unlock_condition = { type = "discover_amount", amount = N }` opens at N
+--- discoveries and `{ type = "deck_win", deck_id = ..., stake_id = ... }`
+--- (either field nil = any) opens on a run win, both evaluated by the same
+--- passes that open vanilla decks. With neither, the deck starts locked the
+--- way most vanilla decks do.
+---
+--- `pos` is the playing-card back: a vanilla `centers` index, or `{ x, y }`
+--- in that atlas' 7-wide grid. `sprite = "Name.png"` (a card-sized image in
+--- assets/1x) is what the deck carousel draws instead when present; in-run
+--- card backs stay atlas backs, as a `pos` deck's do.
+function SMODS.Back(t)
+    local mod = need_mod("SMODS.Back")
+    check(type(t) == "table", "SMODS.Back expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
+        "SMODS.Back needs a 'key' of letters, digits and underscores")
+    check(DECK_DEFS and DECK_DEFS_BY_ID and DECK_SELECT_DEFS,
+        "SMODS.Back: the deck catalog is not loaded yet")
+    check(t.apply == nil or type(t.apply) == "function",
+        "Back '" .. t.key .. "': apply must be a function")
+    check(t.unlock_condition == nil or type(t.unlock_condition) == "table",
+        "Back '" .. t.key .. "': unlock_condition must be a table")
+    local id = "b_" .. mod.prefix .. "_" .. t.key
+    check(SMODS.Backs[id] == nil and DECK_DEFS_BY_ID[id] == nil,
+        "Back '" .. t.key .. "' is defined twice (id " .. id .. ")")
+
+    local pos = 0
+    if type(t.pos) == "table" then
+        pos = (math.floor(tonumber(t.pos.y) or 0)) * 7 + math.floor(tonumber(t.pos.x) or 0)
+    elseif t.pos ~= nil then
+        pos = math.floor(tonumber(t.pos) or 0)
+    end
+
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local name = tostring(loc.name or t.name or t.key)
+    local description = nil
+    if type(loc.text) == "table" then
+        local lines = {}
+        for _, line in ipairs(loc.text) do
+            lines[#lines + 1] = (tostring(line):gsub("{[^}]*}", ""))
+        end
+        description = table.concat(lines, " ")
+    end
+
+    local entry = {
+        id = id, key = t.key, mod = mod,
+        name = name,
+        config = deep_copy(type(t.config) == "table" and t.config or {}),
+        apply = t.apply,
+        unlock_condition = deep_copy(t.unlock_condition),
+        loc_txt = t.loc_txt,
+        order = next_back_order,
+    }
+    next_back_order = next_back_order + 1
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(mod, t.sprite, "Back", t.key, "sprite")
+    end
+
+    local def = {
+        id = id,
+        name = name,
+        order = entry.order,
+        pos = pos,
+        unlocked = t.unlocked == true,
+        stake = 1,
+        unlock_condition = entry.unlock_condition,
+        config = entry.config,
+        description = description,
+        omit = t.omit == true or nil,
+        smods_back = entry,
+        back_starts_unlocked = t.unlocked == true or nil,
+        mod_sprite = entry.sprite,
+    }
+    if type(t.start_consumables) == "table" then
+        def.start_consumables = deep_copy(t.start_consumables)
+    end
+    if type(t.start_vouchers) == "table" then
+        def.start_vouchers = deep_copy(t.start_vouchers)
+    end
+    DECK_DEFS[#DECK_DEFS + 1] = def
+    DECK_DEFS_BY_ID[id] = def
+    if def.omit ~= true then DECK_SELECT_DEFS[#DECK_SELECT_DEFS + 1] = def end
+
+    SMODS.Backs[id] = entry
+    mod.registered.backs = mod.registered.backs or {}
+    mod.registered.backs[#mod.registered.backs + 1] = id
+    register_center_strings(mod, "deck", id, t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    return t
+end
+
+--- Move the current blind's target by `delta` (negative lowers it), Big-aware
+--- and floored at 0. Returns the new target. The seat `SMODS.Back` decks and
+--- target-shrinking Jokers share; without a live blind it changes nothing.
+function SMODS.adjust_blind_target(delta)
+    if not (G and G.adjust_blind_target) then return nil end
+    return G:adjust_blind_target(delta)
+end
+
+--- How far below $0 held mod Jokers let the player spend, in dollars: the sum
+--- of `debt_limit` over the abilities of the Jokers currently held. Vanilla
+--- Jokers never carry the field (the Credit Card's limit is the game's own),
+--- so with no mod Joker declaring one this is 0 and every affordability rule
+--- is exactly vanilla's. `Game:can_afford_price` and
+--- `Game:get_money_loss_floor` add it to the Credit Card's limit.
+function SMODS.debt_limit(game)
+    local total = 0
+    if game and type(game.jokers) == "table" then
+        for _, j in ipairs(game.jokers) do
+            if type(j) == "table" and type(j.ability) == "table" then
+                total = total + (tonumber(j.ability.debt_limit) or 0)
+            end
+        end
+    end
+    return total
+end
+
+--------------------------------------------------------------------------------
 -- Rollback
 --------------------------------------------------------------------------------
 
@@ -3444,6 +3589,18 @@ function SMODS.rollback(mod)
         SMODS.Boosters[id] = nil
     end
     mod.registered.boosters = {}
+    for _, id in ipairs(mod.registered.backs or {}) do
+        SMODS.Backs[id] = nil
+        if DECK_DEFS_BY_ID then DECK_DEFS_BY_ID[id] = nil end
+        for _, list in ipairs({ DECK_DEFS, DECK_SELECT_DEFS }) do
+            if type(list) == "table" then
+                for i = #list, 1, -1 do
+                    if list[i] and list[i].id == id then table.remove(list, i) end
+                end
+            end
+        end
+    end
+    mod.registered.backs = {}
     for _, id in ipairs(mod.registered.enhancements or {}) do
         local entry = SMODS.Enhancements[id]
         if entry then SMODS.EnhancementByValue[entry.value] = nil end

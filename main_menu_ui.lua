@@ -1093,6 +1093,31 @@ function MainMenuUI.draw_deck_carousel_sprite(game, def, x, y, w, h, p, unlocked
     end
     if unlocked == nil then unlocked = def and def.unlocked end
 
+    -- A registered deck (SMODS.Back) may carry its own art: draw it in place of
+    -- the atlas back, with the same fit-and-centre math. A locked deck still
+    -- shows the locked atlas back below, so this branch is unlocked-only, and
+    -- an image that will not load falls through to the atlas as well.
+    if unlocked and def and def.mod_sprite and SMODS and SMODS.image then
+        local img = SMODS.image(def.mod_sprite)
+        if img then
+            local iw, ih = img:getDimensions()
+            local scale = math.min((w - p) / iw, (h - p) / ih)
+            if scale > 1 then scale = 1 end
+            if scale < 0.45 then scale = 0.45 end
+            local draw_w = iw * scale
+            local draw_h = ih * scale
+            local dx = x + math.floor((w - draw_w) * 0.5 + 0.5)
+            local dy = y + math.floor((h - draw_h) * 0.5 + 0.5)
+            local juice = deck_juice_scale(game)
+            local state = game._deck_swap_juice
+            local jr = (state and state.juice and state.juice_r) or 0
+            love.graphics.setColor(1, 1, 1, 1)
+            love.graphics.draw(img, dx + draw_w * 0.5, dy + draw_h * 0.5,
+                jr, scale * juice, scale * juice, iw * 0.5, ih * 0.5)
+            return dx, dy, draw_w, draw_h
+        end
+    end
+
     if atlas and atlas.image then
         local index = tonumber(def and def.pos) or 0
         if not unlocked then

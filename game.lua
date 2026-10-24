@@ -1269,6 +1269,19 @@ function Game:_boss_disable_reduce_target(boss_id)
     self.current_blind_target = Totals.floor(Big.div_values(Totals.read(self.current_blind_target, 0), div))
 end
 
+--- Move the current blind's target by `delta` (negative lowers it), the write
+--- seat behind `SMODS.adjust_blind_target`. Big-aware like every other write
+--- to the target, and floored at 0: a target cannot go negative. Returns the
+--- new target.
+function Game:adjust_blind_target(delta)
+    delta = tonumber(delta) or 0
+    if delta == 0 then return Totals.read(self.current_blind_target, 0) end
+    local next_target = Big.add_values(Totals.read(self.current_blind_target, 0), delta)
+    if Totals.cmp(next_target, 0) < 0 then next_target = 0 end
+    self.current_blind_target = Totals.floor(next_target)
+    return Totals.read(self.current_blind_target, 0)
+end
+
 --- Disable the live boss mid-round and undo what it already did, as the reference's
 --- `Blind:disable` does: Jokers turned back up, The Water's discards and The Needle's hands
 --- returned, cards The House, The Wheel, The Fish or The Mark dealt face down turned over, and
@@ -2159,7 +2172,7 @@ function Game:build_unlocks()
             id = d.id,
             name = d.name,
             stakes = {},
-            unlocked = d.id == "b_red",
+            unlocked = d.id == "b_red" or d.back_starts_unlocked == true,
         }
         for _, s in ipairs(STAKE_DEFS or {}) do
             deck_entry.stakes[s.id] = {
@@ -2413,6 +2426,17 @@ function Game:refresh_discovery_deck_unlocks()
         if count >= required then
             local deck = self.unlocks[deck_id]
             if deck then deck.unlocked = true end
+        end
+    end
+    -- Registered decks (SMODS.Back) gate on the same count through their own
+    -- declared condition; vanilla entries carry no `smods_back`, so this loop
+    -- is inert without a mod deck.
+    for _, d in ipairs(DECK_DEFS or {}) do
+        local cond = d.smods_back and d.unlock_condition
+        if type(cond) == "table" and cond.type == "discover_amount"
+            and count >= (tonumber(cond.amount) or 0) then
+            local entry = self.unlocks[d.id]
+            if entry then entry.unlocked = true end
         end
     end
     for _, d in ipairs(DECK_DEFS or {}) do
@@ -2906,6 +2930,21 @@ function Game:record_stake_victory()
         self.unlocks["b_plasma"].unlocked = true
     elseif stake.id == "stake_orange" then
         self.unlocks["b_erratic"].unlocked = true
+    end
+
+    -- Registered decks (SMODS.Back) with a deck_win condition: either field
+    -- nil means "any", so `{ type = "deck_win" }` opens on any run win.
+    -- Vanilla entries carry no `smods_back`; the loop is inert without mods.
+    for _, d in ipairs(DECK_DEFS or {}) do
+        local cond = d.smods_back and d.unlock_condition
+        if type(cond) == "table" and cond.type == "deck_win" then
+            local deck_ok = cond.deck_id == nil or cond.deck_id == deck_id
+            local stake_ok = cond.stake_id == nil or cond.stake_id == stake_id
+            if deck_ok and stake_ok then
+                local entry = self.unlocks[d.id]
+                if entry then entry.unlocked = true end
+            end
+        end
     end
 
     self:apply_unlocks(self.unlocks)
@@ -5931,6 +5970,11 @@ function Game:get_base_requirement_for_ante(ante)
     if self:deck_special_active("plasma") then
         deckMult = 2
     end
+    -- A deck's declared ante scale (SMODS.Back `config.ante_scale`, merged by
+    -- deck_catalog): 1 unless a registered deck set one, so vanilla runs are
+    -- untouched.
+    local ante_scale = tonumber(self._deck_ante_scale) or 1
+    if ante_scale ~= 1 then deckMult = deckMult * ante_scale end
     local table_ante = requested_ante + (max_ante + 1) * stake_offset
     if base_table[table_ante] and requested_ante <= max_ante then
         return tonumber(base_table[table_ante] * deckMult) or 0
@@ -11408,8 +11452,12 @@ function Game:can_afford_price(cost)
         return true
     end
     local m = tonumber(self.money) or 0
-    if self:has_credit_card() then
-        local lim = self:get_credit_card_debt_limit()
+    -- A held mod Joker may declare its own debt limit (`SMODS.debt_limit`); it
+    -- adds to the Credit Card's. With neither, the limit is 0 and the branches
+    -- below are exactly the vanilla ones.
+    local lim = (self:has_credit_card() and self:get_credit_card_debt_limit() or 0)
+        + ((SMODS and SMODS.debt_limit and SMODS.debt_limit(self)) or 0)
+    if lim > 0 then
         return (m - cost) >= -lim
     end
     if m < 0 then
@@ -11420,10 +11468,9 @@ end
 
 --- Floor for money when losing it to bosses etc. (-debt_limit with Credit Card, else 0).
 function Game:get_money_loss_floor()
-    if self:has_credit_card() then
-        return -self:get_credit_card_debt_limit()
-    end
-    return 0
+    local lim = (self:has_credit_card() and self:get_credit_card_debt_limit() or 0)
+        + ((SMODS and SMODS.debt_limit and SMODS.debt_limit(self)) or 0)
+    return -lim
 end
 
 ---@param joker_id string
