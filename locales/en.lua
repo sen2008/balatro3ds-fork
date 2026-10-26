@@ -332,6 +332,8 @@ return {
     ["mods.turn_on"] = "Turn on {id}",
     ["mods.mismatch_fixed"] = "Mods now match the saved run. Go back to continue it.",
     ["mods.turned_off"] = "Turned off",
+    ["mods.turned_off_next_boot"] = "Turned off (applies next boot)",
+    ["mods.loads_next_boot"] = "Loads at next boot",
     ["mods.on"] = "ON",
     ["mods.off"] = "OFF",
     ["mods.switch_hint"] = "Up/Down: choose   A: turn on/off",

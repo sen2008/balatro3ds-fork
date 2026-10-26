@@ -22,7 +22,13 @@ mods/
         └── ...
 ```
 
-**Options → Mods** in the game lists every mod, whether it loaded, and any errors. Each mod has an **ON/OFF** switch: tap its row, or pick it with Up/Down and press A. The change takes effect at once, with no restart. A mod that is turned off doesn't run at all, and mods that depend on it don't load either. The ids of the mods that are off are kept in `mods/disabled.txt`, one per line, which you can also edit by hand.
+**Options → Mods** in the game lists every mod, whether it loaded, and any errors. Each mod has an **ON/OFF** switch: tap its row, or pick it with Up/Down and press A. The ids of the mods that are off are kept in `mods/disabled.txt`, one per line, which you can also edit by hand.
+
+**Turning a mod ON loads it into the running session at once, with no restart.** Its main file runs exactly as it does at boot (same environment, same rollback if it fails, the error on its row and in `mods_log.txt`), then the collection and the game's hand/rarity/suit tables are refreshed, so its cards can roll and be browsed straight away. Anything it depends on loads first, in dependency order; a dependency that is turned off or not installed refuses the load with that reason, the same as at boot. Turning a mod on also retries mods that failed only because it was missing. A mod that failed to load can be retried the same way: fix its files, then switch it off and on.
+
+**Turning a mod OFF only records the choice.** A loaded mod is never unloaded mid-session (its cards may be anywhere), so its content keeps working until the end of the session and it stops loading from the next boot on; its row says "applies next boot". From that next boot it doesn't run at all, and mods that depend on it don't load either.
+
+**Mod switches never load anything while a run is in progress.** The Mods page is reached from the main menu, but if a switch is flipped while a run is in memory, turning a mod on only queues the choice (its row reads "Loads at next boot") and the mod loads when the game next starts.
 
 ## Manifest
 
@@ -1068,4 +1074,4 @@ For mod authors this means `calculate` runs during a dry run too. Run state is r
 
 - **Load errors:** a mod that fails to load (bad manifest, missing dependency, an error in its main file) is undone completely and listed on the Mods screen with the reason. Other mods still load.
 - **Runtime errors:** errors inside `calculate`, `loc_vars`, `can_use`, `use` or `redeem` are caught and listed. The game keeps running.
-- **Log:** `mods_log.txt` is rewritten at every boot and on every runtime error, so it is always up to date when you read it off the SD card.
+- **Log:** `mods_log.txt` is rewritten at every boot, on every mod switch, and on every runtime error, so it is always up to date when you read it off the SD card.

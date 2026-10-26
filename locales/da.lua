@@ -331,6 +331,8 @@ return {
     ["mods.turn_on"] = "Deaktiver {id}",
     ["mods.mismatch_fixed"] = "Mods matcher nu det gemte spil. Gå tilbage for at fortsætte det.",
     ["mods.turned_off"] = "Deaktiveret",
+    ["mods.turned_off_next_boot"] = "Deaktiveret (gælder fra næste start)",
+    ["mods.loads_next_boot"] = "Indlæses ved næste start",
     ["mods.on"] = "AKTIV",
     ["mods.off"] = "INAKTIV",
     ["mods.switch_hint"] = "Op/Ned: Vælg   A: Aktiver/Deaktiver",

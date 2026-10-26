@@ -17,6 +17,10 @@
 ---
 --- The player turns mods off and on in Options > Mods. The ids of the ones turned off are kept in
 --- `mods/disabled.txt`, one per line, so the list survives a reboot and can be edited off the card.
+---
+--- Turning a mod ON loads it into the running session there and then (`load_mod`), as long as no
+--- run is in memory; turning it OFF only records the choice -- a loaded mod's content is never
+--- pulled out mid-session, so it stops loading from the next boot on. See `set_enabled`.
 
 local Json = require("json")
 require("smods")
@@ -28,8 +32,9 @@ ModLoader.LOG_PATH = "sdmc/mods/mods_log.txt"
 ModLoader.DISABLED_PATH = "sdmc/mods/disabled.txt"
 
 --- Every mod found, in load order. Each: `{ id, name, version, prefix, author, description,
---- path, main_file, dependencies, status = "loaded"|"error"|"disabled", error, runtime_errors,
---- registered = { jokers, consumables, vouchers, sprites } }`.
+--- path, main_file, dependencies, status = "loaded"|"error"|"disabled"|"pending", error,
+--- runtime_errors, registered = { jokers, consumables, vouchers, sprites } }`. "pending" is
+--- a mod the player turned on during a run: queued, it loads at the next boot.
 ModLoader.mods = {}
 ModLoader.by_id = {}
 --- The ids the player has turned off, as a set. Read from `DISABLED_PATH` by `load_all`.
@@ -143,6 +148,10 @@ local function run_mod(mod)
     end
     mod.status = "loaded"
     mod.error = nil
+    -- The mod's registrations are in the game now. They stay there until the next boot's
+    -- reload, even if the player turns the mod off in the meantime: `set_enabled` never
+    -- unloads, so this flag is what tells it (and `load_mod`) the content is still live.
+    mod._live = true
     return mod
 end
 
@@ -181,14 +190,158 @@ function ModLoader.is_enabled(mod)
     return type(mod) == "table" and not ModLoader.disabled[mod.id]
 end
 
---- Turn a mod on or off, save the choice, and reload every mod so it takes effect now. Only
---- safe with no run in memory: the Mods screen is reached from the main menu alone.
+--- What has to happen once the registries change, so content registered a moment ago is
+--- reachable in a session that is already running: the collection rebuilds its cached
+--- entries, and a game that already exists folds the new rarities, suits and poker hands
+--- into its own tables. That second step is `SMODS.install_into_game`, the same call the
+--- Game constructor makes at boot; it is idempotent, and the shop and selection pools
+--- need nothing at all -- they read the registries as they roll, behind caches keyed by
+--- the registered ids themselves. At boot no game exists yet, so only the collection
+--- step runs, exactly as before.
+function ModLoader.refresh_after_load()
+    local ok, catalog = pcall(require, "collection_catalog")
+    if ok and type(catalog) == "table" and catalog.invalidate_cache then catalog.invalidate_cache() end
+    local game = G
+    if type(game) == "table" and SMODS and SMODS.install_into_game then
+        SMODS.install_into_game(game)
+    end
+end
+
+--- Whether a mod may be loaded into the running session. Loading registers content and
+--- refreshes the pools and collection around it, which is only safe while no run is in
+--- memory. The game's own lifecycle field says where we are: `STAGE` is MAIN_MENU at the
+--- title and RUN from a run's start until the menu is re-entered -- the same field the
+--- game's own "not in run" guards read. Before the game exists (boot, tests) there is
+--- no run to disturb. The Mods page is only reachable from the main menu today, so this
+--- fence is what keeps the API honest if a path to it ever opens mid-run: there the
+--- switch still records the choice, and the mod loads at the next boot instead.
+function ModLoader.hot_load_allowed()
+    local game = G
+    if type(game) ~= "table" then return true end
+    if type(game.STAGES) ~= "table" or game.STAGE == nil then return true end
+    return game.STAGE == game.STAGES.MAIN_MENU
+end
+
+--- Run one mod and everything it depends on, dependencies first. The failure messages are
+--- the boot pass's (`check_dependencies` says the same words there): a dependency that is
+--- turned off or not installed refuses the load, one that will not run is retried here
+--- and, if it still fails, refuses with "failed to load".
+--- @return boolean loaded
+local function load_with_dependencies(mod, visiting)
+    if mod.status == "loaded" then return true end
+    if not mod.main_file then return false end -- no readable manifest: its error already says why
+    if visiting[mod.id] then
+        fail(mod, "dependency cycle")
+        return false
+    end
+    visiting[mod.id] = true
+    for _, dep in ipairs(mod.dependencies or {}) do
+        local id = dependency_id(dep)
+        if id and id:lower() ~= "steamodded" then
+            local other = ModLoader.by_id[id]
+            if not other then
+                visiting[mod.id] = nil
+                fail(mod, "needs mod '" .. id .. "', which is not installed")
+                return false
+            elseif other.status == "disabled" or ModLoader.disabled[id] then
+                visiting[mod.id] = nil
+                fail(mod, "needs mod '" .. id .. "', which is turned off")
+                return false
+            elseif other.status ~= "loaded" and not load_with_dependencies(other, visiting) then
+                visiting[mod.id] = nil
+                fail(mod, "needs mod '" .. id .. "', which failed to load")
+                return false
+            end
+        end
+    end
+    visiting[mod.id] = nil
+    run_mod(mod)
+    return mod.status == "loaded"
+end
+
+--- Load one scanned mod into the running session, on demand: the same environment,
+--- rollback and error capture as the boot pass (`run_mod`), then the post-load refresh
+--- the boot sequence performs, and the log is rewritten so the file shows the new state.
+--- A mod whose content is still registered from earlier in the session (it was turned
+--- off, which never unloads) is simply marked loaded again -- running it twice would
+--- register everything twice.
+--- @param target table|string the mod, or its id
 --- @return boolean ok
+--- @return string|nil problem when not ok
+function ModLoader.load_mod(target)
+    local mod = type(target) == "table" and target or ModLoader.by_id[target]
+    if type(mod) ~= "table" then return false, "no such mod" end
+    if mod.status == "loaded" then return true end
+    if ModLoader.disabled[mod.id] then
+        return false, "mod '" .. mod.id .. "' is turned off"
+    end
+    if ModLoader.by_id[mod.id] ~= mod then
+        return false, mod.error or ("another mod already uses the id '" .. mod.id .. "'")
+    end
+    if not ModLoader.can_toggle(mod) then
+        return false, mod.error or "no manifest"
+    end
+    if mod._live then
+        mod.status, mod.error = "loaded", nil
+        ModLoader.refresh_after_load()
+        ModLoader.write_log()
+        return true
+    end
+    local ok = load_with_dependencies(mod, {})
+    if ok then ModLoader.refresh_after_load() end
+    ModLoader.write_log()
+    return ok, ok and nil or mod.error
+end
+
+--- After a mod loads, give the mods that failed only because it was missing their chance:
+--- a dependant whose error names an absent or failed dependency is retried, in scan
+--- order, and keeps its (refreshed) error if it still cannot load. This is what the old
+--- reload-everything switch did for free; a single-mod load has to ask for it.
+local function retry_dependants()
+    for _, other in ipairs(ModLoader.mods) do
+        if other.status == "error" and not ModLoader.disabled[other.id]
+            and ModLoader.by_id[other.id] == other then
+            ModLoader.load_mod(other)
+        end
+    end
+end
+
+--- Turn a mod on or off and save the choice.
+---
+--- ON loads the mod into the session at once (`load_mod`: the mod, after anything it
+--- depends on), as long as no run is in memory (`hot_load_allowed`); inside a run the
+--- choice is queued instead -- the mod's status becomes "pending" and it loads at the
+--- next boot. A mod whose content never left the session (turned off earlier, see
+--- below) is marked loaded again without being re-run.
+---
+--- OFF only records the choice. A loaded mod is never unloaded mid-session -- its cards
+--- may sit in a collection, a save's history, anywhere -- so its status becomes
+--- "disabled" (which is what the saved-run check and the log read) while its content
+--- stays registered and working until the next boot, from which it no longer loads.
+--- @return boolean ok (the choice was saved)
 function ModLoader.set_enabled(id, enabled)
     if type(id) ~= "string" then return false end
     ModLoader.disabled[id] = (not enabled) or nil
     local saved = write_disabled()
-    ModLoader.load_all()
+    local mod = ModLoader.by_id[id]
+    if mod then
+        if enabled then
+            if mod.status ~= "loaded" then
+                if ModLoader.hot_load_allowed() then
+                    if ModLoader.load_mod(mod) then retry_dependants() end
+                elseif mod._live then
+                    -- Already in the session; only the recorded choice was holding it back.
+                    mod.status, mod.error = "loaded", nil
+                elseif mod.status == "disabled" then
+                    -- Queued for the next boot: no longer off, not loaded yet.
+                    mod.status, mod.error = "pending", nil
+                end
+            end
+        else
+            mod.status, mod.error = "disabled", nil
+        end
+        ModLoader.write_log()
+    end
     return saved
 end
 
@@ -266,8 +419,7 @@ function ModLoader.load_all()
     end
 
     -- The collection caches its entries; mod Jokers have to be in them.
-    local ok, catalog = pcall(require, "collection_catalog")
-    if ok and type(catalog) == "table" and catalog.invalidate_cache then catalog.invalidate_cache() end
+    ModLoader.refresh_after_load()
     ModLoader.write_log()
     return ModLoader.mods
 end
@@ -349,10 +501,12 @@ local function log_lines()
     local lines = { "Balatro3DS mods -- " .. ModLoader.DIR, "" }
     if #ModLoader.mods == 0 then lines[#lines + 1] = "No mods installed." end
     for _, mod in ipairs(ModLoader.mods) do
-        local tag = ({ loaded = "OK", disabled = "OFF" })[mod.status] or "ERROR"
+        local tag = ({ loaded = "OK", disabled = "OFF", pending = "PENDING" })[mod.status] or "ERROR"
         lines[#lines + 1] = ("[%s] %s %s (%s)"):format(tag, mod.id, mod.version, mod.folder)
         if mod.status == "disabled" then
             lines[#lines + 1] = "    turned off in Options > Mods (" .. ModLoader.DISABLED_PATH .. ")"
+        elseif mod.status == "pending" then
+            lines[#lines + 1] = "    turned on during a run; loads at the next boot"
         elseif mod.status == "loaded" then
             lines[#lines + 1] = ("    %d joker(s), %d consumable(s), %d voucher(s), %d deck skin(s), %d image(s)"):format(
                 #mod.registered.jokers, #mod.registered.consumables, #mod.registered.vouchers,

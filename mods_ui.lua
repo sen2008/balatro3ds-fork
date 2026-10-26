@@ -8,8 +8,10 @@
 ---
 --- The page is one scrolling column of wrapped lines, because a load error is free text of any
 --- length and a 320 px screen will not fit a table of them. Each mod's name line carries its
---- switch. A switch takes effect at once (`ModLoader.set_enabled` reloads every mod): the page
---- is only reachable from the main menu, so no run is in memory to be pulled out from under.
+--- switch. Turning a mod on loads it into the session at once (`ModLoader.load_mod`, after
+--- anything it depends on); turning one off only records the choice -- its content stays in
+--- the session and stops loading from the next boot, which the row says. The page is only
+--- reachable from the main menu, so no run is in memory when a load happens.
 
 local ModLoader = require("mod_loader")
 
@@ -77,12 +79,13 @@ function ModsUI.lines(game)
     for _, mod in ipairs(mods) do
         local ok = mod.status == "loaded"
         local off = mod.status == "disabled"
+        local queued = mod.status == "pending"
         out[#out + 1] = { ("%s  v%s"):format(mod.name or mod.id, mod.version or "?"),
-            ok and "GREEN" or (off and "GREY" or "RED"), font = "medium",
+            ok and "GREEN" or ((off or queued) and "GREY" or "RED"), font = "medium",
             mod = ModLoader.can_toggle(mod) and mod or nil }
-        if off then
-            out[#out + 1] = { I18N.text("mods.turned_off", nil, "Turned off"), "GREY" }
-        elseif ok then
+        if ok or (off and mod._live) then
+            -- A mod turned off this session is still in the game until the next boot, so
+            -- what it adds is shown the same way; the line under it says it is going.
             local reg = mod.registered or {}
             local parts = {}
             for _, kind in ipairs({ { "jokers", "Joker" }, { "consumables", "Consumable" }, { "vouchers", "Voucher" }, { "deck_skins", "Card Art Set" } }) do
@@ -95,7 +98,14 @@ function ModsUI.lines(game)
             if #parts == 0 then parts[1] = I18N.text("mods.nothing_added", nil, "Nothing added") end
             out[#out + 1] = { table.concat(parts, I18N.text("common.list_separator", nil, ", ")) .. ((mod.author ~= nil and mod.author ~= "")
                 and I18N.text("mods.by", { author = mod.author }, "  -  by " .. mod.author) or ""), "GREY" }
-        else
+        end
+        if off then
+            out[#out + 1] = { mod._live
+                and I18N.text("mods.turned_off_next_boot", nil, "Turned off (applies next boot)")
+                or I18N.text("mods.turned_off", nil, "Turned off"), "GREY" }
+        elseif queued then
+            out[#out + 1] = { I18N.text("mods.loads_next_boot", nil, "Loads at next boot"), "GREY" }
+        elseif not ok then
             out[#out + 1] = { I18N.text("mods.not_loaded", nil, "Not loaded: ") .. tostring(mod.error), "RED" }
         end
         for _, err in ipairs(mod.runtime_errors or {}) do
@@ -165,8 +175,9 @@ local function scroll_to_focus(game)
     game._mods_scroll = math.min(top, max_scroll(rows))
 end
 
---- Flip one mod's switch. Every mod reloads, so `ModLoader.mods` holds new tables afterwards;
---- focus is an index into a list sorted by id, which the reload leaves in the same order.
+--- Flip one mod's switch: on loads the mod into the session now, off records the choice for
+--- the next boot (`ModLoader.set_enabled`). The mod tables are the scan's own and stay put,
+--- so the focus index keeps meaning the same mod.
 function ModsUI.toggle(game, mod)
     if not ModLoader.can_toggle(mod) then return false end
     ModLoader.set_enabled(mod.id, not ModLoader.is_enabled(mod))

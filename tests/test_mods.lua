@@ -654,16 +654,23 @@ suite.test("a mod turned off does not load, stays off across boots, and comes ba
 
     ModLoader.set_enabled("Base", false)
     T.assert_eq(ModLoader.by_id.Base.status, "disabled")
-    T.assert_eq(JOKER_DEFS.j_base_j, nil, "a mod turned off takes its Jokers with it")
-    T.assert_eq(ModLoader.by_id.Addon.status, "error")
-    T.assert_true(ModLoader.by_id.Addon.error:find("turned off", 1, true) ~= nil, ModLoader.by_id.Addon.error)
-    T.assert_eq(#ModLoader.fingerprint(), 0, "neither is part of a run now")
+    -- Turning a mod off never unloads it mid-session: its Jokers stay registered and
+    -- working until the next boot, and a dependant that is already loaded is untouched.
+    -- What changes at once is the recorded choice, and with it the saved-run fingerprint.
+    T.assert_true(JOKER_DEFS.j_base_j ~= nil, "a mod turned off keeps its Jokers until the next boot")
+    T.assert_eq(ModLoader.by_id.Addon.status, "loaded")
+    T.assert_eq(#ModLoader.fingerprint(), 1, "only the dependant is part of a run now")
+    T.assert_eq(ModLoader.fingerprint()[1].id, "Addon")
     T.assert_true(love.filesystem.read(ModLoader.DISABLED_PATH):find("Base", 1, true) ~= nil)
 
-    -- A reboot reads the choice back.
+    -- A reboot reads the choice back: the mod does not load, and now its dependant
+    -- cannot either.
     ModLoader.disabled = {}
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.Base.status, "disabled")
+    T.assert_eq(JOKER_DEFS.j_base_j, nil, "after a reboot the turned-off mod is gone")
+    T.assert_eq(ModLoader.by_id.Addon.status, "error")
+    T.assert_true(ModLoader.by_id.Addon.error:find("turned off", 1, true) ~= nil, ModLoader.by_id.Addon.error)
     -- The prefix is free while it is off: only what registers under it reserves it.
     write_mod("Other", { id = "Other", prefix = "base", main_file = "main.lua", version = "1" }, "")
     ModLoader.load_all()

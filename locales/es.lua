@@ -332,6 +332,8 @@ return {
     ["mods.turn_on"] = "Activar {id}",
     ["mods.mismatch_fixed"] = "Los mods coinciden con la partida guardada. Vuelve para continuar.",
     ["mods.turned_off"] = "Desactivado",
+    ["mods.turned_off_next_boot"] = "Desactivado (se aplica al próximo inicio)",
+    ["mods.loads_next_boot"] = "Se carga al próximo inicio",
     ["mods.on"] = "ON",
     ["mods.off"] = "OFF",
     ["mods.switch_hint"] = "Arriba/Abajo: elegir   A: activar/desactivar",
