@@ -2032,8 +2032,33 @@ end
 --- registry first and spends no random draws -- so vanilla shop rolls,
 --- and their seeded sequences, are untouched.
 function Game:_fire_shop_joker_tag_moment(moment, offer)
-    if not (SMODS and SMODS.tag_moment) then return end
-    SMODS.tag_moment(self, moment, { card = offer })
+    if SMODS and SMODS.tag_moment then
+        SMODS.tag_moment(self, moment, { card = offer })
+    end
+    -- Wave 6: the same two moments are Joker contexts (`create_shop_card`
+    -- / `modify_shop_card`), so a held mod Joker can watch the shelf
+    -- being built the way PC lets it (MoreFluff's Gem Alert). The context
+    -- carries a plain view of the offer as `context.card` and the live
+    -- offer table as `context.offer`. Emitting spends no random draws,
+    -- and no vanilla Joker listens for these events.
+    if type(offer) ~= "table" then return end
+    local event_name = moment == "store_joker_create" and "on_store_joker_create"
+        or moment == "store_joker_modify" and "on_store_joker_modify" or nil
+    if event_name and not self._firing_shop_moment then
+        self._firing_shop_moment = true
+        local def = offer.id and JOKER_DEFS and JOKER_DEFS[offer.id] or nil
+        self:emit_joker_event(event_name, {
+            offer = offer,
+            offer_view = {
+                id = offer.id,
+                kind = offer.kind,
+                edition = offer.edition,
+                rarity = def and def.rarity or nil,
+                price = offer.price,
+            },
+        })
+        self._firing_shop_moment = nil
+    end
 end
 
 --- Keep the consumed tag visible for one last beat. The reference juices and dissolves the
@@ -5490,9 +5515,11 @@ function Game:build_run_snapshot()
         bosses_used_this_cycle = self:serialize_bosses_used_cycle(),
         _last_completed_blind_was_boss = self._last_completed_blind_was_boss == true,
         hand_size_delta_spectral = tonumber(self.hand_size_delta_spectral) or 0,
+        rare_mod = tonumber(self.rare_mod) or 1,
         last_consumable_use_id = self.last_consumable_use_id,
         consumable_usage = copy_table(self.consumable_usage or {}),
         hand_play_counts = copy_table(self.hand_play_counts or {}),
+        next_booster_bonus = copy_table(self.next_booster_bonus or {}),
         frozen_most_played_hand_index = self.frozen_most_played_hand_index,
         blind_hand_play_counts = copy_table(self.blind_hand_play_counts or {}),
         round_hands_played = tonumber(self.round_hands_played) or 0,
@@ -5692,9 +5719,11 @@ function Game:load_run_snapshot(snapshot)
     self:apply_bosses_used_cycle(snapshot.bosses_used_this_cycle)
     self._last_completed_blind_was_boss = snapshot._last_completed_blind_was_boss == true
     self.hand_size_delta_spectral = tonumber(snapshot.hand_size_delta_spectral) or 0
+    self.rare_mod = tonumber(snapshot.rare_mod) or 1
     self.last_consumable_use_id = snapshot.last_consumable_use_id
     self.consumable_usage = copy_table(snapshot.consumable_usage or {})
     self.hand_play_counts = copy_table(snapshot.hand_play_counts or {})
+    self.next_booster_bonus = copy_table(snapshot.next_booster_bonus or {})
     self.frozen_most_played_hand_index = tonumber(snapshot.frozen_most_played_hand_index) or nil
     self.blind_hand_play_counts = copy_table(snapshot.blind_hand_play_counts or {})
     self.round_hands_played = tonumber(snapshot.round_hands_played)
@@ -13060,6 +13089,22 @@ function Game:apply_voucher_tags_to_shop()
     end
 end
 
+--- Wave 6: top the voucher shelf up to its limit — one, plus any
+--- `voucher_limit_mod` declared by held mod Jokers / redeemed mod
+--- vouchers (Paperback's Everything Must Go). Fresh rolls exclude what
+--- is already shelved; with nothing declaring the modifier the limit is
+--- one and this never rolls.
+function Game:_top_up_shop_voucher_offers()
+    local limit = 1 + math.floor(SMODS and SMODS.modifier_total
+        and SMODS.modifier_total(self, "voucher_limit_mod") or 0)
+    if type(self.shop_voucher_offers) ~= "table" then self.shop_voucher_offers = {} end
+    while #self.shop_voucher_offers < limit do
+        local extra = self:_roll_one_shop_voucher_offer()
+        if not extra then break end
+        self.shop_voucher_offers[#self.shop_voucher_offers + 1] = extra
+    end
+end
+
 function Game:maybe_roll_shop_voucher_on_shop_enter()
     if self._last_completed_blind_was_boss == true then
         self.shop_voucher_bought_pending_boss = false
@@ -13069,6 +13114,7 @@ function Game:maybe_roll_shop_voucher_on_shop_enter()
             self.current_round_voucher_id = offer.id
             self.shop_voucher_offers[1] = offer
         end
+        self:_top_up_shop_voucher_offers()
         self:apply_voucher_tags_to_shop()
         self:sync_shop_voucher_nodes()
         return
@@ -13090,6 +13136,7 @@ function Game:maybe_roll_shop_voucher_on_shop_enter()
             self.shop_voucher_offers[1] = offer
         end
     end
+    self:_top_up_shop_voucher_offers()
     self:apply_voucher_tags_to_shop()
     self:sync_shop_voucher_nodes()
 end
@@ -13410,7 +13457,11 @@ end
 
 function Game:_generate_next_shop_queue_offer()
     local tw, pw = self:_shop_queue_tarot_planet_weights()
-    local sw = self.deck_spectral_rate or 0
+    -- Wave 6: a held mod Joker declaring `spectral_rate_mod` adds to the
+    -- deck's spectral rate (Paperback's Ouija Board, the Ghost Deck seat).
+    -- `SMODS.modifier_total` reads 0 while nothing declares it.
+    local sw = (self.deck_spectral_rate or 0)
+        + (SMODS and SMODS.modifier_total and SMODS.modifier_total(self, "spectral_rate_mod") or 0)
     -- Magic Trick adds four playing-card weights (reference game.lua:604).
     local cw = self:has_voucher("v_magic_trick") and 4 or 0
     local joker_weight = (self.challenge_modifiers and self.challenge_modifiers.no_shop_jokers == true) and 0 or 20
@@ -13486,16 +13537,27 @@ function Game:_pick_joker_id_shop_rarity_distribution(rand_int, append, picked_i
     local target_rar = tonumber(forced_rarity)
     if not target_rar then
         local rar_roll = self:random("rarity" .. ante .. append)
-        target_rar = 3
-        if rar_roll <= 0.7 then
-            target_rar = 1
-        elseif rar_roll <= 0.95 then
+        -- Wave 6: `game.rare_mod` (MoreFluff's Gem Alert seat, PC's
+        -- G.GAME.rare_mod) scales the Rare band, taken off the top of
+        -- the roll with Uncommon's band kept whole beneath it. At the
+        -- default 1 the partition is exactly vanilla's 70 / 25 / 5.
+        local rare_mod = tonumber(self.rare_mod) or 1
+        local rare_cut = math.min(0.7, math.max(0, 0.05 * rare_mod))
+        target_rar = 1
+        if rar_roll > 1 - rare_cut then
+            target_rar = 3
+        elseif rar_roll > 1 - rare_cut - 0.25 then
             target_rar = 2
         end
         -- Mod rarities (SMODS.Rarity) take their declared share of the roll; with
         -- none registered this returns the vanilla target and draws nothing extra.
         if SMODS and SMODS.shop_rarity_target then
             target_rar = SMODS.shop_rarity_target(self, ante, append, target_rar)
+        end
+        -- A held Doorhanger-style Joker rewrites a Common target before
+        -- the pool is picked (Bunco); draws nothing when none is held.
+        if SMODS and SMODS.replace_common_rarity then
+            target_rar = SMODS.replace_common_rarity(self, ante, append, target_rar)
         end
     end
     local pool = {}
@@ -13525,12 +13587,12 @@ function Game:_pick_joker_id_shop_rarity_distribution(rand_int, append, picked_i
     return "j_joker"
 end
 
-function Game:_roll_shop_queue_joker_offer(append, pack_area, picked_ids)
+function Game:_roll_shop_queue_joker_offer(append, pack_area, picked_ids, forced_rarity)
     if type(JOKER_DEFS) ~= "table" then return nil end
     append = append or "sho"
     local pick = self:_pick_joker_id_shop_rarity_distribution(function(lo, hi)
         return self:_shop_rand_int(lo, hi)
-    end, append, picked_ids)
+    end, append, picked_ids, forced_rarity)
     if not pick then return nil end
     local def = JOKER_DEFS[pick]
     local sticker_params = self:_build_joker_sticker_params(def, pack_area)
@@ -13699,26 +13761,59 @@ function Game:get_shop_offer_price(offer)
     if stored == 0 then return 0 end
 
     local k = offer.kind
+    -- Wave 6: a held mod Joker declaring `free_shop_purchases`
+    -- (Paperback's NormalJKR) makes every card and consumable on the
+    -- shelf free while it is held. Vouchers and boosters price through
+    -- their own getters and are excluded, as on PC. Note the shelf cache
+    -- keeps a price that reached $0 for the rest of the visit — the same
+    -- behaviour the Astronomer's free Planets already have here.
+    if SMODS and SMODS.modifier_total
+        and SMODS.modifier_total(self, "free_shop_purchases") > 0 then
+        return 0
+    end
+    local price
     if k == nil or k == "joker" then
         local def = JOKER_DEFS and JOKER_DEFS[offer.id]
-        return self:shop_price_for_joker_offer(def, offer.edition, offer.stickers)
+        price = self:shop_price_for_joker_offer(def, offer.edition, offer.stickers)
     elseif self:is_consumable_kind(k) then
         if self:hasJoker("j_astronomer") and k == "planet" then
             return 0
         end
         local def = CONSUMABLE_DEFS and CONSUMABLE_DEFS[offer.id]
-        return self:shop_price_for_consumable_offer(def, k)
+        price = self:shop_price_for_consumable_offer(def, k)
     elseif k == "playing_card" then
-        return self:apply_shop_discount_to_price(4)
+        price = self:apply_shop_discount_to_price(4)
+    else
+        price = stored
     end
-    return stored
+    -- An inserted offer may carry its own base price (Wave 6), and any
+    -- offer may carry a price factor (://DIVIDE's halving, Junk Mail's
+    -- markup): the override replaces the base before the factor, and the
+    -- factor applies last, over discounts and edition deltas alike.
+    if tonumber(offer.price_override) then
+        price = self:apply_shop_discount_to_price(tonumber(offer.price_override))
+    end
+    if tonumber(offer.price_fac) then
+        price = math.floor(price * tonumber(offer.price_fac) + 0.5)
+    end
+    return price
 end
 
 function Game:get_shop_booster_price(offer)
     if type(offer) ~= "table" then return 0 end
     local stored = tonumber(offer.price) or 0
     if stored == 0 then return 0 end
-    return self:_booster_offer_price(offer.pack, offer.size)
+    local price
+    if tonumber(offer.price_override) then
+        price = self:apply_shop_discount_to_price(
+            tonumber(offer.price_override) + (tonumber(self.inflation) or 0))
+    else
+        price = self:_booster_offer_price(offer.pack, offer.size)
+    end
+    if tonumber(offer.price_fac) then
+        price = math.floor(price * tonumber(offer.price_fac) + 0.5)
+    end
+    return price
 end
 
 function Game:get_shop_voucher_price(offer)
@@ -13727,7 +13822,11 @@ function Game:get_shop_voucher_price(offer)
     if stored == 0 then return 0 end
     local d = VOUCHER_DEFS and VOUCHER_DEFS[offer.id]
     local base = (tonumber(d and d.price) or 10) + (tonumber(self.inflation) or 0)
-    return self:apply_shop_discount_to_price(base)
+    local price = self:apply_shop_discount_to_price(base)
+    if tonumber(offer.price_fac) then
+        price = math.floor(price * tonumber(offer.price_fac) + 0.5)
+    end
+    return price
 end
 
 function Game:refresh_shop_prices()
@@ -13766,7 +13865,7 @@ function Game:extend_shop_offers_to_slot_count()
     end
 
     local allow_duplicates = self:hasJoker("j_ring_master")
-    local slots = math.max(1, math.floor(tonumber(self.shop_offer_slots) or 2))
+    local slots = self:effective_shop_offer_slots()
     local guard = 0
     local guard_limit = math.max(250, slots * 125)
     local seen_ids = {}
@@ -13928,13 +14027,24 @@ function Game:generate_joker_from_rarity(rarity)
     }
 end
 
+--- The shop's card-slot count for this visit: the base field (Overstock's
+--- seat, snapshot state) plus any `shop_size_mod` declared by held mod
+--- Jokers or redeemed mod vouchers (Wave 6, Paperback's Shopping Center).
+--- With nothing declaring it this is the base field exactly.
+function Game:effective_shop_offer_slots()
+    local base = math.max(1, math.floor(tonumber(self.shop_offer_slots) or 2))
+    local mod = SMODS and SMODS.modifier_total
+        and math.floor(SMODS.modifier_total(self, "shop_size_mod")) or 0
+    return math.max(1, base + mod)
+end
+
 function Game:roll_shop_offers()
     if type(self.shop_offer_queue) ~= "table" then
         self:init_shop_offer_queue()
     end
     self.shop_offers = {}
     local allow_duplicates = self:hasJoker("j_ring_master")
-    local slots = math.max(1, math.floor(tonumber(self.shop_offer_slots) or 2))
+    local slots = self:effective_shop_offer_slots()
     local guard = 0
     local guard_limit = math.max(250, slots * 125)
     local seen_ids = {}
@@ -14477,6 +14587,294 @@ function Game:buy_shop_booster(slot_index)
     return true
 end
 
+--------------------------------------------------------------------------------
+-- Wave 6 shop / voucher seats. The SMODS wrappers live in smods.lua; these
+-- are the game-side halves, written against the shelf's own shapes so an
+-- inserted offer buys, reprices and snapshot-restores exactly like a
+-- rolled one.
+--------------------------------------------------------------------------------
+
+--- Insert a booster offer onto the booster shelf (`SMODS.add_booster_to_shop`).
+--- The offer is built exactly as `roll_shop_boosters` builds one; the only
+--- differences are that the pack is the caller's, not the profile draw's.
+---@param pack string
+---@param opts table|nil
+---@return table|nil offer
+function Game:add_booster_offer_to_shop(pack, opts)
+    if self.STATE ~= self.STATES.SHOP then return nil end
+    if type(pack) ~= "string" then return nil end
+    opts = type(opts) == "table" and opts or {}
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(pack) or nil
+    if not bentry and SMODS and SMODS.Boosters then
+        for _, e in pairs(SMODS.Boosters) do
+            if e.id == pack then bentry = e break end
+        end
+    end
+    local vanilla = pack == "arcana" or pack == "celestial" or pack == "spectral"
+        or pack == "buffoon" or pack == "standard"
+    if not bentry and not vanilla then return nil end
+    local size = type(opts.size) == "string" and opts.size or "normal"
+    local offer = {
+        kind = "booster",
+        pack = bentry and bentry.pack or pack,
+        size = size,
+        name = self:_booster_offer_display_name(bentry and bentry.pack or pack, size),
+        card_count = bentry and bentry.card_count
+            or BoosterPackUI.card_count_for_size(size, pack),
+        picks_granted = bentry and bentry.picks
+            or BoosterPackUI.picks_for_size(size),
+        booster_sprite_index = bentry and bentry.sprite_index
+            or self:_default_booster_sprite_index(pack, size),
+        center_key = bentry and bentry.id or ("p_" .. pack .. "_" .. size .. "_1"),
+        mod_sprite = bentry and bentry.sprite or nil,
+        booster_colour = bentry and bentry.colour or nil,
+    }
+    if opts.free then
+        offer.price = 0
+    elseif tonumber(opts.price) then
+        offer.price_override = tonumber(opts.price)
+        offer.price = math.max(1, math.floor(tonumber(opts.price)))
+        offer.price = self:get_shop_booster_price(offer)
+    else
+        offer.price = self:_booster_offer_price(offer.pack, size)
+    end
+    if self:hasTag("coupon") ~= -1 then offer.price = 0 end
+    if type(self.shop_booster_offers) ~= "table" then self.shop_booster_offers = {} end
+    self.shop_booster_offers[#self.shop_booster_offers + 1] = offer
+    self:sync_shop_booster_nodes()
+    return offer
+end
+
+--- Insert a card or consumable offer onto the card shelf
+--- (`SMODS.add_shop_card`). A Joker offer is built through the same
+--- helpers a queue roll uses, so its create params, stickers and price
+--- are a rolled offer's; the shelf may grow past `shop_offer_slots`,
+--- the way PC's shop area grows for a created card.
+---@param spec table
+---@return table|nil offer
+function Game:insert_shop_offer(spec)
+    if self.STATE ~= self.STATES.SHOP then return nil end
+    if type(spec) ~= "table" then return nil end
+    if type(self.shop_offers) ~= "table" then self.shop_offers = {} end
+    local set = spec.set or spec.type or "Joker"
+    local offer
+    if set == "Joker" then
+        local id = spec.key or spec.id
+        local def = type(id) == "string" and JOKER_DEFS and JOKER_DEFS[id] or nil
+        if not def then return nil end
+        local edition = Joker.normalize_edition(spec.edition or "base")
+        local sticker_params = self:_build_joker_sticker_params(def)
+        if type(spec.stickers) == "table" then
+            for k, v in pairs(spec.stickers) do sticker_params[k] = v end
+        end
+        offer = {
+            kind = "joker",
+            id = id,
+            name = def.name or id,
+            edition = edition,
+            stickers = sticker_params,
+            create_params = self:_build_joker_create_params(
+                def, { edition = edition }, sticker_params),
+        }
+        if sticker_params.eternal then offer.eternal = true end
+        if sticker_params.perishable then offer.perishable = true end
+        if sticker_params.rental then offer.rental = true end
+        if spec.free then
+            offer.price = 0
+        elseif tonumber(spec.price) then
+            offer.price_override = tonumber(spec.price)
+            offer.price = math.max(1, math.floor(tonumber(spec.price)))
+            offer.price = self:get_shop_offer_price(offer)
+        else
+            offer.price = self:shop_price_for_joker_offer(def, edition, sticker_params)
+        end
+    elseif self:is_consumable_kind(set) or (CONSUMABLE_DEFS and spec.key and CONSUMABLE_DEFS[spec.key]) then
+        local id = spec.key or spec.id
+        local def = type(id) == "string" and CONSUMABLE_DEFS and CONSUMABLE_DEFS[id] or nil
+        if not def then return nil end
+        offer = { kind = def.kind, id = id, name = def.name or id }
+        if spec.free then
+            offer.price = 0
+        elseif tonumber(spec.price) then
+            offer.price_override = tonumber(spec.price)
+            offer.price = math.max(1, math.floor(tonumber(spec.price)))
+            offer.price = self:get_shop_offer_price(offer)
+        else
+            offer.price = self:shop_price_for_consumable_offer(def, def.kind)
+        end
+    else
+        return nil
+    end
+    -- The inserted card hears the same modify moment a rolled one does.
+    self:_fire_shop_joker_tag_moment("store_joker_modify", offer)
+    self.shop_offers[#self.shop_offers + 1] = offer
+    self:sync_shop_offer_nodes()
+    return offer
+end
+
+--- Add one voucher offer to the voucher shelf (`SMODS.add_voucher_to_shop`):
+--- a fresh roll excluding what is already shelved and owned, or the
+--- caller's `key`. The shelf may grow past its usual one offer, exactly
+--- as Voucher tags already grow it.
+---@param opts table|nil
+---@return table|nil offer
+function Game:add_voucher_offer_to_shop(opts)
+    if self.STATE ~= self.STATES.SHOP then return nil end
+    opts = type(opts) == "table" and opts or {}
+    if type(self.shop_voucher_offers) ~= "table" then self.shop_voucher_offers = {} end
+    local offer
+    if type(opts.key) == "string" and VOUCHER_DEFS and VOUCHER_DEFS[opts.key] then
+        offer = self:_make_shop_voucher_offer(opts.key)
+    else
+        offer = self:_roll_one_shop_voucher_offer(false)
+    end
+    if not offer then return nil end
+    if tonumber(opts.price_fac) then offer.price_fac = tonumber(opts.price_fac) end
+    if opts.free then offer.price = 0 end
+    self.shop_voucher_offers[#self.shop_voucher_offers + 1] = offer
+    self:refresh_shop_prices()
+    if self.sync_shop_voucher_nodes then self:sync_shop_voucher_nodes() end
+    return offer
+end
+
+--- Redeem a voucher by id without a purchase (`SMODS.grant_voucher`):
+--- the same tail `buy_shop_voucher` runs after the charge — the id joins
+--- the redeemed list and its effect applies. No shop event fires; a
+--- grant is not a buy (Chaplin listens for buys, not grants).
+---@param id string
+---@return boolean
+function Game:grant_voucher(id)
+    if type(id) ~= "string" or not (VOUCHER_DEFS and VOUCHER_DEFS[id]) then return false end
+    if self:has_voucher(id) then return false end
+    if type(self.vouchers) ~= "table" then self.vouchers = {} end
+    self.vouchers[#self.vouchers + 1] = id
+    self:apply_voucher_effect(id)
+    self:check_voucher_unlocks()
+    return true
+end
+
+--- Take a redeemed voucher back (`SMODS.unredeem_voucher`). Standing
+--- effects reverse; the one-time ones (Hieroglyph / Petroglyph's ante
+--- drop) already happened and stand. Removal from the list alone undoes
+--- everything the game reads live from it (rates, caps, weights,
+--- Observatory, Magic Trick), which is most of the vanilla set.
+---@param id string
+---@return boolean
+function Game:unredeem_voucher(id)
+    if type(id) ~= "string" or not self:has_voucher(id) then return false end
+    for i = #self.vouchers, 1, -1 do
+        if self.vouchers[i] == id then table.remove(self.vouchers, i) end
+    end
+    if SMODS and SMODS.Centers and SMODS.Centers[id] then
+        if SMODS.unredeem_voucher_center then SMODS.unredeem_voucher_center(id) end
+    elseif id == "v_overstock" or id == "v_overstock_plus" then
+        self.shop_offer_slots = math.max(1, (tonumber(self.shop_offer_slots) or 2) - 1)
+    elseif id == "v_paint_brush" or id == "v_palette" then
+        self.hand_size_delta_voucher = (tonumber(self.hand_size_delta_voucher) or 0) - 1
+    end
+    if self.refresh_consumable_capacity_from_negatives then
+        self:refresh_consumable_capacity_from_negatives()
+    end
+    if self.refresh_joker_capacity_from_negatives then
+        self:refresh_joker_capacity_from_negatives()
+    end
+    return true
+end
+
+--- Scale every current shelf price by `fac` (`SMODS.multiply_shop_prices`,
+--- Cryptid's ://DIVIDE). The factor is stored per offer and read by the
+--- price getters, so it survives repricing inside this shop visit and
+--- dies with the offer; offers rolled or inserted later are unaffected.
+---@param fac number
+---@return boolean
+function Game:multiply_shop_prices(fac)
+    fac = tonumber(fac)
+    if not fac or fac <= 0 then return false end
+    if self.STATE ~= self.STATES.SHOP then return false end
+    for _, list in ipairs({ self.shop_offers, self.shop_booster_offers, self.shop_voucher_offers }) do
+        for _, offer in ipairs(type(list) == "table" and list or {}) do
+            if type(offer) == "table" and (tonumber(offer.price) or 0) > 0 then
+                offer.price_fac = (tonumber(offer.price_fac) or 1) * fac
+            end
+        end
+    end
+    self:refresh_shop_prices()
+    self:sync_shop_offer_nodes()
+    self:sync_shop_booster_nodes()
+    if self.sync_shop_voucher_nodes then self:sync_shop_voucher_nodes() end
+    return true
+end
+
+--- Append one choice to the open pack (`SMODS.add_card_to_booster`), in
+--- the same shapes `_booster_build_choices` deals. Meant to be called
+--- from an `open_booster` calculate, before the player picks; the choice
+--- joins the session's list and spawns its node with the rest.
+---@param spec table
+---@return table|nil choice
+function Game:append_booster_choice(spec)
+    local sess = self.booster_session
+    if not sess or type(sess.choices) ~= "table" then return nil end
+    if type(spec) ~= "table" then return nil end
+    local set = spec.set or spec.type or "Joker"
+    local choice
+    if set == "Joker" then
+        local picked_ids = {}
+        for _, ch in ipairs(sess.choices) do
+            if ch.joker_id then picked_ids[ch.joker_id] = true end
+        end
+        local offer
+        if type(spec.key) == "string" and JOKER_DEFS and JOKER_DEFS[spec.key] then
+            local def = JOKER_DEFS[spec.key]
+            local sticker_params = self:_build_joker_sticker_params(def, true)
+            local edition = Joker.normalize_edition(spec.edition or "base")
+            offer = {
+                id = spec.key, edition = edition, stickers = sticker_params,
+                create_params = self:_build_joker_create_params(
+                    def, { edition = edition }, sticker_params),
+            }
+        else
+            offer = self:_roll_shop_queue_joker_offer("booster", true, picked_ids,
+                tonumber(spec.rarity))
+        end
+        if not offer or not offer.id then return nil end
+        choice = {
+            kind = "joker",
+            joker_id = offer.id,
+            edition = offer.edition or "base",
+            taken = false,
+            create_params = offer.create_params,
+            stickers = offer.stickers,
+        }
+    elseif set == "Playing" then
+        local ante = tostring(math.floor(tonumber(self.ante) or 1))
+        local enhanced = self:random("stdset" .. ante) > 0.6
+        choice = {
+            kind = "playing",
+            playing_data = self:_roll_playing_card_data(true, "sta", enhanced),
+            taken = false,
+        }
+    elseif self:is_consumable_kind(set) then
+        local offer
+        if type(spec.key) == "string" and CONSUMABLE_DEFS and CONSUMABLE_DEFS[spec.key]
+            and CONSUMABLE_DEFS[spec.key].kind == set then
+            offer = { id = spec.key }
+        else
+            offer = self:_roll_shop_queue_consumable_offer(set)
+        end
+        if not offer or not offer.id then return nil end
+        local def = CONSUMABLE_DEFS[offer.id]
+        if not def then return nil end
+        local c = copy_table(def)
+        c.id = offer.id
+        if def.mod_id and c.ability == nil then c.ability = copy_table(def.config or {}) end
+        choice = { kind = def.kind or set, consumable_def = c, taken = false }
+    else
+        return nil
+    end
+    sess.choices[#sess.choices + 1] = choice
+    return choice
+end
+
 function Game:_booster_destroy_choice_nodes()
     local sess = self.booster_session
     if not sess or type(sess.choice_nodes) ~= "table" then return end
@@ -14604,7 +15002,12 @@ end
 
 function Game:_booster_build_choices(offer)
     local choices = {}
-    local n = math.max(1, math.floor(tonumber(offer.card_count) or 3))
+    -- Wave 6: a held mod Joker or redeemed mod voucher declaring
+    -- `booster_size_mod` deals that many extra cards from every pack
+    -- (Paperback's Protocol). `SMODS.modifier_total` reads 0 while nothing
+    -- declares it, so vanilla pack contents are unchanged.
+    local size_mod = SMODS and SMODS.modifier_total and SMODS.modifier_total(self, "booster_size_mod") or 0
+    local n = math.max(1, math.floor(tonumber(offer.card_count) or 3) + math.floor(size_mod))
     local pack = offer.pack
     local ante = tostring(math.floor(tonumber(self.ante) or 1))
     local allow_duplicates = self:hasJoker("j_ring_master")
@@ -14753,6 +15156,61 @@ function Game:_booster_build_choices(offer)
                 playing_data = self:_roll_playing_card_data(true, "sta", enhanced),
                 taken = false,
             }
+        end
+    elseif bentry and bentry.pool_kind == "mixed_mod" then
+        -- MoreFluff's Modded packs (Wave 6): every card is mod content,
+        -- coin-flipped per card between a Joker and a consumable on its
+        -- own streams, so the deal never touches a vanilla pool's stream.
+        local mod_jokers, mod_cons = {}, {}
+        for id, def in pairs(JOKER_DEFS or {}) do
+            if type(def) == "table" and def.mod_id then mod_jokers[#mod_jokers + 1] = id end
+        end
+        table.sort(mod_jokers, function(a, b)
+            local da, db = JOKER_DEFS[a], JOKER_DEFS[b]
+            local oa, ob = tonumber(da.order) or math.huge, tonumber(db.order) or math.huge
+            if oa == ob then return a < b end
+            return oa < ob
+        end)
+        for id, def in pairs(CONSUMABLE_DEFS or {}) do
+            if type(def) == "table" and def.mod_id then mod_cons[#mod_cons + 1] = id end
+        end
+        table.sort(mod_cons)
+        local picked_j, picked_c = {}, {}
+        for _ = 1, n do
+            local want_joker = #mod_jokers > 0
+                and (#mod_cons == 0 or self:random("modmix" .. ante) < 0.5)
+            if want_joker then
+                local id
+                for _ = 1, #mod_jokers + 4 do
+                    local cand = mod_jokers[self:random("modmixj" .. ante, 1, #mod_jokers)]
+                    if cand and not picked_j[cand] then id = cand break end
+                end
+                id = id or mod_jokers[1]
+                picked_j[id] = true
+                local def = JOKER_DEFS[id]
+                local sticker_params = self:_build_joker_sticker_params(def, true)
+                local edition = self:roll_joker_offer_edition("booster")
+                choices[#choices + 1] = {
+                    kind = "joker",
+                    joker_id = id,
+                    edition = edition,
+                    taken = false,
+                    create_params = self:_build_joker_create_params(
+                        def, { edition = edition }, sticker_params),
+                    stickers = sticker_params,
+                }
+            elseif #mod_cons > 0 then
+                local id
+                for _ = 1, #mod_cons + 4 do
+                    local cand = mod_cons[self:random("modmixc" .. ante, 1, #mod_cons)]
+                    if cand and not picked_c[cand] and not self:consumable_center_in_play(cand) then
+                        id = cand break
+                    end
+                end
+                id = id or mod_cons[1]
+                picked_c[id] = true
+                consumable_choice(CONSUMABLE_DEFS[id].kind, id)
+            end
         end
     elseif pack == "arcana" then
         for _ = 1, n do
@@ -14947,7 +15405,22 @@ function Game:begin_booster_session(offer, opening_origin)
     self:_booster_destroy_choice_nodes()
     self.booster_session = nil
     self._booster_closing = nil
-    self:emit_joker_event("on_booster_open",{})
+    -- Wave 6: a queued next-pack bonus (`SMODS.queue_next_booster_bonus`,
+    -- Cryptid's ://OFFBYONE) is spent on the opening itself: the offer the
+    -- session is built from carries the extra cards and picks, and the
+    -- queue clears whether or not the pack turns out to be openable.
+    local bonus = self.next_booster_bonus
+    if type(bonus) == "table"
+        and ((tonumber(bonus.cards) or 0) ~= 0 or (tonumber(bonus.picks) or 0) ~= 0) then
+        self.next_booster_bonus = nil
+        local boosted = {}
+        for k, v in pairs(offer) do boosted[k] = v end
+        boosted.card_count = math.max(1,
+            math.floor(tonumber(offer.card_count) or 3) + math.floor(tonumber(bonus.cards) or 0))
+        boosted.picks_granted = math.max(1,
+            math.floor(tonumber(offer.picks_granted) or 1) + math.floor(tonumber(bonus.picks) or 0))
+        offer = boosted
+    end
     local choices = self:_booster_build_choices(offer)
     local return_state = (self.STATE ~= self.STATES.OPEN_BOOSTER) and self.STATE or self.STATES.SHOP
     self._booster_return_state = return_state
@@ -14994,6 +15467,32 @@ function Game:begin_booster_session(offer, opening_origin)
     self:set_state(self.STATES.OPEN_BOOSTER)
 
     if Sfx and Sfx.play then Sfx.play("explosion_buildup1") end
+
+    -- `open_booster` fires once the session exists (Wave 6): the context
+    -- carries the pack view and the LIVE choice list, so a Joker can read
+    -- what was dealt, rewrite a choice in place, append through
+    -- `SMODS.add_card_to_booster`, or answer `add_picks` for extra picks
+    -- (clamped to the deal, as PC caps Aristocrat at the card count).
+    local sess = self.booster_session
+    local bentry = SMODS and SMODS.booster_entry_for and SMODS.booster_entry_for(sess.pack) or nil
+    local view = {
+        pack = sess.pack,
+        size = sess.size,
+        name = sess.title,
+        pool_kind = bentry and bentry.pool_kind or (sess.pack == "buffoon" and "jokers"
+            or sess.pack == "standard" and "playing" or "consumable"),
+        consumable_kind = bentry and bentry.consumable_kind or (sess.pack == "arcana" and "tarot"
+            or sess.pack == "celestial" and "planet" or sess.pack == "spectral" and "spectral" or nil),
+        card_count = #sess.choices,
+        picks = sess.picks_remaining,
+    }
+    local event_ctx = { booster_view = view, choices = sess.choices }
+    self:emit_joker_event("on_booster_open", event_ctx)
+    if tonumber(event_ctx.add_picks) then
+        sess.picks_remaining = math.max(1, math.min(#sess.choices,
+            sess.picks_remaining + math.floor(tonumber(event_ctx.add_picks))))
+        view.picks = sess.picks_remaining
+    end
 end
 
 function Game:_release_booster_pack()
@@ -15592,6 +16091,13 @@ end
 ---@param hands_left number
 function Game:_finish_round_win_eval(ctx, hands_left)
     self:emit_hand_cards_event("on_round_end", ctx)
+
+    -- Wave 6: held consumables with an `end_of_round` callback hear the
+    -- round end here, after the Joker batch (MoreFluff's Colour cards
+    -- grow on this seat). No vanilla consumable declares one.
+    if SMODS and SMODS.consumable_end_of_round then
+        SMODS.consumable_end_of_round(self)
+    end
 
     if tonumber(self.current_blind_index) == 3 then
         for _, tag in ipairs(self.tags or {}) do

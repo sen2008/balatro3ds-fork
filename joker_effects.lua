@@ -208,6 +208,25 @@ local function balance_totals(ctx, fraction)
     ctx.chips, ctx.mult = best, best
     mark_effect_applied(ctx)
 end
+--- Fractional swap (Wave 6): each total moves the fraction `f` of the way
+--- toward the OTHER total (`swap = 0.1` trades a tenth of each into the
+--- other, MoreFluff's Plasma Sliver / Cryptid's broken-swap shape). Unlike
+--- `balance`, both totals move even when one is larger; `f = 0.5` lands both
+--- on their mean. Boolean `swap = true` stays the full exchange above.
+local function blend_totals(ctx, fraction)
+    local f = tonumber(fraction)
+    if not f or f <= 0 or f >= 1 then return end
+    local chips, mult = Totals.read(ctx.chips, 0), Totals.read(ctx.mult, 1)
+    if Totals.eq(chips, mult) then return end
+    local function toward(v, other)
+        if Big.is_big(v) or Big.is_big(other) then
+            return Big.add_values(v, Big.mul_values(Big.add_values(other, Big.mul_values(v, -1)), f))
+        end
+        return v + (other - v) * f
+    end
+    ctx.chips, ctx.mult = toward(chips, mult), toward(mult, chips)
+    mark_effect_applied(ctx)
+end
 local function add_money(ctx, n)
     if G and G.money ~= nil then
         n = tonumber(n) or 0
@@ -2232,6 +2251,7 @@ JokerEffects.pow_mult = pow_mult
 JokerEffects.pow_chips = pow_chips
 JokerEffects.swap_totals = swap_totals
 JokerEffects.balance_totals = balance_totals
+JokerEffects.blend_totals = blend_totals
 JokerEffects.log_chips = log_chips
 JokerEffects.add_money = add_money
 JokerEffects.add_round_win_money = add_round_win_money

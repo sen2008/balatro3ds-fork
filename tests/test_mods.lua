@@ -4668,4 +4668,556 @@ suite.test("backs: blind target and debt limit seats", function()
     T.assert_eq(game:get_money_loss_floor(), -100)
 end)
 
+--------------------------------------------------------------------------------
+-- Shop, vouchers and booster packs (Wave 6)
+--------------------------------------------------------------------------------
+
+local WAVE6 = [[
+SEEN = {}
+_MOD.seen = SEEN
+SMODS.Joker {
+    key = "pack_giver", rarity = 1, cost = 4, sprite = "a.png",
+    loc_txt = { name = "Pack Giver", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.starting_shop then
+            SMODS.add_booster_to_shop("buffoon", { free = true })
+            SMODS.add_voucher_to_shop()
+        end
+    end,
+}
+SMODS.Joker {
+    key = "aristocrat_like", rarity = 2, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Aristocrat Like", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.open_booster then
+            SEEN.booster = {
+                pack = context.booster.pack, pool = context.booster.pool_kind,
+                ckind = context.booster.consumable_kind,
+                n = #context.choices,
+                kind0 = context.choices[1] and context.choices[1].kind,
+                card_is_booster = context.card == context.booster,
+            }
+            return { add_picks = 1 }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "sheet_like", rarity = 2, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Sheet Like", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.open_booster and context.booster.pack == "buffoon" then
+            SMODS.add_card_to_booster { set = "Joker", rarity = 1 }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "protocol_like", rarity = 1, cost = 5, sprite = "a.png",
+    loc_txt = { name = "Protocol Like", text = { "x" } },
+    config = { booster_size_mod = 1 },
+}
+SMODS.Joker {
+    key = "emg_like", rarity = 2, cost = 6, sprite = "a.png",
+    loc_txt = { name = "EMG Like", text = { "x" } },
+    config = { voucher_limit_mod = 1 },
+}
+SMODS.Joker {
+    key = "center_like", rarity = 1, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Center Like", text = { "x" } },
+    config = { shop_size_mod = 1 },
+}
+SMODS.Joker {
+    key = "ouija_like", rarity = 3, cost = 8, sprite = "a.png",
+    loc_txt = { name = "Ouija Like", text = { "x" } },
+    config = { spectral_rate_mod = 2 },
+}
+SMODS.Joker {
+    key = "normal_like", rarity = 1, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Normal Like", text = { "x" } },
+    config = { free_shop_purchases = 1 },
+}
+SMODS.Joker {
+    key = "door_like", rarity = 3, cost = 10, sprite = "a.png",
+    loc_txt = { name = "Door Like", text = { "x" } },
+    replace_common_rarity = true,
+}
+SMODS.Joker {
+    key = "gem_like", rarity = 2, cost = 6, sprite = "a.png",
+    loc_txt = { name = "Gem Like", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.modify_shop_card then
+            SEEN.modify = SEEN.modify or {}
+            SEEN.modify[#SEEN.modify + 1] = {
+                id = context.card.id, ed = context.card.edition,
+                rar = context.card.rarity,
+            }
+        end
+    end,
+}
+SMODS.Joker {
+    key = "plasma_like", rarity = 2, cost = 8, sprite = "a.png",
+    loc_txt = { name = "Plasma Like", text = { "x" } },
+    calculate = function(self, card, context)
+        if context.joker_main then return { swap = 0.5 } end
+    end,
+}
+SMODS.Voucher {
+    key = "voucher", cost = 10, sprite = "v.png",
+    loc_txt = { name = "W6 Voucher", text = { "x" } },
+    config = { voucher_limit_mod = 1 },
+    redeem = function(self, card) SEEN.redeemed = (SEEN.redeemed or 0) + 1 end,
+    unredeem = function(self, card) SEEN.unredeemed = (SEEN.unredeemed or 0) + 1 end,
+}
+SMODS.Consumable {
+    set = "Spectral", key = "round_counter", sprite = "c.png",
+    loc_txt = { name = "Round Counter", text = { "x" } },
+    config = {},
+    can_use = function(self, card) return false end,
+    use = function(self, card) end,
+    end_of_round = function(self, card, game)
+        card.ability.rounds = (card.ability.rounds or 0) + 1
+        SEEN.rounds = (SEEN.rounds or 0) + 1
+    end,
+}
+]]
+
+local function install_wave6(seed)
+    wipe_mods()
+    write_mod("Wave6", {
+        id = "Wave6", name = "Wave6", prefix = "w6", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, WAVE6)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave6.status, "loaded", tostring(ModLoader.by_id.Wave6.error))
+    local game = bootstrap.new_game(seed or 9101)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+local function w6_seen()
+    return ModLoader.by_id.Wave6.seen
+end
+
+--- The seeded vanilla shop sequence (offers, boosters, one voucher roll
+--- per ante), captured before Wave 6 landed: the bundle's dormant paths
+--- must reproduce it exactly, with no mod installed and with the Wave 6
+--- mod registered but nothing of it held or redeemed.
+local SHOP_BASELINE = {
+    ["9101-1"] = "joker/j_crazy/base/4,joker/j_constellation/base/6,B:buffoon/normal/4/2/1,B:celestial/normal/4/3/1,V:v_reroll/10",
+    ["9101-2"] = "joker/j_spare_trousers/base/6,planet/planet_saturn/nil/3,B:arcana/mega/8/5/2,B:celestial/normal/4/3/1,V:v_overstock/10",
+    ["9101-3"] = "joker/j_credit_card/base/1,joker/j_superposition/base/4,B:arcana/jumbo/6/5/1,B:celestial/jumbo/6/5/1,V:v_overstock/10",
+    ["4242-1"] = "joker/j_8_ball/base/5,joker/j_droll/base/4,B:buffoon/normal/4/2/1,B:buffoon/jumbo/6/4/1,V:v_hone/10",
+    ["4242-2"] = "joker/j_ice_cream/base/5,joker/j_madness/base/7,B:arcana/mega/8/5/2,B:buffoon/jumbo/6/4/1,V:v_magic_trick/10",
+    ["4242-3"] = "joker/j_8_ball/base/5,joker/j_mime/base/5,B:standard/jumbo/6/5/1,B:celestial/normal/4/3/1,V:v_blank/10",
+}
+
+local function shop_sequence(game)
+    local out = {}
+    for _, seed in ipairs({ 9101, 4242 }) do
+        local g = bootstrap.new_game(seed)
+        G = g
+        g.consumables, g.jokers = {}, {}
+        for ante = 1, 3 do
+            g.ante = ante
+            g.shop_offers, g.shop_booster_offers, g.shop_voucher_offers = {}, {}, {}
+            g:roll_shop_offers()
+            local parts = {}
+            for _, o in ipairs(g.shop_offers) do
+                parts[#parts + 1] = table.concat({
+                    tostring(o.kind), tostring(o.id), tostring(o.edition),
+                    tostring(o.price) }, "/")
+            end
+            g:roll_shop_boosters()
+            for _, o in ipairs(g.shop_booster_offers) do
+                parts[#parts + 1] = "B:" .. tostring(o.pack) .. "/" .. tostring(o.size)
+                    .. "/" .. tostring(o.price) .. "/" .. tostring(o.card_count)
+                    .. "/" .. tostring(o.picks_granted)
+            end
+            local v = g:_roll_one_shop_voucher_offer(false)
+            parts[#parts + 1] = "V:" .. tostring(v and v.id) .. "/" .. tostring(v and v.price)
+            out[seed .. "-" .. ante] = table.concat(parts, ",")
+        end
+    end
+    return out
+end
+
+suite.test("wave6: the seeded shop sequence is vanilla's, dormant and registered", function()
+    wipe_mods()
+    local seq = shop_sequence(nil)
+    for k, want in pairs(SHOP_BASELINE) do
+        T.assert_eq(seq[k], want, "vanilla sequence " .. k)
+    end
+    -- Registered but unused: a mod registering only content no vanilla
+    -- pool draws from (a new consumable kind at shop_rate 0) must leave
+    -- the sequence untouched. (A mod that adds pool content dilutes the
+    -- pools by design — that is Tier 2's contract, not this bundle's.)
+    write_mod("Wave6Dormant", {
+        id = "Wave6Dormant", name = "Wave6Dormant", prefix = "w6d",
+        main_file = "main.lua", version = "1.0.0", author = { "Someone" },
+    }, [[
+SMODS.ConsumableType { key = "W6Dormant", loc_txt = { name = "W6 Dormant" }, shop_rate = 0 }
+SMODS.Consumable {
+    set = "W6Dormant", key = "dormant", sprite = "c.png",
+    loc_txt = { name = "Dormant", text = { "x" } },
+    config = {},
+    can_use = function(self, card) return false end,
+    use = function(self, card) end,
+    end_of_round = function(self, card, game) card.ability.rounds = 1 end,
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave6Dormant.status, "loaded",
+        tostring(ModLoader.by_id.Wave6Dormant.error))
+    local seq2 = shop_sequence(nil)
+    for k, want in pairs(SHOP_BASELINE) do
+        T.assert_eq(seq2[k], want, "registered sequence " .. k)
+    end
+    wipe_mods()
+    local seq3 = shop_sequence(nil)
+    for k, want in pairs(SHOP_BASELINE) do
+        T.assert_eq(seq3[k], want, "post-rollback sequence " .. k)
+    end
+end)
+
+suite.test("wave6: starting_shop inserts a free booster and an extra voucher offer", function()
+    local game = install_wave6()
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.shop_offers = {}, {}
+    game.shop_booster_offers, game.shop_voucher_offers = {}, {}
+    add(game, "j_w6_pack_giver")
+    game:emit_joker_event("on_shop_enter", {})
+    T.assert_eq(#game.shop_booster_offers, 1, "one booster inserted")
+    local offer = game.shop_booster_offers[1]
+    T.assert_eq(offer.pack, "buffoon")
+    T.assert_eq(offer.price, 0, "the inserted pack is couponed free")
+    T.assert_eq(offer.card_count, 2, "a normal Buffoon pack deals 2")
+    T.assert_eq(#game.shop_voucher_offers, 1, "one voucher offer inserted")
+    T.assert_true(game.shop_voucher_offers[1].id ~= nil)
+    wipe_mods()
+end)
+
+suite.test("wave6: add_booster_to_shop prices an override and rejects unknown packs", function()
+    local game = install_wave6()
+    game.STATE = game.STATES.SHOP
+    game.shop_booster_offers = {}
+    local offer = SMODS.add_booster_to_shop("arcana", { price = 7 })
+    T.assert_true(offer ~= nil)
+    T.assert_eq(game:get_shop_booster_price(offer), 7, "the $7 override is the price")
+    T.assert_eq(SMODS.add_booster_to_shop("nope_pack"), nil, "unknown pack refused")
+    wipe_mods()
+end)
+
+suite.test("wave6: add_shop_card shelves a Negative Joker that buys like a rolled one", function()
+    local game = install_wave6()
+    game.STATE = game.STATES.SHOP
+    game.money = 50
+    game.consumables, game.jokers = {}, {}
+    game.shop_offers = {}
+    local offer = SMODS.add_shop_card { set = "Joker", key = "j_joker", edition = "negative" }
+    T.assert_true(offer ~= nil)
+    T.assert_eq(#game.shop_offers, 1)
+    local want = game:shop_price_for_joker_offer(JOKER_DEFS.j_joker, "negative")
+    T.assert_eq(game:get_shop_offer_price(offer), want, "priced like a rolled Negative Joker")
+    T.assert_true(game:buy_shop_joker(1), "the inserted offer buys")
+    T.assert_eq(#game.jokers, 1)
+    T.assert_eq(game.jokers[1].def.id, "j_joker")
+    wipe_mods()
+end)
+
+suite.test("wave6: open_booster carries the pack and its choices; add_picks grants a pick", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    add(game, "j_w6_aristocrat_like")
+    game:begin_booster_session({ kind = "booster", pack = "arcana", size = "normal",
+        card_count = 5, picks_granted = 1, booster_sprite_index = 0 })
+    local seen = w6_seen().booster
+    T.assert_true(seen ~= nil, "the Joker heard the opening")
+    T.assert_eq(seen.pack, "arcana")
+    T.assert_eq(seen.pool, "consumable")
+    T.assert_eq(seen.ckind, "tarot")
+    T.assert_eq(seen.n, 5, "the dealt choices ride the context")
+    T.assert_eq(seen.kind0, "tarot")
+    T.assert_true(seen.card_is_booster, "context.card is the pack view, as on PC")
+    T.assert_eq(game.booster_session.picks_remaining, 2, "add_picks landed, clamped to the deal")
+    game:end_booster_session()
+    wipe_mods()
+end)
+
+suite.test("wave6: add_card_to_booster appends a choice to the open pack", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    add(game, "j_w6_sheet_like")
+    game:begin_booster_session({ kind = "booster", pack = "buffoon", size = "normal",
+        card_count = 2, picks_granted = 1, booster_sprite_index = 30 })
+    T.assert_eq(#game.booster_session.choices, 3, "the sheet's card joined the deal")
+    local last = game.booster_session.choices[3]
+    T.assert_eq(last.kind, "joker")
+    T.assert_eq(JOKER_DEFS[last.joker_id].rarity, 1, "the forced rarity was honoured")
+    game:end_booster_session()
+    wipe_mods()
+end)
+
+suite.test("wave6: booster_size_mod deals an extra card from every pack", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    T.assert_eq(#game:_booster_build_choices({ pack = "arcana", card_count = 5 }), 5)
+    add(game, "j_w6_protocol_like")
+    T.assert_eq(SMODS.modifier_total(game, "booster_size_mod"), 1)
+    T.assert_eq(#game:_booster_build_choices({ pack = "arcana", card_count = 5 }), 6,
+        "Protocol's seat: one more card")
+    wipe_mods()
+end)
+
+suite.test("wave6: a queued next-pack bonus is spent on the next opening only", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    T.assert_true(SMODS.queue_next_booster_bonus(1, 1))
+    game:begin_booster_session({ kind = "booster", pack = "standard", size = "normal",
+        card_count = 5, picks_granted = 1, booster_sprite_index = 22 })
+    T.assert_eq(#game.booster_session.choices, 6, "one extra card dealt")
+    T.assert_eq(game.booster_session.picks_remaining, 2, "one extra pick granted")
+    T.assert_eq(game.next_booster_bonus, nil, "the bonus is spent")
+    game:end_booster_session()
+    game:begin_booster_session({ kind = "booster", pack = "standard", size = "normal",
+        card_count = 5, picks_granted = 1, booster_sprite_index = 22 })
+    T.assert_eq(#game.booster_session.choices, 5, "the second pack is unboosted")
+    T.assert_eq(game.booster_session.picks_remaining, 1)
+    game:end_booster_session()
+    wipe_mods()
+end)
+
+suite.test("wave6: grant and unredeem run a mod voucher's callbacks and passives", function()
+    local game = install_wave6()
+    game.vouchers = {}
+    T.assert_true(SMODS.grant_voucher("v_w6_voucher"))
+    T.assert_eq(w6_seen().redeemed, 1, "redeem ran once")
+    T.assert_true(game:has_voucher("v_w6_voucher"))
+    T.assert_eq(SMODS.modifier_total(game, "voucher_limit_mod"), 1,
+        "the redeemed voucher's declared modifier is live")
+    T.assert_false(SMODS.grant_voucher("v_w6_voucher"), "a held voucher does not re-grant")
+    T.assert_true(SMODS.unredeem_voucher("v_w6_voucher"))
+    T.assert_eq(w6_seen().unredeemed, 1, "unredeem ran once")
+    T.assert_false(game:has_voucher("v_w6_voucher"))
+    T.assert_eq(SMODS.modifier_total(game, "voucher_limit_mod"), 0)
+    T.assert_false(SMODS.unredeem_voucher("v_w6_voucher"), "nothing left to unredeem")
+    wipe_mods()
+end)
+
+suite.test("wave6: unredeem reverses a vanilla voucher's redeem-time delta", function()
+    local game = install_wave6()
+    game.vouchers = {}
+    T.assert_eq(game.shop_offer_slots, 2)
+    T.assert_true(SMODS.grant_voucher("v_overstock"))
+    T.assert_eq(game.shop_offer_slots, 3, "Overstock's slot landed")
+    T.assert_true(SMODS.unredeem_voucher("v_overstock"))
+    T.assert_eq(game.shop_offer_slots, 2, "and came back off")
+    wipe_mods()
+end)
+
+suite.test("wave6: voucher_limit_mod tops the voucher shelf up", function()
+    local game = install_wave6()
+    game.vouchers = {}
+    game.shop_voucher_offers = {}
+    game.current_round_voucher_id = nil
+    add(game, "j_w6_emg_like")
+    game:maybe_roll_shop_voucher_on_shop_enter()
+    T.assert_eq(#game.shop_voucher_offers, 2, "two voucher offers while EMG is held")
+    T.assert_true(game.shop_voucher_offers[1].id ~= game.shop_voucher_offers[2].id,
+        "the top-up excludes the shelved voucher")
+    wipe_mods()
+end)
+
+suite.test("wave6: shop_size_mod fills an extra shop slot", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    game.shop_offers = {}
+    game:roll_shop_offers()
+    T.assert_eq(#game.shop_offers, 2, "vanilla two slots")
+    add(game, "j_w6_center_like")
+    game.shop_offers = {}
+    game:roll_shop_offers()
+    T.assert_eq(#game.shop_offers, 3, "Shopping Center's seat: three slots")
+    wipe_mods()
+end)
+
+suite.test("wave6: spectral_rate_mod lets Spectrals into the shop queue", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    local function spectral_count(g)
+        local n = 0
+        for ante = 1, 200 do
+            g.ante = ante
+            local offer = g:_generate_next_shop_queue_offer()
+            if offer and offer.kind == "spectral" then n = n + 1 end
+        end
+        return n
+    end
+    T.assert_eq(spectral_count(game), 0, "no spectral rate, no Spectrals")
+    add(game, "j_w6_ouija_like")
+    T.assert_true(spectral_count(game) > 0, "Ouija's seat: Spectrals roll in")
+    wipe_mods()
+end)
+
+suite.test("wave6: free_shop_purchases frees cards and consumables, not packs or vouchers", function()
+    local game = install_wave6()
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.jokers = {}, {}
+    add(game, "j_w6_normal_like")
+    local card_offer = { kind = "joker", id = "j_crazy", edition = "base", price = 4 }
+    T.assert_eq(game:get_shop_offer_price(card_offer), 0, "the Joker is free")
+    local booster_offer = { kind = "booster", pack = "arcana", size = "normal", price = 4 }
+    T.assert_eq(game:get_shop_booster_price(booster_offer), 4, "the pack is not")
+    local voucher_offer = { id = "v_reroll", price = 10 }
+    T.assert_eq(game:get_shop_voucher_price(voucher_offer), 10, "the voucher is not")
+    wipe_mods()
+end)
+
+suite.test("wave6: multiply_shop_prices halves the whole shelf, per offer", function()
+    local game = install_wave6()
+    game.STATE = game.STATES.SHOP
+    game.consumables, game.jokers = {}, {}
+    game.shop_offers = {
+        { kind = "joker", id = "j_crazy", edition = "base", price = 4 },
+        { kind = "joker", id = "j_joker", edition = "base", price = 0 },
+    }
+    game.shop_booster_offers = {
+        { kind = "booster", pack = "arcana", size = "normal", price = 4 },
+    }
+    game.shop_voucher_offers = { { id = "v_reroll", price = 10 } }
+    T.assert_true(SMODS.multiply_shop_prices(0.5))
+    T.assert_eq(game.shop_offers[1].price, 2, "the card offer halved")
+    T.assert_eq(game.shop_offers[2].price, 0, "a free offer stays free")
+    T.assert_eq(game.shop_booster_offers[1].price, 2, "the booster halved")
+    T.assert_eq(game.shop_voucher_offers[1].price, 5, "the voucher halved")
+    -- A later offer is unaffected: the factor lives on the offers it hit.
+    local fresh = { kind = "joker", id = "j_crazy", edition = "base", price = 4 }
+    T.assert_eq(game:get_shop_offer_price(fresh), 4)
+    wipe_mods()
+end)
+
+suite.test("wave6: replace_common_rarity rewrites Common shop rolls while held", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    local function picks(g)
+        local counts = { 0, 0, 0 }
+        for i = 1, 60 do
+            g.ante = 1 + (i % 3)
+            local id = g:_pick_joker_id_shop_rarity_distribution(function(lo, hi)
+                return g:_shop_rand_int(lo, hi)
+            end, "sho", {})
+            if id then counts[tonumber(JOKER_DEFS[id].rarity) or 1] =
+                counts[tonumber(JOKER_DEFS[id].rarity) or 1] + 1 end
+        end
+        return counts
+    end
+    local vanilla = picks(game)
+    T.assert_true(vanilla[1] > 0, "vanilla rolls Commons")
+    add(game, "j_w6_door_like")
+    local held = picks(game)
+    T.assert_eq(held[1], 0, "no Commons while the Doorhanger seat is held")
+    T.assert_true(held[2] + held[3] > 0, "the rolls land Uncommon or Rare instead")
+    wipe_mods()
+end)
+
+suite.test("wave6: rare_mod widens the Rare band", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    local function rare_count(g)
+        local n = 0
+        for i = 1, 200 do
+            g.ante = 1 + (i % 3)
+            local id = g:_pick_joker_id_shop_rarity_distribution(function(lo, hi)
+                return g:_shop_rand_int(lo, hi)
+            end, "sho", {})
+            if id and tonumber(JOKER_DEFS[id].rarity) == 3 then n = n + 1 end
+        end
+        return n
+    end
+    local vanilla = rare_count(game)
+    game.rare_mod = 6.7
+    local boosted = rare_count(game)
+    T.assert_true(boosted > vanilla,
+        "Gem Alert's seat: more Rares at rare_mod 6.7 (" .. boosted .. " > " .. vanilla .. ")")
+    wipe_mods()
+end)
+
+suite.test("wave6: modify_shop_card reports every shelved offer to held Jokers", function()
+    local game = install_wave6()
+    game.consumables, game.jokers = {}, {}
+    add(game, "j_w6_gem_like")
+    game.shop_offers = {}
+    game:roll_shop_offers()
+    local seen = w6_seen().modify
+    T.assert_true(seen ~= nil and #seen >= 2, "both shelved offers were reported")
+    for _, entry in ipairs(seen) do
+        T.assert_true(entry.id ~= nil and entry.rar ~= nil,
+            "the view carries the offer's id and rarity")
+    end
+    wipe_mods()
+end)
+
+suite.test("wave6: a held consumable hears end_of_round", function()
+    local game = install_wave6()
+    game.consumables, game.consumable_nodes = {}, {}
+    T.assert_true(game:add_consumable("c_w6_round_counter"))
+    SMODS.consumable_end_of_round(game)
+    T.assert_eq(w6_seen().rounds, 1, "the callback ran")
+    T.assert_eq(game.consumables[1].ability.rounds, 1, "its own state rode along")
+    wipe_mods()
+end)
+
+suite.test("wave6: a numeric swap blends the totals fractionally", function()
+    local game = install_wave6()
+    local ctx = scored(add(game, "j_w6_plasma_like"))
+    T.assert_eq(ctx.chips, 6, "chips moved halfway toward mult")
+    T.assert_eq(ctx.mult, 6, "mult moved halfway toward chips")
+    wipe_mods()
+end)
+
+suite.test("wave6: a mixed_mod booster deals only mod content", function()
+    wipe_mods()
+    write_mod("Wave6Mix", {
+        id = "Wave6Mix", name = "Wave6Mix", prefix = "w6m", main_file = "main.lua",
+        version = "1.0.0", author = { "Someone" },
+    }, [[
+SMODS.Joker {
+    key = "mix_fodder", rarity = 1, cost = 3, sprite = "a.png",
+    loc_txt = { name = "Mix Fodder", text = { "x" } },
+}
+SMODS.Consumable {
+    set = "Tarot", key = "mix_card", sprite = "c.png",
+    loc_txt = { name = "Mix Card", text = { "x" } },
+    config = {},
+    can_use = function(self, card) return false end,
+    use = function(self, card) end,
+}
+SMODS.Booster {
+    key = "modded", sprite = "p.png",
+    loc_txt = { name = "Modded Pack", text = { "x" } },
+    pool = { mixed_mod = true }, card_count = 6, picks = 1, cost = 8, weight = 0,
+}
+]])
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Wave6Mix.status, "loaded",
+        tostring(ModLoader.by_id.Wave6Mix.error))
+    local game = bootstrap.new_game(9101)
+    G = game
+    game.consumables, game.jokers = {}, {}
+    local entry = SMODS.booster_entry_for("modded")
+    T.assert_true(entry ~= nil and entry.pool_kind == "mixed_mod")
+    local choices = game:_booster_build_choices({ pack = entry.pack, card_count = 6 })
+    T.assert_eq(#choices, 6, "the pack deals its full count")
+    for _, ch in ipairs(choices) do
+        if ch.kind == "joker" then
+            T.assert_true(JOKER_DEFS[ch.joker_id].mod_id ~= nil,
+                "every dealt Joker is mod content")
+        else
+            T.assert_true(ch.consumable_def.mod_id ~= nil,
+                "every dealt consumable is mod content")
+        end
+    end
+    wipe_mods()
+end)
+
 return suite

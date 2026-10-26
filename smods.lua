@@ -236,6 +236,8 @@ local EVENT_CONTEXT = {
     on_destroy = "remove_playing_cards",
     on_cards_added_to_deck = "playing_card_added",
     on_shop_enter = "starting_shop",
+    on_store_joker_create = "create_shop_card",
+    on_store_joker_modify = "modify_shop_card",
     on_shop_exit = "ending_shop",
     on_blind_skipped = "skip_blind",
     on_blind_defeated = "blind_defeated",
@@ -320,6 +322,25 @@ function SMODS.build_context(event_name, ctx, joker)
         c.debuffed = ctx.debuffed == true
     end
     if kind == "blind_disabled" then c.blind = ctx.blind end
+    -- The booster being opened (Wave 6): `context.card` is PC's seat for the
+    -- pack itself, so the pack view rides there as well as under its own
+    -- name, and `context.choices` is the session's LIVE choice list — a
+    -- calculate may rewrite entries (enhance a dealt card) or append through
+    -- `SMODS.add_card_to_booster` before the player picks.
+    if kind == "open_booster" then
+        c.booster = ctx.booster_view
+        c.card = ctx.booster_view
+        c.choices = ctx.choices
+    end
+    -- A shop card rolled or inserted (Wave 6): `context.card` is a plain
+    -- view of the offer (`{ id, kind, edition, rarity, price }`), the seat
+    -- PC's create_shop_card / modify_shop_card give the card itself. The raw
+    -- offer rides in `context.offer` for a Joker that wants to reprice or
+    -- replace it before it is shelved.
+    if kind == "create_shop_card" or kind == "modify_shop_card" then
+        c.card = ctx.offer_view
+        c.offer = ctx.offer
+    end
     if kind == "setting_ability" then
         c.other_card = refresh_card_view(ctx.card_node)
         c.old = ctx.old
@@ -460,8 +481,15 @@ function SMODS.apply_return(joker, ctx, ret, kind)
     if echips and Totals.cmp(echips, 1) ~= 0 then JokerEffects.pow_chips(ctx, echips) end
     if xchips and Totals.cmp(xchips, 1) ~= 0 then JokerEffects.mul_chips(ctx, xchips) end
     if xlogchips then JokerEffects.log_chips(ctx, xlogchips) end
-    if ret.swap then JokerEffects.swap_totals(ctx) end
+    if ret.swap == true then JokerEffects.swap_totals(ctx)
+    elseif type(ret.swap) == "number" then JokerEffects.blend_totals(ctx, ret.swap) end
     if ret.balance then JokerEffects.balance_totals(ctx, type(ret.balance) == "number" and ret.balance or nil) end
+    -- `add_picks` in an `open_booster` return (Wave 6): extra choices from
+    -- the pack being opened, accumulated on the raw event table where
+    -- `Game:begin_booster_session` reads it back and clamps to the deal.
+    if kind == "open_booster" and tonumber(ret.add_picks) then
+        ctx.add_picks = (tonumber(ctx.add_picks) or 0) + math.floor(tonumber(ret.add_picks))
+    end
     if ret.level_up then apply_return_level_up(ctx, ret.level_up) end
     if dollars and dollars ~= 0 then
         if kind == "end_of_round" then
@@ -2475,14 +2503,37 @@ function SMODS.Voucher(t)
     return t
 end
 
---- Run a mod voucher's `redeem` once, when it is gained.
+--- Run a mod voucher's `redeem` once, when it is gained. The ability copy it
+--- is handed is also kept on the game as the redeem-time snapshot, which
+--- `SMODS.unredeem_voucher_center` hands to an `unredeem` callback (Wave 6).
 function SMODS.redeem_voucher(id)
     local center = SMODS.Centers[id]
     local def = VOUCHER_DEFS and VOUCHER_DEFS[id]
     if not center or not def then return false end
-    if type(center.redeem) == "function" then
-        SMODS.call(center.mod, center.redeem, center, { ability = deep_copy(def.config or {}) })
+    local snapshot = { ability = deep_copy(def.config or {}) }
+    if G and type(G) == "table" then
+        G._mod_voucher_snapshots = G._mod_voucher_snapshots or {}
+        G._mod_voucher_snapshots[id] = snapshot
     end
+    if type(center.redeem) == "function" then
+        SMODS.call(center.mod, center.redeem, center, snapshot)
+    end
+    return true
+end
+
+--- Run a mod voucher's `unredeem` callback with its redeem-time snapshot
+--- (Wave 6). A voucher without the callback simply loses its passive
+--- modifiers when it leaves the redeemed list.
+function SMODS.unredeem_voucher_center(id)
+    local center = SMODS.Centers[id]
+    if not center or type(center.unredeem) ~= "function" then return false end
+    local snapshot = G and type(G) == "table" and G._mod_voucher_snapshots
+        and G._mod_voucher_snapshots[id] or nil
+    if not snapshot then
+        local def = VOUCHER_DEFS and VOUCHER_DEFS[id]
+        snapshot = { ability = deep_copy(def and def.config or {}) }
+    end
+    SMODS.call(center.mod, center.unredeem, center, snapshot)
     return true
 end
 
@@ -2732,6 +2783,143 @@ function SMODS.add_card(t)
     return nil
 end
 SMODS.create_card = SMODS.add_card
+
+--------------------------------------------------------------------------------
+-- Shop, vouchers and booster packs (Wave 6)
+--------------------------------------------------------------------------------
+
+--- Insert a booster pack offer onto the current shop's booster shelf, the
+--- way Paperback's Backpack and MoreFluff's Repack / lettergem B do. `pack`
+--- is a vanilla pack name ("arcana", "celestial", "spectral", "buffoon",
+--- "standard") or a registered booster's pack name / entry id; `opts.size`
+--- is a vanilla size ("normal" / "jumbo" / "mega", default "normal").
+--- `opts.free` shelves it at $0 (Backpack's couponed pack); `opts.price`
+--- overrides the base price before discounts (lettergem B's $7 pack);
+--- without either the shelf price is the pack's own cost, as the shop
+--- roll computes it. Returns the offer table, or nil outside a shop.
+--- An offer inserted this way is a real shelf entry: it buys through the
+--- shop's own booster path and rerolls away with the rest of the shelf.
+function SMODS.add_booster_to_shop(pack, opts)
+    if not (G and G.add_booster_offer_to_shop) then return nil end
+    return G:add_booster_offer_to_shop(pack, opts)
+end
+
+--- Insert a card or consumable offer onto the current shop's shelf, the
+--- seat Bunco's Running Joke needs for its Negative Joker. `spec.set` is
+--- "Joker" or a consumable kind ("tarot", "planet", "spectral", a
+--- registered kind); `spec.key` the center id. `spec.edition` is a string
+--- ("negative" for Running Joke); `spec.free` shelves it at $0 and
+--- `spec.price` overrides the base price before discounts. Returns the
+--- offer table, or nil when the center is unknown or outside a shop.
+function SMODS.add_shop_card(spec)
+    if not (G and G.insert_shop_offer) then return nil end
+    return G:insert_shop_offer(spec)
+end
+
+--- Roll (or, with `opts.key`, pick) one extra voucher offer onto the
+--- current shop's voucher shelf, MoreFluff's Junk Mail seat. `opts.price_fac`
+--- multiplies the offer's price (Junk Mail's 1.5x); the factor lives on
+--- the offer, so it survives repricing and does not touch later offers.
+--- Returns the offer table, or nil outside a shop.
+function SMODS.add_voucher_to_shop(opts)
+    if not (G and G.add_voucher_offer_to_shop) then return nil end
+    return G:add_voucher_offer_to_shop(opts)
+end
+
+--- Grant and redeem a voucher by id, the seat Cryptid's Chaplin and Trade
+--- need: the voucher joins the redeemed list and its effect applies
+--- exactly as if it had been bought (a mod voucher's `redeem` runs; a
+--- vanilla one applies through the game's own effect path). Returns true
+--- when the voucher was newly redeemed, false when it was already held
+--- or unknown.
+function SMODS.grant_voucher(id)
+    if not (G and G.grant_voucher) then return false end
+    return G:grant_voucher(id)
+end
+
+--- Reverse a redeemed voucher (Trade's seat): the voucher leaves the
+--- redeemed list and its standing effects come off. Mod vouchers run
+--- their `unredeem` callback with the ability snapshot taken at redeem
+--- time when they declare one; vanilla vouchers reverse the effects the
+--- game applies as deltas at redeem time (Overstock's shop slot,
+--- Paint Brush's hand size, consumable/joker capacity refreshes), and the
+--- effects the game reads live from the voucher list simply stop
+--- applying. One-time effects already spent (Hieroglyph's ante drop) are
+--- NOT rewound — that turn is over. Returns true when a voucher left.
+function SMODS.unredeem_voucher(id)
+    if not (G and G.unredeem_voucher) then return false end
+    return G:unredeem_voucher(id)
+end
+
+--- Multiply every current shop price by `fac` (Cryptid's ://DIVIDE, 0.5):
+--- card offers, booster offers and voucher offers alike. The factor lives
+--- per offer, so new offers after the call are unaffected and a later
+--- reprice keeps the factor; a free ($0) offer stays free.
+function SMODS.multiply_shop_prices(fac)
+    if not (G and G.multiply_shop_prices) then return false end
+    return G:multiply_shop_prices(fac)
+end
+
+--- Append one choice to the booster pack currently being opened, the
+--- seat MoreFluff's Bonus Sheet needs: while an `open_booster` calculate
+--- runs, the pack's live choice list is `context.choices`, and this adds
+--- to it before the player picks. `spec.set` is "Joker" (with optional
+--- `spec.rarity`), a consumable kind, or "Playing". Returns the choice
+--- table, or nil when no pack is open.
+function SMODS.add_card_to_booster(spec)
+    if not (G and G.append_booster_choice) then return nil end
+    return G:append_booster_choice(spec)
+end
+
+--- Queue a bonus for the NEXT booster pack opened (Cryptid's ://OFFBYONE):
+--- `cards` extra dealt cards and `picks` extra selections, on top of the
+--- pack's own size and picks. The bonus is spent the moment a pack opens
+--- (and only then — previews and rerolls do not eat it) and survives a
+--- mid-run snapshot.
+function SMODS.queue_next_booster_bonus(cards, picks)
+    if not G then return false end
+    local bonus = G.next_booster_bonus or {}
+    bonus.cards = (tonumber(bonus.cards) or 0) + (tonumber(cards) or 0)
+    bonus.picks = (tonumber(bonus.picks) or 0) + (tonumber(picks) or 0)
+    G.next_booster_bonus = bonus
+    return true
+end
+
+--- Bunco's Doorhanger seat: while a held mod Joker declares
+--- `replace_common_rarity = true` on its def, a Common shop rarity roll
+--- becomes Uncommon (2%), or Rare on a seeded 1-in-50 roll, before the
+--- pool is picked. With no such Joker held this returns the target
+--- untouched and draws no RNG, so vanilla sequences are unchanged.
+function SMODS.replace_common_rarity(game, ante, append, target_rar)
+    if tonumber(target_rar) ~= 1 then return target_rar end
+    local held = false
+    for _, j in ipairs(type(game) == "table" and game.jokers or EMPTY) do
+        -- PC's patch checks `not v.debuff`: a debuffed holder's
+        -- replacement does not run.
+        if j and j.def and j.def.smods and j.def.smods.replace_common_rarity == true
+            and not (j.mod_debuffed or j.debuffed or j.debuff) then
+            held = true break
+        end
+    end
+    if not held then return target_rar end
+    local roll = game:random("doorhanger" .. tostring(ante) .. tostring(append or "sho"))
+    if roll > 0.98 then return 3 end
+    return 2
+end
+
+--- The per-round consumable seat MoreFluff's Colour cards grow on: every
+--- held consumable whose center declares `end_of_round` hears it, once,
+--- after the round-end Joker batch has drained. A center without the
+--- callback is skipped, so vanilla consumables never see this call.
+function SMODS.consumable_end_of_round(game)
+    if type(game) ~= "table" or type(game.consumables) ~= "table" then return end
+    for _, c in ipairs(game.consumables) do
+        local center = type(c) == "table" and c.id and SMODS.Centers[c.id] or nil
+        if center and type(center.end_of_round) == "function" then
+            SMODS.call(center.mod, center.end_of_round, center, c, game)
+        end
+    end
+end
 
 --- Destroy a held Joker: gone for good, through the game's own removal, so a mod Joker's
 --- `remove_from_deck` runs and its art frees exactly as when the game removes one.
@@ -3633,7 +3821,7 @@ function SMODS.Booster(t)
 
     check(type(t.pool) == "table",
         "Booster '" .. t.key .. "': pool must be a table: { consumable = \"<kind>\" }, "
-        .. "{ jokers = true } or { playing = true }")
+        .. "{ jokers = true }, { playing = true } or { mixed_mod = true }")
     local pool_kind, consumable_kind
     if t.pool.consumable ~= nil then
         pool_kind = "consumable"
@@ -3658,10 +3846,12 @@ function SMODS.Booster(t)
         pool_kind = "jokers"
     elseif t.pool.playing then
         pool_kind = "playing"
+    elseif t.pool.mixed_mod then
+        pool_kind = "mixed_mod"
     end
     check(pool_kind ~= nil,
         "Booster '" .. t.key .. "': pool names no source: { consumable = \"<kind>\" }, "
-        .. "{ jokers = true } or { playing = true }")
+        .. "{ jokers = true }, { playing = true } or { mixed_mod = true }")
 
     local card_count = t.card_count == nil and 3 or math.floor(tonumber(t.card_count) or -1)
     check(card_count >= 1 and card_count <= 10,

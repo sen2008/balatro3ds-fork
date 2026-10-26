@@ -145,7 +145,8 @@ SMODS.Joker {
 | `context.card_added` | A Joker was gained (bought, created or given). `context.card` is the new Joker. Not raised when a saved run is loaded. |
 | `context.tag_added` | A Tag was gained. `context.tag_added` is the Tag. |
 | `context.starting_shop`, `context.ending_shop` | The shop opens; the player leaves it. |
-| `context.reroll_shop`, `context.buying_card`, `context.open_booster`, `context.skipping_booster`, `context.using_consumeable` | Shop and pack events. |
+| `context.reroll_shop`, `context.buying_card`, `context.open_booster`, `context.skipping_booster`, `context.using_consumeable` | Shop and pack events. `buying_card`'s raw event (`context.port`) carries `offer`, `offer_kind`, `offer_id` and `offer_price`. `open_booster` carries the pack itself: see [Shop, voucher and booster APIs](#shop-voucher-and-booster-apis). |
+| `context.create_shop_card`, `context.modify_shop_card` | A shop Joker offer is rolled (`create`, a draft: id / edition / stickers) and then priced and shelved (`modify`). `context.card` is a plain view of the offer (`{ id, kind, edition, rarity, price }`) and `context.offer` the live offer table. |
 | `context.playing_card_added`, `context.remove_playing_cards` | Cards added to or destroyed from the deck. |
 | `context.joker_type_destroyed` | A Joker was destroyed (an effect, self-destruction, Mr. Bones spending itself -- never a sale, and never run teardown or a save restore). `context.card` is the destroyed Joker; it hears about its own destruction too, so compare `context.card == card` to exclude it, as the PC mods do. |
 | `context.money_altered` | Money changed. `context.amount` is the signed change and `context.from_shop` is true when a shop purchase, reroll or voucher caused it. Fires for Joker and consumable dollars, shop spends, selling, round-end payout rows and interest, Tag payouts, rental charges, Hermit/Temperance/Immolate/Wraith, and the boss money effects (The Tooth, The Ox). Run setup, save restores and challenge seeding set money directly and do not fire it. A Joker that gains money because money changed nests at most 8 deep; past that the money still lands but raises no further context. |
@@ -823,7 +824,9 @@ no two mods may register the same one, and none may reuse a vanilla name
   that consumable kind -- a vanilla one, or a kind registered with
   `SMODS.ConsumableType` -- Soul / Black Hole polls included for the kinds
   that have them; `{ jokers = true }` deals unique Jokers, like a Buffoon
-  pack; `{ playing = true }` deals playing cards, like a Standard pack. A
+  pack; `{ playing = true }` deals playing cards, like a Standard pack.
+  `{ mixed_mod = true }` deals only mod content, coin-flipped per card
+  between a Joker and a consumable (MoreFluff's Modded packs). A
   consumable pack shows the hand when a card it dealt needs one, judged
   card by card like the pick gates judge them. One honest limit: the
   engine culls duplicates and in-play copies from a pack, so a pack whose
@@ -835,6 +838,123 @@ no two mods may register the same one, and none may reuse a vanilla name
   booster fallback panel and a white burst.
 - **Collection.** Registered packs list in the Boosters category after
   the vanilla packs, under the name and art of the registration.
+
+## Shop, voucher and booster APIs
+
+The shop's shelves are offer tables, and Wave 6 lets a mod put offers on
+them, take vouchers on and off the redeemed list, and reach inside an
+opening booster pack. Every function here is a no-op (or returns nil)
+outside the state it belongs to, and none of them spends a random draw
+while no mod uses them: a seeded vanilla shop, pack contents included,
+is unchanged until a mod acts.
+
+### Inserting offers
+
+- **`SMODS.add_booster_to_shop(pack, opts)`** shelves a booster pack
+  offer: a vanilla pack name (`"arcana"`, `"celestial"`, `"spectral"`,
+  `"buffoon"`, `"standard"`) or a registered booster's pack name or full
+  id. `opts.size` picks a vanilla size (default `"normal"`); `opts.free`
+  shelves it at $0 (Paperback's Backpack coupons its pack); `opts.price`
+  overrides the base price before discounts (MoreFluff's lettergem B
+  sells its Buffoon pack for $7). Returns the offer, or nil outside a
+  shop or for an unknown pack.
+- **`SMODS.add_shop_card(spec)`** shelves a card or consumable offer:
+  `spec.set` is `"Joker"` or a consumable kind, `spec.key` the centre
+  id, `spec.edition` an edition string, `spec.free` / `spec.price` as
+  above. A Joker offer is built like a rolled one -- stickers, create
+  params and price -- and the shelf may grow past the slot count, the
+  way PC's shop area grows for Bunco's Running Joke. The inserted offer
+  hears `modify_shop_card` before it is shelved.
+- **`SMODS.add_voucher_to_shop(opts)`** shelves one more voucher offer:
+  a fresh roll excluding the shelved and the owned, or `opts.key` for a
+  specific voucher. `opts.price_fac` multiplies its price (MoreFluff's
+  Junk Mail charges 1.5x); the factor lives on the offer, so repricing
+  keeps it and later offers never see it.
+- **`SMODS.multiply_shop_prices(fac)`** multiplies every current shelf
+  price (cards, boosters, vouchers) by `fac`, Cryptid's ://DIVIDE.
+  Per-offer, like `price_fac`: new offers are unaffected, a $0 offer
+  stays $0, and the factor dies with the offer on reroll.
+
+### Vouchers: grant and unredeem
+
+- **`SMODS.grant_voucher(id)`** redeems a voucher without a purchase:
+  the id joins the redeemed list and its effect applies as if bought
+  (a mod voucher's `redeem` runs; a vanilla one applies through the
+  game's own path). Returns false when the voucher is already held or
+  unknown. A grant is not a buy: no `buying_card` fires.
+- **`SMODS.unredeem_voucher(id)`** takes a redeemed voucher back,
+  Cryptid's Trade seat. A mod voucher runs its `unredeem` callback with
+  the ability snapshot its `redeem` was handed. Vanilla vouchers
+  reverse what redeem applies as a delta (Overstock's shop slot, Paint
+  Brush's hand size) plus the capacity refreshes; everything the game
+  reads live from the voucher list (rates, caps, weights, Observatory,
+  Magic Trick) simply stops applying. One-time effects already spent
+  are not rewound: Hieroglyph's ante drop stands.
+
+### Inside an opening pack
+
+`context.open_booster` fires once the pack's choices are dealt and its
+session exists:
+
+- **`context.booster`** (also `context.card`, PC's seat) is the pack
+  view: `{ pack, size, name, pool_kind, consumable_kind, card_count,
+  picks }`. `pool_kind` is `"consumable"`, `"jokers"`, `"playing"` or
+  `"mixed_mod"`; for a vanilla consumable pack `consumable_kind` is
+  `"tarot"`, `"planet"` or `"spectral"` (Cryptid's Digital
+  Hallucinations reads exactly this).
+- **`context.choices`** is the session's live choice list. A `calculate`
+  may rewrite an entry in place -- enhance a dealt playing card, say,
+  the way Bunco's JMJB does -- and the player picks from the rewritten
+  deal.
+- **`SMODS.add_card_to_booster(spec)`** appends one choice, in the same
+  shapes the pack dealt: `{ set = "Joker", rarity = n }` (or `key` for
+  a specific Joker), `{ set = "<kind>" }` for a consumable, `{ set =
+  "Playing" }`. MoreFluff's Bonus Sheet is the model caller.
+- Returning **`{ add_picks = n }`** grants extra picks from the open
+  pack, clamped to the number of choices (Bunco's Aristocrat).
+- **`SMODS.queue_next_booster_bonus(cards, picks)`** queues a bonus for
+  the NEXT pack opened (Cryptid's ://OFFBYONE): that many extra dealt
+  cards and picks on top of the pack's own. It is spent by the opening
+  itself, never by previews or rerolls, and survives a snapshot.
+
+### Declared modifiers
+
+Passive seats a mod declares in a Joker's or voucher's `config`, summed
+over held Jokers and redeemed mod vouchers by `SMODS.modifier_total`
+(the [Modifiers](#modifiers) machinery), all zero in a vanilla run:
+
+- **`booster_size_mod`** -- every pack deals that many extra cards
+  (Paperback's Protocol).
+- **`voucher_limit_mod`** -- the shop shelves that many extra voucher
+  offers (Paperback's Everything Must Go).
+- **`shop_size_mod`** -- the shop fills that many extra card slots
+  (Paperback's Shopping Center).
+- **`spectral_rate_mod`** -- adds to the shop queue's Spectral rate,
+  on top of the deck's own (Paperback's Ouija Board).
+- **`free_shop_purchases`** -- while any held Joker declares it
+  non-zero, card and consumable offers are $0 (Paperback's NormalJKR).
+  Vouchers and boosters still charge. A price that reaches $0 stays $0
+  for the rest of the shop visit, the same behaviour the Astronomer's
+  free Planets already have in this engine.
+
+Two one-off seats ride along:
+
+- **`game.rare_mod`** is a plain field on the game (default 1) that
+  scales the shop's Rare band; a Joker moves it from `add_to_deck` /
+  `remove_from_deck` the way PC moves `G.GAME.rare_mod` (MoreFluff's
+  Gem Alert multiplies it by 6.7). Uncommon keeps its 25% band beneath
+  the widened Rare band.
+- **`replace_common_rarity = true`** on a Joker def (Bunco's
+  Doorhanger): while such a Joker is held, a Common shop rarity roll
+  becomes Uncommon, or Rare on a seeded 1-in-50 roll. The rewrite
+  happens before the pool is picked and draws nothing when no such
+  Joker is held.
+- A numeric **`swap = f`** return blends the running totals: each
+  moves the fraction `f` toward the other (`swap = true` stays the
+  full exchange). MoreFluff's Plasma Sliver trades a tenth this way.
+- A consumable centre may declare **`end_of_round(self, card, game)`**:
+  it fires once per round end for each held copy, after the round-end
+  Joker batch -- the seat MoreFluff's Colour cards grow on.
 
 ## Custom decks
 
