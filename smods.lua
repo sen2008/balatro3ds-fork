@@ -1676,6 +1676,45 @@ function SMODS.Enhancement(t)
     local weight = t.weight == nil and 1 or math.floor(tonumber(t.weight) or -1)
     check(weight >= 0, "Enhancement '" .. t.original_key .. "': weight must be a whole number >= 0")
     entry.weight = weight
+    -- Identity fields (Wave 7b): an enhancement may declare that a card
+    -- carrying it stops reading as its printed rank/suit. `specific_rank` /
+    -- `specific_suit` are the rank/suit token the hand evaluator groups by
+    -- (an Abstract card pairs with other Abstract cards, never with its
+    -- printed rank, and cannot join a straight); `replace_base_card` also
+    -- zeroes the printed rank's chip value and hides the rank/suit pips
+    -- under the enhancement's own face; `always_scores` marks the card
+    -- scoring whenever it is played, Stone's privilege. All four are read
+    -- only behind `SMODS._any_enhancement_identity`, which no vanilla run
+    -- ever sets, so an unmodded game evaluates exactly as before.
+    for _, field in ipairs({ "specific_rank", "specific_suit", "replace_base_card",
+        "no_rank", "no_suit", "any_suit", "always_scores", "shatters", "force_no_face",
+        "neighbour_repetition" }) do
+        if t[field] ~= nil then entry[field] = t[field] end
+    end
+    if entry.specific_rank ~= nil or entry.specific_suit ~= nil
+        or entry.replace_base_card or entry.always_scores
+        or entry.no_rank or entry.no_suit or entry.any_suit then
+        SMODS._any_enhancement_identity = true
+    end
+    if type(t.calculate) == "function" then
+        SMODS._any_enhancement_calculate = true
+        -- A calculate may answer the repetition query, so its presence
+        -- alone opens the retrigger channel (Echo's shape).
+        SMODS._any_enhancement_retrigger = true
+    end
+    -- An enhancement may opt into the discard moment (`calculate_on_discard`):
+    -- its calculate then also hears `SMODS.enhancement_discard_event` when
+    -- its card is pushed to the discard pile, by a discard or by the play
+    -- cleanup (Power's shuffle-back rule). No other enhancement is called
+    -- there; the center dispatch keeps skipping the moment.
+    if t.calculate_on_discard then
+        entry.calculate_on_discard = true
+        SMODS._any_enhancement_discard = true
+    end
+    local cfg = type(t.config) == "table" and t.config or {}
+    if cfg.retrigger ~= nil or cfg.retrigger_held ~= nil then
+        SMODS._any_enhancement_retrigger = true
+    end
     if t.sprite ~= nil then
         entry.sprite = register_sprite(entry.mod, t.sprite, "Enhancement", t.original_key, "sprite")
     end
@@ -2063,7 +2102,7 @@ end
 --- The moments a card center fires at, as the context a `calculate` sees:
 --- the event's own flag, the card as `other_card`, the raw event as `port`.
 local function center_context(node, event_name, ctx)
-    return {
+    local c = {
         individual = true,
         event = event_name,
         [event_name] = true,
@@ -2072,6 +2111,38 @@ local function center_context(node, event_name, ctx)
         discard_reason = ctx.discard_reason,
         port = ctx,
     }
+    -- Wave 7b: an enhancement's `calculate` additionally sees the card's
+    -- persistent enhancement state (`context.state`, the attachment
+    -- pattern), whether this beat is the scoring pass (`main_scoring`),
+    -- and the scoring hand as card views (`scoring_hand`, the scoring
+    -- subset of the played list when the marks are known). A card with no
+    -- registered enhancement gets none of the three, and a seal sharing
+    -- the card simply ignores them.
+    local data = type(node) == "table" and node.card_data or nil
+    local enh = (type(node) == "table" and node.enhancement) or (data and data.enhancement)
+    if enh and SMODS.EnhancementByValue[enh] then
+        c.state = SMODS.enhancement_state(node)
+        c.main_scoring = event_name == "card_played"
+        local src = ctx.scoring_cards or ctx.cards
+        if type(src) == "table" then
+            local any_marked = false
+            for _, n in ipairs(src) do
+                if type(n) == "table" and n.counts_for_play_score ~= nil then
+                    any_marked = true
+                    break
+                end
+            end
+            local views = {}
+            for _, n in ipairs(src) do
+                if type(n) == "table"
+                    and (not any_marked or n.counts_for_play_score == true) then
+                    views[#views + 1] = refresh_card_view(n)
+                end
+            end
+            c.scoring_hand = views
+        end
+    end
+    return c
 end
 
 --- A registered enhancement's and seal's turn at one of the card moments
@@ -2117,6 +2188,16 @@ function SMODS.card_center_event(node, event_name, ctx)
             local ret = SMODS.call(eentry.mod, eentry.calculate, eentry,
                 refresh_card_view(node), center_context(node, event_name, ctx))
             if apply_center_return(ctx, ret) then fired = true end
+            -- Wave 7b: at round end an enhancement may vote its own card
+            -- destroyed by returning `remove = true` (Abstract's shatter
+            -- roll). The card is mid-iteration here, so the destroy is
+            -- queued and flushed by `Game:emit_hand_cards_event` once the
+            -- pass completes, never executed inline.
+            if event_name == "on_round_end" and type(ret) == "table"
+                and ret.remove == true then
+                SMODS.queue_enhancement_destroy(node)
+                fired = true
+            end
         end
     end
 
@@ -2156,6 +2237,321 @@ function SMODS.seal_retrigger_count(node, held)
         end
     end
     return math.max(0, math.floor(n))
+end
+
+--- A registered enhancement's entry for a card-carried value, or nil.
+function SMODS.enhancement_entry(value)
+    if type(value) ~= "string" then return nil end
+    return SMODS.EnhancementByValue[value]
+end
+
+--- One field of a registered enhancement's entry (identity flags live here).
+function SMODS.enhancement_flag(value, field)
+    local entry = SMODS.enhancement_entry(value)
+    return entry and entry[field] or nil
+end
+
+--- A card's persistent per-enhancement state: the enhancement center's
+--- `config`, deep-copied onto the card the first time it is asked for,
+--- Steamodded's `card.ability` for the enhancement. It lives in
+--- `card_data.enhancement_state`, so it rides deck copies and run
+--- snapshots untouched, and it re-seeds from the new center's config
+--- whenever the card's enhancement no longer matches the value the state
+--- was seeded for (a conversion or transform makes the old state
+--- meaningless). Returns the live state table, or nil when the card
+--- carries no registered enhancement.
+function SMODS.enhancement_state(node)
+    if type(node) ~= "table" or type(node.card_data) ~= "table" then return nil end
+    local data = node.card_data
+    local enh = node.enhancement or data.enhancement
+    local entry = enh and SMODS.EnhancementByValue[enh]
+    if not entry then return nil end
+    local store = data.enhancement_state
+    if type(store) ~= "table" or store.value ~= entry.value then
+        store = { value = entry.value, data = deep_copy(entry.config or {}) }
+        data.enhancement_state = store
+    end
+    return store.data
+end
+
+--- Whether held Jokers consider this card to carry `name` (any spelling
+--- `enhancement_name` resolves): each held mod Joker is asked with a
+--- `check_enhancement` context, Steamodded's query of the same name, and
+--- any returned table whose keys name the enhancement counts (Cat Owl's
+--- "Lucky Cards are considered Echo Cards"). With no mod Joker held the
+--- question is never asked.
+function SMODS.check_enhancement(node, name)
+    if type(node) ~= "table" then return false end
+    local want = enhancement_name(name)
+    if not want then return false end
+    local found = false
+    SMODS.ask_jokers(function()
+        return { check_enhancement = true, other_card = node }
+    end, function(_, ret)
+        if found or type(ret) ~= "table" then return end
+        for k in pairs(ret) do
+            if enhancement_name(k) == want then found = true break end
+        end
+    end)
+    return found
+end
+
+--- Whether a card carries `name`, its own enhancement or one held Jokers
+--- consider it to have. A debuffed card still *carries* its enhancement;
+--- the silence for debuff lives at each dispatch site, as on PC.
+function SMODS.has_enhancement(node, name)
+    if type(node) ~= "table" then return false end
+    local want = enhancement_name(name)
+    if not want then return false end
+    local data = node.card_data or {}
+    local own = enhancement_name(node.enhancement or data.enhancement)
+    if own == want then return true end
+    return SMODS.check_enhancement(node, name)
+end
+
+--- How many retrigger passes a card's enhancement grants, mirroring
+--- `SMODS.seal_retrigger_count`: the registered enhancement's own
+--- `config.retrigger` / `config.retrigger_held`, plus its `calculate`
+--- asked with `context.repetition` (given the card's persistent `state`),
+--- plus the same two for any *other* registered enhancement held Jokers
+--- consider the card to carry (a Lucky card an Echo-granting Joker claims
+--- retriggers as Echo does). When the played set is passed, enhancements
+--- that opted in with `neighbour_repetition` are also asked about this
+--- card from their own seats in the set. Called from
+--- `Game:collect_retrigger_sources` behind the
+--- `SMODS._any_enhancement_retrigger` gate, which no vanilla run sets.
+function SMODS.enhancement_retrigger_count(node, held, scoring_nodes)
+    if type(node) ~= "table" then return 0 end
+    local view = refresh_card_view(node)
+    if view.debuff then return 0 end
+    local data = node.card_data or {}
+    local own = enhancement_name(node.enhancement or data.enhancement)
+    local candidates, seen = {}, {}
+    local function add_candidate(value)
+        if value and not seen[value] and SMODS.EnhancementByValue[value] then
+            seen[value] = true
+            candidates[#candidates + 1] = value
+        end
+    end
+    add_candidate(own)
+    -- Aliases: every registered enhancement some held Joker claims for
+    -- this card. ask_jokers no-ops when no mod Joker is held.
+    SMODS.ask_jokers(function()
+        return { check_enhancement = true, other_card = node }
+    end, function(_, ret)
+        if type(ret) ~= "table" then return end
+        for k in pairs(ret) do add_candidate(enhancement_name(k)) end
+    end)
+    local n = 0
+    for _, value in ipairs(candidates) do
+        local entry = SMODS.EnhancementByValue[value]
+        -- The carried enhancement reads its retrigger counts from its
+        -- persistent state first (state, then the registered config,
+        -- the attachment rule); an alias the card does not carry reads
+        -- the registered config only and calculates against a throwaway
+        -- state seeded the same way.
+        local state = value == own and SMODS.enhancement_state(node)
+            or deep_copy(entry.config or {})
+        local src = state
+        local count = tonumber(src[held and "retrigger_held" or "retrigger"])
+        if count == nil then count = tonumber(entry.config[held and "retrigger_held" or "retrigger"]) end
+        n = n + (tonumber(count) or 0)
+        if type(entry.calculate) == "function" then
+            local c = {
+                repetition = true,
+                held = held == true,
+                cardarea = held and (G and G.hand) or ((G and G.play) or SMODS.PLAY),
+                other_card = view,
+                state = state,
+                port = {},
+            }
+            local ret = SMODS.call(entry.mod, entry.calculate, entry, view, c)
+            if type(ret) == "table" then
+                n = n + math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+            end
+        end
+    end
+    -- Neighbour questions, opt-in per enhancement (`neighbour_repetition`
+    -- at registration, Bandaged's shape): the OTHER played cards'
+    -- enhancements are asked about this card, with the scoring hand to
+    -- judge position from. Only enhancements that opted in are ever
+    -- asked, so a carried enhancement's own repetition answer can never
+    -- leak onto its neighbours.
+    if not held and type(scoring_nodes) == "table" then
+        local views = nil
+        for _, other in ipairs(scoring_nodes) do
+            if other ~= node and type(other) == "table" then
+                local odata = other.card_data or {}
+                local oenh = enhancement_name(other.enhancement or odata.enhancement)
+                local oentry = oenh and SMODS.EnhancementByValue[oenh]
+                if oentry and oentry.neighbour_repetition
+                    and type(oentry.calculate) == "function"
+                    and not refresh_card_view(other).debuff then
+                    if views == nil then
+                        views = {}
+                        for _, sn in ipairs(scoring_nodes) do
+                            views[#views + 1] = refresh_card_view(sn)
+                        end
+                    end
+                    local c = {
+                        repetition = true,
+                        neighbour_repetition = true,
+                        cardarea = (G and G.play) or SMODS.PLAY,
+                        other_card = view,
+                        scoring_hand = views,
+                        state = SMODS.enhancement_state(other),
+                        port = {},
+                    }
+                    local ret = SMODS.call(oentry.mod, oentry.calculate, oentry,
+                        refresh_card_view(other), c)
+                    if type(ret) == "table" then
+                        n = n + math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+                    end
+                end
+            end
+        end
+    end
+    return math.max(0, math.floor(n))
+end
+
+--- The post-scoring destroy question for one played card (Bandaged's
+--- break roll): the card's registered enhancement is asked with a
+--- `destroy_card` context over the scoring hand, and answers by returning
+--- `remove = true`. The caller owns the destroy itself, at a point where
+--- removing the card is safe. False for any card without a registered
+--- enhancement that calculates.
+function SMODS.enhancement_destroy_check(node, scoring_nodes)
+    if type(node) ~= "table" then return false end
+    if refresh_card_view(node).debuff then return false end
+    local data = node.card_data or {}
+    local enh = node.enhancement or data.enhancement
+    local entry = enh and SMODS.EnhancementByValue[enh]
+    if not entry or type(entry.calculate) ~= "function" then return false end
+    local view = refresh_card_view(node)
+    local scoring = {}
+    local in_play = false
+    for _, n in ipairs(scoring_nodes or {}) do
+        if type(n) == "table" then scoring[#scoring + 1] = refresh_card_view(n) end
+        if n == node then in_play = true end
+    end
+    local c = {
+        destroy_card = view,
+        -- The asked card's own area: the play area when it was among the
+        -- scoring cards, the hand when the question reaches it there
+        -- (Abstract's "or hand played" branch lives in the hand).
+        cardarea = in_play and ((G and G.play) or SMODS.PLAY) or (G and G.hand),
+        other_card = view,
+        scoring_hand = scoring,
+        state = SMODS.enhancement_state(node),
+        port = {},
+    }
+    local ret = SMODS.call(entry.mod, entry.calculate, entry, view, c)
+    return type(ret) == "table" and ret.remove == true or false
+end
+
+--- The discard moment for one card, for enhancements that opted in at
+--- registration (`calculate_on_discard`): called from the discard
+--- plumbing once the card's data has been pushed to the discard pile,
+--- for a player's discard and for the play cleanup alike. The return
+--- is ignored; the calculate acts on the deck itself (Power moves its
+--- own data back into the draw pile). Silent for every other card.
+function SMODS.enhancement_discard_event(node, reason)
+    if type(node) ~= "table" then return end
+    local data = node.card_data or {}
+    local enh = node.enhancement or data.enhancement
+    local entry = enh and SMODS.EnhancementByValue[enh]
+    if not entry or not entry.calculate_on_discard
+        or type(entry.calculate) ~= "function" then return end
+    if refresh_card_view(node).debuff then return end
+    local c = center_context(node, "on_discard", { discard_reason = reason })
+    SMODS.call(entry.mod, entry.calculate, entry, refresh_card_view(node), c)
+end
+
+--- Queue a card for destruction once the current card pass completes
+--- (see the round-end `remove` return in `SMODS.card_center_event`).
+function SMODS.queue_enhancement_destroy(node)
+    if type(node) ~= "table" then return end
+    local q = SMODS._enh_destroy_queue
+    if not q then q = {} SMODS._enh_destroy_queue = q end
+    for _, n in ipairs(q) do if n == node then return end end
+    q[#q + 1] = node
+end
+
+--- Destroy every queued card. Called at the end of
+--- `Game:emit_hand_cards_event`; a no-op when nothing queued, which is
+--- every vanilla pass.
+function SMODS.flush_enhancement_destroys()
+    local q = SMODS._enh_destroy_queue
+    if not q or #q == 0 then return end
+    SMODS._enh_destroy_queue = {}
+    for _, node in ipairs(q) do
+        SMODS.destroy_card(node)
+    end
+end
+
+--- Set a card's enhancement through the canonical setter (sprite and
+--- center swap, `setting_ability` event); the name resolves through
+--- `enhancement_name` first, so value, `m_<key>` and `m_<full id>`
+--- spellings all land, and an unknown name is refused rather than
+--- stored. The per-card state re-seeds lazily on next read. The
+--- pack-facing spelling of the transform verb for cards.
+function SMODS.set_enhancement(node, name)
+    if type(node) ~= "table" or type(node.set_enhancement) ~= "function" then
+        return false
+    end
+    local value = name
+    if name ~= nil then
+        value = enhancement_name(name)
+        if value == nil then return false end
+    end
+    node:set_enhancement(value)
+    return true
+end
+
+--- Transform a held Joker into another center mid-run, `Card:set_ability`
+--- for Jokers: identity, cost, ability (re-seeded from the new center,
+--- its own `set_ability` included) and art all swap; edition, stickers
+--- and the Joker's slot stay. Neither center's deck hooks fire, exactly
+--- as PC's `set_ability` fires none. Accepts a full key (`j_mf_halt`),
+--- a mod key (`mf_halt`), or a bare key (`halt`) when exactly one
+--- registered center ends with it.
+function SMODS.transform_joker(joker, key)
+    if type(joker) ~= "table" or type(key) ~= "string" then return false end
+    local def = JOKER_DEFS and (JOKER_DEFS[key] or JOKER_DEFS["j_" .. key])
+    if not def and JOKER_DEFS then
+        local suffix = "_" .. key
+        for id, candidate in pairs(JOKER_DEFS) do
+            if id:sub(-#suffix) == suffix then
+                if def then return false end -- ambiguous bare key
+                def = candidate
+            end
+        end
+    end
+    if not def then return false end
+    joker.def = def
+    joker.name = def.name or "Joker"
+    joker.rarity = def.rarity or "common"
+    local base_cost = tonumber(def.cost) or 1
+    local ec = Joker and Joker.edition_price_deltas
+        and Joker.edition_price_deltas(joker.edition) or 0
+    joker.cost = base_cost + ec
+    joker.sell_cost = math.max(1, math.floor(joker.cost / 2))
+    if def.smods and SMODS.init_ability then
+        SMODS.init_ability(joker)
+        joker.effect_config = joker.ability
+    else
+        joker.ability = nil
+        joker.effect_config = def.config or {}
+    end
+    if JokerEffects and JokerEffects.get then
+        joker.effect_impl = JokerEffects.get(joker)
+    end
+    if def.pos then
+        joker.front_atlas_name = def.pos.atlas_name
+        joker.front_index = def.pos.index
+    end
+    if type(joker.refresh_quads) == "function" then joker:refresh_quads() end
+    return true
 end
 
 --- The attachments a card carries calculate here: same view, same context

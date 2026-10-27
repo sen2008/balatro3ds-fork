@@ -11901,6 +11901,15 @@ function Game:collect_retrigger_sources(held, retrigger_ctx, out)
         local extra = SMODS.attachment_retrigger_count(card, held)
         for _ = 1, extra do out[#out + 1] = false end
     end
+    -- An enhancement's own retriggers (Wave 7b) sit beside the attachment's.
+    -- The gate flag is set only when a mod registers an enhancement that
+    -- can answer, so vanilla source collection is untouched.
+    if card and SMODS and SMODS._any_enhancement_retrigger
+        and SMODS.enhancement_retrigger_count then
+        local extra = SMODS.enhancement_retrigger_count(card, held,
+            retrigger_ctx.played_cards)
+        for _ = 1, extra do out[#out + 1] = false end
+    end
 
     -- Slot order already drops the joker Crimson Heart disabled this round.
     for _, j in ipairs(self:_collect_jokers_in_slot_order()) do
@@ -11948,6 +11957,12 @@ function Game:emit_hand_cards_event(event_name, ctx)
                 end
             end
         end
+    end
+    -- Enhancement self-destroys voted during the pass (Abstract's round-end
+    -- shatter) land now that no iteration is live. The queue exists only
+    -- when an enhancement asked, so vanilla passes never reach the call.
+    if SMODS and SMODS._enh_destroy_queue then
+        SMODS.flush_enhancement_destroys()
     end
 end
 

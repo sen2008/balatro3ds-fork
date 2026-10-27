@@ -866,6 +866,25 @@ function Hand:_discard_selected_impl(reason, opts)
                 self:destroy_card_node(node, true)
             end
         end
+        -- The enhancements' own destroy question (Wave 7b), in the same
+        -- seat as the Glass roll: any card still in the hand area --
+        -- played or merely held -- whose registered enhancement answers
+        -- `remove = true` to the destroy context breaks before the
+        -- discard push (Bandaged's break when scored; Abstract's break
+        -- when a hand was played around it). The gate flag exists only
+        -- when a mod registered an enhancement that calculates at all.
+        if SMODS and SMODS._any_enhancement_calculate
+            and SMODS.enhancement_destroy_check then
+            local asked = {}
+            for _, node in ipairs(self.card_nodes) do
+                if node and node.card_data then asked[#asked + 1] = node end
+            end
+            for _, node in ipairs(asked) do
+                if SMODS.enhancement_destroy_check(node, to_try) then
+                    self:destroy_card_node(node, true)
+                end
+            end
+        end
     end
     local deck = self.game.deck
     local discarded_nodes = {}
@@ -887,6 +906,17 @@ function Hand:_discard_selected_impl(reason, opts)
                 table.insert(discarded_cards, node.card_data)
                 deck:push_discard(node.card_data)
             end
+        end
+    end
+    -- Registered enhancements that opted into the discard moment (Wave
+    -- 7b) hear it here, where a player's discard and the play cleanup
+    -- have both just pushed their cards (Power's shuffle-back rule
+    -- lives on it). The registry flag exists only when such an
+    -- enhancement is loaded, so vanilla discards never reach the call.
+    if SMODS and SMODS._any_enhancement_discard
+        and SMODS.enhancement_discard_event then
+        for _, node in ipairs(discarded_nodes) do
+            SMODS.enhancement_discard_event(node, reason)
         end
     end
     local selected_set = {}
@@ -1423,14 +1453,27 @@ function Hand:build_contained_hand_types(nodes)
         local rank = data.rank
         local suit = data.suit
         local enhancement = data.enhancement
+        -- Wave 7b identity, as in the full evaluator: a specific-rank
+        -- enhancement's token groups here too. Plain reads while the
+        -- gate flag is unset (every vanilla run).
+        local ientry = nil
+        if SMODS and SMODS._any_enhancement_identity and enhancement then
+            ientry = SMODS.enhancement_entry(enhancement)
+        end
         -- Stone Cards are rankless/suitless (reference/Balatro/card.lua:957-981).
-        if rank ~= nil then
+        if ientry and ientry.specific_rank ~= nil then
+            rank_counts[ientry.specific_rank] = (rank_counts[ientry.specific_rank] or 0) + 1
+        elseif ientry and ientry.no_rank then
+            -- Rankless: groups with nothing.
+        elseif rank ~= nil then
             rank_counts[rank] = (rank_counts[rank] or 0) + 1
         end
-        if enhancement == "wild" then
+        local eff_suit = ientry and ientry.specific_suit ~= nil and ientry.specific_suit or suit
+        if ientry and ientry.no_suit then eff_suit = nil end
+        if enhancement == "wild" or (ientry and ientry.any_suit) then
             wild_count = wild_count + 1
-        elseif suit ~= nil then
-            suit_counts[suit] = (suit_counts[suit] or 0) + 1
+        elseif eff_suit ~= nil then
+            suit_counts[eff_suit] = (suit_counts[eff_suit] or 0) + 1
         end
         n = n + 1
     end
@@ -1722,6 +1765,10 @@ function Hand:_update_play_sequence(dt)
                         hand_index = G.selectedHand,
                         hand_level = G.selectedHandLevel,
                         card_node = node,
+                        -- The played list under a name no other context
+                        -- builder reads: enhancement calculates (Wave 7b)
+                        -- take their `scoring_hand` from it.
+                        scoring_cards = seq.cards,
                         photograph_first_face_node = seq.photograph_first_face_node,
                         photograph_pareidolia = seq.photograph_pareidolia,
                     }
@@ -2380,7 +2427,17 @@ function Hand:accumulate_card_score(chips, mult, node, include_edition)
     -- carries on from wherever this leaves the slot.
     self._effect_slot = 0
 
-    local card_chips = base_card_chips(rank) + bonus
+    -- A replace-base enhancement (Wave 7b's identity fields) contributes
+    -- no rank chips: the enhancement IS the card. Bonus and perma chips
+    -- below still land. The gate flag exists only when a mod registered
+    -- such an enhancement.
+    local base_chips = base_card_chips(rank)
+    if SMODS and SMODS._any_enhancement_identity and data.enhancement
+        and SMODS.enhancement_flag
+        and SMODS.enhancement_flag(data.enhancement, "replace_base_card") then
+        base_chips = 0
+    end
+    local card_chips = base_chips + bonus
     chips = chips + card_chips
 
     local mod_chip_bonus, mod_mult_bonus = self:get_modifier_bonus(data)
@@ -2412,7 +2469,7 @@ function Hand:accumulate_card_score(chips, mult, node, include_edition)
     -- (`common_events.lua:779-935`); this used to add them together and show one number, so a
     -- Bonus card and a plain one of the same rank announced identically.
     self:announce_card_effects(node, card_center_x, card_center_y, {
-        { amount = base_card_chips(rank), kind = "chips" },
+        { amount = base_chips, kind = "chips" },
         { amount = bonus, kind = "chips" },
         { amount = mod_chip_bonus, kind = "chips" },
         -- `> 0`, not `> 1`: this was guarded against 1 and silently swallowed a +1 mult.
@@ -2820,6 +2877,24 @@ function Hand:calculate_play()
         return suit
     end
 
+    -- Wave 7b identity: a card whose registered enhancement declares a
+    -- `specific_rank` / `specific_suit` evaluates as that token instead of
+    -- its printed rank/suit (Cryptid's Abstract). The helpers below are
+    -- plain field reads while the gate flag is unset, which is every
+    -- vanilla run, so unmodded evaluation is untouched.
+    local enh_identity = SMODS and SMODS._any_enhancement_identity
+    local function identity_entry(node)
+        if not enh_identity then return nil end
+        local e = (node.card_data or {}).enhancement
+        return e and SMODS.enhancement_entry(e) or nil
+    end
+    local function effective_rank(node)
+        local entry = identity_entry(node)
+        if entry and entry.specific_rank ~= nil then return entry.specific_rank end
+        if entry and entry.no_rank then return nil end
+        return (node.card_data or {}).rank
+    end
+
     -- Collect ranks / suits (hand order); track high rank for marking high card later
     local ranks = {}
     local suits = {}
@@ -2837,23 +2912,38 @@ function Hand:calculate_play()
         if node and node.face_up == false then
             has_face_down_selected = true
         end
+        local ientry = identity_entry(node)
+        local specific_rank = ientry and ientry.specific_rank
+        local specific_suit = ientry and ientry.specific_suit
 
         -- Stone Cards are rankless/suitless (reference/Balatro/card.lua:957-981).
-        if rank ~= nil then
+        if specific_rank ~= nil then
+            -- Groups only with its own kind: counted for the of-a-kind
+            -- patterns, kept out of the straight list and the high-card
+            -- race, where a token has no order.
+            rank_counts[specific_rank] = (rank_counts[specific_rank] or 0) + 1
+        elseif ientry and ientry.no_rank then
+            -- No rank at all (Power / Ransom Note): groups with nothing,
+            -- like a Stone Card, but still a card in the play.
+        elseif rank ~= nil then
             table.insert(ranks, rank)
             rank_counts[rank] = (rank_counts[rank] or 0) + 1
         end
-        if suit ~= nil then
-            table.insert(suits, suit)
+        local eff_suit = specific_suit ~= nil and specific_suit or suit
+        if ientry and ientry.no_suit then eff_suit = nil end
+        if eff_suit ~= nil then
+            table.insert(suits, eff_suit)
         end
-        if enhancement == "wild" then
+        if enhancement == "wild" or (ientry and ientry.any_suit) then
+            -- An any-suit card (Power) fills a flush the way a Wild does.
             wild_count = wild_count + 1
-        elseif suit ~= nil then
-            local normalized_suit = normalized_suit_for_scoring(suit)
+        elseif eff_suit ~= nil then
+            local normalized_suit = normalized_suit_for_scoring(eff_suit)
             suit_counts[normalized_suit] = (suit_counts[normalized_suit] or 0) + 1
         end
 
-        if type(rank) == "number" then
+        if specific_rank == nil and not (ientry and ientry.no_rank)
+            and type(rank) == "number" then
             if max_rank_for_high == nil or rank > max_rank_for_high then
                 max_rank_for_high = rank
             end
@@ -3098,7 +3188,7 @@ function Hand:calculate_play()
 
     local function mark_rank_scoring(r)
         for _, node in ipairs(ordered) do
-            if (node.card_data or {}).rank == r then
+            if effective_rank(node) == r then
                 node.counts_for_play_score = true
             end
         end
@@ -3113,9 +3203,19 @@ function Hand:calculate_play()
             local t = {}
             for _, node in ipairs(ordered) do
                 local data = node.card_data or {}
-                if data.enhancement == "wild"
-                    or (data.enhancement ~= "stone" and data.suit ~= nil
-                        and normalized_suit_for_scoring(data.suit) == want) then
+                -- A specific-suit card (Wave 7b) belongs to its token's
+                -- flush, never to its printed suit's; an any-suit card
+                -- belongs to every flush, like a Wild.
+                local ientry = identity_entry(node)
+                local suit_match
+                if ientry and ientry.specific_suit ~= nil then
+                    suit_match = normalized_suit_for_scoring(ientry.specific_suit) == want
+                else
+                    suit_match = data.suit ~= nil
+                        and normalized_suit_for_scoring(data.suit) == want
+                end
+                if data.enhancement == "wild" or (ientry and ientry.any_suit)
+                    or (data.enhancement ~= "stone" and suit_match) then
                     t[#t + 1] = node
                 end
             end
@@ -3131,6 +3231,10 @@ function Hand:calculate_play()
         for _, node in ipairs(ordered) do
             local data = node.card_data or {}
             local r = data.enhancement ~= "stone" and tonumber(data.rank) or nil
+            -- A specific-rank or rankless card (Wave 7b) has no place in
+            -- a run, whatever rank is printed under its enhancement.
+            local ientry = identity_entry(node)
+            if ientry and (ientry.specific_rank ~= nil or ientry.no_rank) then r = nil end
             if r and r >= 2 and r <= 14 then
                 by_rank[r] = by_rank[r] or {}
                 table.insert(by_rank[r], node)
@@ -3218,6 +3322,18 @@ function Hand:calculate_play()
         local enh = node.enhancement or (node.card_data and node.card_data.enhancement)
         if enh == "stone" then
             node.counts_for_play_score = true
+        end
+    end
+
+    -- A registered enhancement may claim the same privilege (Wave 7b's
+    -- `always_scores`: Power, Ransom Note). The gate flag exists only
+    -- when a mod registered such an enhancement.
+    if enh_identity then
+        for _, node in ipairs(ordered) do
+            local entry = identity_entry(node)
+            if entry and entry.always_scores then
+                node.counts_for_play_score = true
+            end
         end
     end
 

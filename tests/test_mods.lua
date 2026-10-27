@@ -5592,4 +5592,333 @@ suite.test("mod run state: isolation and snapshot round-trip", function()
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Enhancement channels: retrigger query, per-card state, transforms (Wave 7b)
+--------------------------------------------------------------------------------
+
+local ENH7B = [[
+SMODS.Enhancement {
+    key = "chime",
+    loc_txt = { name = "Chime", text = { "test chime" } },
+    config = { retrigger = 1, extra = { count = 5 } },
+    weight = 0,
+    calculate = function(self, card, context)
+        if context.repetition and not context.held then
+            return { repetitions = 1 }
+        end
+        if context.card_played and context.state then
+            context.state.extra.count = context.state.extra.count + 1
+            return { mult = context.state.extra.count }
+        end
+        if context.destroy_card then
+            if card.base and card.base.id == 13 then return { remove = true } end
+        end
+        if context.on_round_end and context.state
+            and context.state.extra.count >= 7 then
+            return { remove = true }
+        end
+    end,
+}
+SMODS.Enhancement {
+    key = "mirror",
+    loc_txt = { name = "Mirror", text = { "test mirror" } },
+    config = { retrigger = 2 },
+    weight = 0,
+    specific_rank = "te_mirror",
+    specific_suit = "te_mirror",
+    replace_base_card = true,
+    always_scores = true,
+    calculate = function(self, card, context)
+        if context.repetition then return { repetitions = 1 } end
+    end,
+}
+SMODS.Enhancement {
+    key = "spark",
+    loc_txt = { name = "Spark", text = { "test spark" } },
+    config = { x_mult = 2 },
+    weight = 0,
+    replace_base_card = true,
+    no_rank = true,
+    any_suit = true,
+    always_scores = true,
+}
+SMODS.Enhancement {
+    key = "bell",
+    loc_txt = { name = "Bell", text = { "test bell" } },
+    config = { extra = { discards = 0 } },
+    weight = 0,
+    calculate_on_discard = true,
+    calculate = function(self, card, context)
+        if context.on_discard and context.state then
+            context.state.extra.discards = context.state.extra.discards + 1
+        end
+    end,
+}
+SMODS.Enhancement {
+    key = "buddy",
+    loc_txt = { name = "Buddy", text = { "test buddy" } },
+    config = {},
+    weight = 0,
+    neighbour_repetition = true,
+    calculate = function(self, card, context)
+        if context.neighbour_repetition then return { repetitions = 1 } end
+    end,
+}
+SMODS.Joker {
+    key = "claimer",
+    loc_txt = { name = "Claimer", text = { "test claimer" } },
+    rarity = 1, cost = 2, sprite = "claimer.png",
+    calculate = function(self, card, context)
+        if context.check_enhancement and context.other_card then
+            local enh = context.other_card.enhancement
+            if enh == "lucky" then return { m_te_chime = true } end
+            if enh == "mirror" then return { m_lucky = true } end
+        end
+    end,
+}
+SMODS.Joker {
+    key = "form_a",
+    loc_txt = { name = "Form A", text = { "test form a" } },
+    rarity = 1, cost = 3, sprite = "form_a.png",
+    config = { extra = { hits = 0 } },
+    calculate = function(self, card, context)
+        if context.joker_main then
+            card.ability.extra.hits = card.ability.extra.hits + 1
+        end
+    end,
+}
+SMODS.Joker {
+    key = "form_b",
+    loc_txt = { name = "Form B", text = { "test form b" } },
+    rarity = 2, cost = 6, sprite = "form_b.png",
+    config = { extra = { power = 9 } },
+    calculate = function(self, card, context)
+        if context.joker_main then return { mult = card.ability.extra.power } end
+    end,
+}
+]]
+
+local function install_enh7b(seed)
+    wipe_mods()
+    write_mod("EnhTest", { id = "EnhTest", prefix = "te", main_file = "main.lua", version = "1" }, ENH7B)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.EnhTest.status, "loaded", tostring(ModLoader.by_id.EnhTest.error))
+    local game = bootstrap.new_game(seed or 7701)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("enhancement channels: registration and gates", function()
+    local game = install_enh7b()
+    T.assert_true(SMODS.EnhancementByValue.chime ~= nil, "the enhancement registers by value")
+    T.assert_eq(SMODS.Enhancements.te_mirror.value, "mirror")
+    T.assert_true(SMODS._any_enhancement_retrigger == true, "the retrigger gate opens")
+    T.assert_true(SMODS._any_enhancement_calculate == true, "the calculate gate opens")
+    T.assert_true(SMODS._any_enhancement_identity == true, "the identity gate opens")
+    T.assert_eq(SMODS.enhancement_flag("mirror", "specific_rank"), "te_mirror")
+    T.assert_eq(SMODS.enhancement_flag("mirror", "always_scores"), true)
+    T.assert_eq(SMODS.enhancement_flag("chime", "always_scores"), nil)
+    wipe_mods()
+    T.assert_eq(next(SMODS.EnhancementByValue), nil, "enhancements unregister on rollback")
+end)
+
+suite.test("enhancement channels: retrigger query and check_enhancement alias", function()
+    local game = install_enh7b()
+    local chime = hand_node(game, 9, "Hearts", { enhancement = "chime" })
+    local out = game:collect_retrigger_sources(false, { card_node = chime }, {})
+    T.assert_eq(#out, 2, "config retrigger (1) + calculate repetitions (1)")
+    local held_out = game:collect_retrigger_sources(true, { card_node = chime }, {})
+    T.assert_eq(#held_out, 0, "no held answers from this center")
+    T.assert_eq(SMODS.enhancement_retrigger_count(chime, false), 2)
+
+    local mirror = hand_node(game, 4, "Clubs", { enhancement = "mirror" })
+    T.assert_eq(SMODS.enhancement_retrigger_count(mirror, false), 3,
+        "config retrigger (2) + repetitions (1)")
+
+    local plain = hand_node(game, 2, "Spades")
+    T.assert_eq(SMODS.enhancement_retrigger_count(plain, false), 0, "a plain card grants none")
+    T.assert_true(SMODS.has_enhancement(chime, "m_te_chime"), "own enhancement by full key")
+    T.assert_eq(SMODS.check_enhancement(chime, "lucky"), false, "no Joker held, no claims")
+
+    -- The Claimer's claims: Lucky counts as Chime (retriggers included),
+    -- Mirror counts as Lucky.
+    T.assert_true(game:add_joker_by_def("j_te_claimer"))
+    local lucky = hand_node(game, 7, "Diamonds", { enhancement = "lucky" })
+    T.assert_true(SMODS.check_enhancement(lucky, "chime"), "the claim registers")
+    T.assert_true(SMODS.has_enhancement(lucky, "m_te_chime"))
+    T.assert_eq(SMODS.enhancement_retrigger_count(lucky, false), 2,
+        "the aliased enhancement's retriggers collect")
+    T.assert_true(SMODS.has_enhancement(mirror, "lucky"), "Mirror is considered Lucky")
+    T.assert_eq(SMODS.has_enhancement(lucky, "mirror"), false, "claims are one-way here")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: per-card state, snapshot, transform re-seed", function()
+    local game = install_enh7b()
+    local node = hand_node(game, 9, "Hearts", { enhancement = "chime" })
+    T.assert_eq(SMODS.enhancement_state(node).extra.count, 5, "state seeds from the config")
+    local ctx = { chips = 0, mult = 1 }
+    node:emit_hand_event("card_played", ctx)
+    T.assert_eq(ctx.mult, 7, "the return lands additively, as center returns do (1 + 6)")
+    T.assert_eq(SMODS.enhancement_state(node).extra.count, 6,
+        "the calculate read and wrote the state")
+
+    local snap = game:build_run_snapshot()
+    SMODS.enhancement_state(node).extra.count = 99
+    T.assert_true(game:load_run_snapshot(snap))
+    local restored = nil
+    for _, n in ipairs(game.hand.card_nodes) do
+        if n.enhancement == "chime" then restored = n end
+    end
+    T.assert_true(restored ~= nil, "the card restores")
+    T.assert_eq(SMODS.enhancement_state(restored).extra.count, 6,
+        "enhancement state rides the snapshot in the card data")
+
+    T.assert_true(SMODS.set_enhancement(restored, "m_te_mirror"), "the transform verb lands")
+    T.assert_eq(restored.card_data.enhancement, "mirror")
+    local fresh = SMODS.enhancement_state(restored)
+    T.assert_eq(fresh.retrigger, 2, "state re-seeds from the new center")
+    T.assert_eq(fresh.extra, nil, "the old center's state is gone")
+    local plain = hand_node(game, 3, "Clubs")
+    T.assert_eq(SMODS.enhancement_state(plain), nil, "no registered enhancement, no state")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: destroy question and round-end destroy queue", function()
+    local game = install_enh7b()
+    local king = hand_node(game, 13, "Spades", { enhancement = "chime" })
+    local nine = hand_node(game, 9, "Spades", { enhancement = "chime" })
+    T.assert_true(SMODS.enhancement_destroy_check(king, { king, nine }),
+        "the King answers remove = true")
+    T.assert_eq(SMODS.enhancement_destroy_check(nine, { king, nine }), false,
+        "the Nine survives its question")
+
+    local doomed = hand_node(game, 5, "Hearts", { enhancement = "chime" })
+    SMODS.enhancement_state(doomed).extra.count = 7
+    local before = #game.hand.card_nodes
+    game:emit_hand_cards_event("on_round_end", {})
+    T.assert_eq(#game.hand.card_nodes, before - 1,
+        "the round-end remove lands after the pass, not inside it")
+    local still_there = false
+    for _, n in ipairs(game.hand.card_nodes) do
+        if n == doomed then still_there = true end
+    end
+    T.assert_eq(still_there, false, "the card is gone from the hand")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: identity evaluation and always-scores", function()
+    local game = install_enh7b()
+    local name, h = classify(game, {
+        { 9, "Hearts", "mirror" }, { 4, "Clubs", "mirror" }, { 2, "Spades" },
+    })
+    T.assert_eq(name, "Pair", "two Abstract-token cards pair with each other")
+    name, h = classify(game, {
+        { 14, "Spades", "mirror" }, { 2, "Hearts" }, { 3, "Clubs" },
+        { 4, "Diamonds" }, { 5, "Spades" },
+    })
+    T.assert_eq(name, "High Card", "a specific-rank Ace cannot open a wheel")
+    name, h = classify(game, {
+        { 9, "Hearts" }, { 9, "Clubs" }, { 7, "Spades", "mirror" },
+    })
+    T.assert_eq(name, "Pair")
+    T.assert_true(h.selected[3].counts_for_play_score == true,
+        "an always-scores card scores as a kicker")
+    T.assert_eq(SMODS.enhancement_flag("mirror", "replace_base_card"), true)
+    name, h = classify(game, {
+        { 2, "Spades" }, { 5, "Spades" }, { 9, "Spades" }, { 11, "Spades" },
+        { 7, "Clubs", "spark" },
+    })
+    T.assert_eq(name, "Flush", "an any-suit card completes a flush of another suit")
+    name, h = classify(game, {
+        { 7, "Hearts" }, { 7, "Clubs", "spark" },
+    })
+    T.assert_eq(name, "High Card", "a rankless card pairs with nothing, printed rank or not")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: Lucky alias procs through do_enhancement", function()
+    local game = install_enh7b()
+    T.assert_true(game:add_joker_by_def("j_te_claimer"))
+    local node = hand_node(game, 7, "Spades", { enhancement = "mirror" })
+    local forced = "unset"
+    node.do_enhancement = function(self, ctx, f) forced = f end
+    node:emit_hand_event("card_played", { event_name = "card_played", chips = 0, mult = 1 })
+    T.assert_eq(forced, "lucky", "the claimed-Lucky card runs Lucky's branch")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: transform_joker swaps the center honestly", function()
+    local game = install_enh7b()
+    T.assert_true(game:add_joker_by_def("j_te_form_a", { edition = "negative" }))
+    local joker = game.jokers[#game.jokers]
+    T.assert_eq(joker.name, "Form A")
+    joker.ability.extra.hits = 4
+    T.assert_true(SMODS.transform_joker(joker, "form_b"), "bare key resolves")
+    T.assert_eq(joker.name, "Form B", "identity swaps")
+    T.assert_eq(joker.rarity, 2)
+    T.assert_eq(joker.cost, 11, "cost follows the new center (6) plus the kept edition's delta (5)")
+    T.assert_eq(joker.edition, "negative", "the edition survives the transform")
+    T.assert_eq(joker.ability.extra.power, 9, "ability re-seeds from the new center")
+    T.assert_eq(joker.ability.extra.hits, nil, "the old center's ability is gone")
+    T.assert_true(SMODS.transform_joker(joker, "j_te_form_a"), "full key resolves")
+    T.assert_eq(joker.name, "Form A")
+    T.assert_eq(SMODS.transform_joker(joker, "j_te_nope"), false, "unknown centers refuse")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: the discard moment is opt-in", function()
+    local game = install_enh7b()
+    T.assert_true(SMODS._any_enhancement_discard == true, "the discard gate opens")
+    local node = hand_node(game, 6, "Hearts", { enhancement = "bell" })
+    node:emit_hand_event("on_discard", { event_name = "on_discard",
+        chips = 0, mult = 1, discard_reason = "discard" })
+    T.assert_eq(SMODS.enhancement_state(node).extra.discards, 0,
+        "the center dispatch still skips the moment")
+    SMODS.enhancement_discard_event(node, "discard")
+    T.assert_eq(SMODS.enhancement_state(node).extra.discards, 1,
+        "the discard event fires the opted-in calculate once")
+    local chime = hand_node(game, 6, "Clubs", { enhancement = "chime" })
+    SMODS.enhancement_discard_event(chime, "discard")
+    T.assert_eq(SMODS.enhancement_state(chime).extra.count, 5,
+        "an enhancement that did not opt in hears nothing")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: neighbour repetition is opt-in", function()
+    local game = install_enh7b()
+    local function stub(rank, suit, enh)
+        return { card_data = { rank = rank, suit = suit, enhancement = enh },
+            enhancement = enh, face_up = true }
+    end
+    local a = stub(5, "Spades", nil)
+    local b = stub(6, "Hearts", "buddy")
+    local c = stub(7, "Clubs", "buddy")
+    T.assert_eq(SMODS.enhancement_retrigger_count(a, false), 0,
+        "no played set, no neighbour questions")
+    T.assert_eq(SMODS.enhancement_retrigger_count(a, false, { b, a, c }), 2,
+        "two opted-in neighbours each grant a pass")
+    T.assert_eq(SMODS.enhancement_retrigger_count(a, false, { a, c }), 1)
+    T.assert_eq(SMODS.enhancement_retrigger_count(b, false, { b, a }), 0,
+        "a buddy's own answer never leaks through the neighbour seat")
+    local d = stub(8, "Diamonds", "chime")
+    T.assert_eq(SMODS.enhancement_retrigger_count(a, false, { d, a }), 0,
+        "an enhancement that did not opt in is never asked as a neighbour")
+    wipe_mods()
+end)
+
+suite.test("enhancement channels: vanilla sources untouched beside the gates", function()
+    local game = install_enh7b()
+    local red = hand_node(game, 9, "Hearts", { seal = "red" })
+    local out = game:collect_retrigger_sources(false, { card_node = red }, {})
+    T.assert_eq(#out, 1, "a Red Seal alone still grants exactly its one pass")
+    local name = classify(game, {
+        { 9, "Hearts" }, { 9, "Clubs" }, { 5, "Spades" },
+    })
+    T.assert_eq(name, "Pair", "plain evaluation is unchanged with the mod loaded")
+    wipe_mods()
+end)
+
 return suite
