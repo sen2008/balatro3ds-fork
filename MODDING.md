@@ -264,6 +264,10 @@ Unknown field names are refused. A mod may also write `card.ability.perma_x_mult
 
 `G.jokers_sold` is the list of Joker def ids sold this run, in sale order (`"j_cry_cat"`, ...). It saves with the run and resets on a new one. Cryptid's Kidnapping reads it to count sold "Type" Jokers; Necromancer picks a random entry and recreates it.
 
+### Per-mod run state
+
+`SMODS.mod_state(id)` — with your mod's manifest id — returns a table that is yours alone for this run: counters, flags, per-round tallies, whatever a system like Paperback's `G.GAME.paperback` would hold. It is created empty at run start, it is **saved with the run** (it rides the run snapshots beside `jokers_sold`, so save slots and score-preview dry runs restore it too), and another mod's table is never handed to you. Keep it **plain data only** — numbers, strings, booleans and nested tables of those; a function or userdata in it will not survive a save. The same tables are readable as `G.mod_run_state[id]`, but write through `SMODS.mod_state` so the table exists.
+
 ### Creating and destroying cards
 
 ```lua
@@ -735,6 +739,49 @@ One more honest limit:
   the run's mod check as usual; but a value that reaches the engine unregistered
   by any other path simply does nothing -- the card scores as a plain card --
   rather than crashing the load.
+
+## Custom card attachments
+
+An enhancement and a seal are one slot each. When an effect needs to live on a
+card **beside** them — with its own persistent state and its own `calculate` —
+register an attachment (Paperback's paperclips are the working example):
+
+**`SMODS.Attachment { key, loc_txt, config, calculate, loc_vars, sprite }`**
+
+```lua
+SMODS.Attachment {
+    key = "red_clip",
+    loc_txt = { name = "Red Clip", text = { "+#1# Mult per Clip held" } },
+    config = { mult_mod = 5 },
+    sprite = "red_clip.png",
+    calculate = function(self, card, context)
+        if context.card_played then return { mult = context.state.mult_mod } end
+    end,
+}
+```
+
+- The attachment's full key is `<your prefix>_<key>`. Fasten it to a card with
+  `SMODS.set_attachment(card, key)` (a node, a view, or anything carrying
+  `card_data`); its state is seeded as a deep copy of `config` and stored in
+  `card_data.attachments[full_key]`, so it saves with the run like the card's
+  own fields. `SMODS.get_attachment` / `SMODS.has_attachment` /
+  `SMODS.remove_attachment` / `SMODS.attachment_keys` read and unfasten. A card
+  may carry several attachments; whether it may carry more than one of a family
+  is your mod's rule, not the channel's.
+- `calculate(self, card, context)` fires at the same card moments a seal's
+  does — `card_played`, `held_in_hand`, `on_round_end`, `on_discard` — after
+  the seal, in registration order, plus one moment of its own:
+  `context.after_scoring`, dispatched to the played cards and the hand when a
+  hand's scoring finalizes (the seat for "resets after the hand" effects).
+  `context.state` is the attachment's own state table on that card — write to
+  it and the writes persist. Returns merge by the center rules (`chips`,
+  `mult`, `x_mult`, `x_chips`, `dollars`, and the rest of the return table).
+- Retriggers mirror seals: `retrigger` / `retrigger_held` counts in the state
+  (or the def's `config`), or a `calculate` asked with `context.repetition`
+  returning `repetitions`.
+- A debuffed card's attachments never fire.
+- Honest limit: `sprite` registers the art (for tooltips and collections), but
+  the card face draws no attachment badge in this build.
 
 ## Custom tags
 

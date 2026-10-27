@@ -1746,6 +1746,174 @@ function SMODS.Edition(t)
     return t
 end
 
+--------------------------------------------------------------------------------
+-- Per-mod run state
+--------------------------------------------------------------------------------
+
+--- The calling mod's own persistent corner of the run: a plain-data table
+--- (numbers, strings, booleans, nested tables -- no functions, no userdata)
+--- that rides the run snapshots beside `jokers_sold`, so it survives save /
+--- resume exactly like the rest of the run. `SMODS.mod_state(id)`, with
+--- this mod's manifest id, returns the mod's table, creating it on first
+--- use; the same tables are readable as `G.mod_run_state[id]`. Mods
+--- keep their Paperback-style `G.GAME.paperback` state here instead of
+--- inventing globals: one mod can never see another's table through this
+--- door, and a run with no mod asking has an empty `mod_run_state`, so
+--- vanilla snapshots are unchanged.
+function SMODS.mod_state(id)
+    if not G then return nil end
+    if type(G.mod_run_state) ~= "table" then G.mod_run_state = {} end
+    if id == nil then
+        local mod = SMODS.current_mod
+        id = mod and mod.id or nil
+    end
+    check(type(id) == "string" and id ~= "", "SMODS.mod_state needs a mod id")
+    if type(G.mod_run_state[id]) ~= "table" then G.mod_run_state[id] = {} end
+    return G.mod_run_state[id]
+end
+
+--------------------------------------------------------------------------------
+-- Card attachments: a third calculate channel, beside enhancement and seal
+--------------------------------------------------------------------------------
+
+SMODS.Attachments = SMODS.Attachments or {}
+SMODS.AttachmentList = SMODS.AttachmentList or {}
+
+--- `SMODS.Attachment { key, loc_txt, config, calculate, loc_vars, sprite }`:
+--- a named effect a mod can fasten to a playing card, where an enhancement
+--- or a seal cannot go -- a card has exactly one enhancement and one seal,
+--- but any number of attachments, each with its own persistent state.
+--- (Paperback's paperclips are the customer: one clip per card there is a
+--- rule of that mod, not of this channel.)
+---
+--- The attachment's full key is `<mod prefix>_<key>` (Steamodded's sticker
+--- keys look the same). Its state lives in the card's data as
+--- `card_data.attachments[full_key]`, seeded as a deep copy of `config`
+--- when the attachment is applied with `SMODS.set_attachment`, and rides
+--- everything the card's data rides: deck copies, run snapshots, save
+--- slots. Its `calculate(self, card, context)` fires at the same card
+--- moments a seal's does -- `SMODS.card_center_event` calls it after the
+--- seal, with `context.state` the attachment's own state table (writes
+--- persist), `context.attachment_key` its full key, and the return merged
+--- by the same rules as a center's (`chips` / `mult` / `x_mult` /
+--- `x_chips` / `dollars` land as for enhancements and seals).
+--- Retriggers mirror seals: `config.retrigger` / `config.retrigger_held`
+--- counts, or `calculate` returning `repetitions` when asked with
+--- `context.repetition`. A debuffed card's attachments never fire. Art is
+--- the optional `sprite = "Name.png"` (registered like a center's, for
+--- tooltips and collections; the card face draws no attachment badge in
+--- this build).
+function SMODS.Attachment(t)
+    local mod = need_mod("SMODS.Attachment")
+    check(type(t) == "table", "SMODS.Attachment expects a table")
+    check(type(t.key) == "string" and t.key:match("^[%w_]+$"),
+        "SMODS.Attachment needs a 'key' of letters, digits and underscores")
+    check(t.calculate == nil or type(t.calculate) == "function",
+        "Attachment '" .. t.key .. "': calculate must be a function")
+    check(t.loc_vars == nil or type(t.loc_vars) == "function",
+        "Attachment '" .. t.key .. "': loc_vars must be a function")
+    local id = mod.prefix .. "_" .. t.key
+    check(SMODS.Attachments[id] == nil,
+        "Attachment '" .. t.key .. "' is defined twice (id " .. id .. ")")
+    local loc = loc_for(t.loc_txt, "en") or {}
+    local entry = {
+        id = id, key = t.key, mod = mod,
+        name = tostring(loc.name or t.name or t.key),
+        config = deep_copy(type(t.config) == "table" and t.config or {}),
+        calculate = t.calculate, loc_vars = t.loc_vars, loc_txt = t.loc_txt,
+        order = next_center_order,
+    }
+    next_center_order = next_center_order + 1
+    SMODS.Attachments[id] = entry
+    SMODS.AttachmentList[#SMODS.AttachmentList + 1] = entry
+    mod.registered.attachments = mod.registered.attachments or {}
+    mod.registered.attachments[#mod.registered.attachments + 1] = id
+    register_center_strings(mod, "attachment", t.key:lower(), t.loc_txt)
+    t.mod = mod
+    t.original_key = t.key
+    t.key = id
+    if t.sprite ~= nil then
+        entry.sprite = register_sprite(mod, t.sprite, "Attachment", t.original_key, "sprite")
+    end
+    return t
+end
+
+--- Resolve an attachment key as mods pass it: a full key, or a bare key
+--- that exactly one registered attachment owns.
+local function attachment_entry(key)
+    if type(key) ~= "string" then return nil end
+    local entry = SMODS.Attachments[key]
+    if entry then return entry end
+    local found = nil
+    for _, e in ipairs(SMODS.AttachmentList) do
+        if e.key == key then
+            if found then return nil end
+            found = e
+        end
+    end
+    return found
+end
+
+local function attachment_store(node)
+    if type(node) ~= "table" or type(node.card_data) ~= "table" then return nil end
+    return node.card_data.attachments
+end
+
+--- Fasten an attachment to a card (a node or card view). `state`, when
+--- given, replaces the seeded state (it is stored as passed, not copied).
+--- Re-applying an attachment the card already carries keeps its state.
+--- Returns the state table, or nil when the key names nothing registered.
+function SMODS.set_attachment(node, key, state)
+    local entry = attachment_entry(key)
+    if not entry then return nil end
+    if type(node) ~= "table" or type(node.card_data) ~= "table" then return nil end
+    local store = node.card_data.attachments
+    if type(store) ~= "table" then
+        store = {}
+        node.card_data.attachments = store
+    end
+    if store[entry.id] == nil then
+        store[entry.id] = type(state) == "table" and state or deep_copy(entry.config)
+    elseif type(state) == "table" then
+        store[entry.id] = state
+    end
+    return store[entry.id]
+end
+
+--- The state table of a card's attachment, or nil when not carried.
+function SMODS.get_attachment(node, key)
+    local entry = attachment_entry(key)
+    if not entry then return nil end
+    local store = attachment_store(node)
+    return store and store[entry.id] or nil
+end
+
+--- Whether a card carries the named attachment.
+function SMODS.has_attachment(node, key)
+    return SMODS.get_attachment(node, key) ~= nil
+end
+
+--- Unfasten an attachment; returns whether anything was removed.
+function SMODS.remove_attachment(node, key)
+    local entry = attachment_entry(key)
+    if not entry then return false end
+    local store = attachment_store(node)
+    if not store or store[entry.id] == nil then return false end
+    store[entry.id] = nil
+    return true
+end
+
+--- A card's attachment full keys, in registration order.
+function SMODS.attachment_keys(node)
+    local out = {}
+    local store = attachment_store(node)
+    if not store then return out end
+    for _, entry in ipairs(SMODS.AttachmentList) do
+        if store[entry.id] ~= nil then out[#out + 1] = entry.id end
+    end
+    return out
+end
+
 --- What an enhancement name means, as the canonical value a card carries: a
 --- vanilla port name, a Steamodded `m_` key (vanilla or a mod's own, by bare
 --- key or full id), or a registered value in any case. Nil for anything else.
@@ -1959,6 +2127,7 @@ function SMODS.card_center_event(node, event_name, ctx)
             refresh_card_view(node), center_context(node, event_name, ctx))
         if apply_center_return(ctx, ret) then fired = true end
     end
+    if SMODS.attachment_event(node, event_name, ctx) then fired = true end
     return fired
 end
 
@@ -1984,6 +2153,68 @@ function SMODS.seal_retrigger_count(node, held)
         local ret = SMODS.call(entry.mod, entry.calculate, entry, refresh_card_view(node), c)
         if type(ret) == "table" then
             n = n + math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+        end
+    end
+    return math.max(0, math.floor(n))
+end
+
+--- The attachments a card carries calculate here: same view, same context
+--- shape and same return rules as the enhancement and seal, plus `state`
+--- (the attachment's own persistent table on the card), `attachment_key`
+--- and `main_scoring` for effect families that read the moment loosely
+--- (a sticker's `main_scoring` check spans both played and held moments).
+--- A debuffed card's attachments stay silent. Runs only when the card
+--- carries an attachment, which vanilla cards never do, so an unmodded
+--- hand is untouched.
+function SMODS.attachment_event(node, event_name, ctx)
+    local store = type(node) == "table" and type(node.card_data) == "table"
+        and node.card_data.attachments or nil
+    if type(store) ~= "table" then return false end
+    local view = refresh_card_view(node)
+    if view.debuff then return false end
+    local fired = false
+    for _, entry in ipairs(SMODS.AttachmentList) do
+        local state = store[entry.id]
+        if state ~= nil and type(entry.calculate) == "function" then
+            local c = center_context(node, event_name, ctx)
+            c.main_scoring = event_name == "card_played" or event_name == "held_in_hand"
+            c.attachment_key = entry.id
+            c.state = state
+            local ret = SMODS.call(entry.mod, entry.calculate, entry, view, c)
+            if type(ret) == "table" and apply_center_return(ctx, ret) then fired = true end
+        end
+    end
+    return fired
+end
+
+--- How many extra passes a card's attachments grant, mirroring
+--- `SMODS.seal_retrigger_count`: `retrigger` / `retrigger_held` counts
+--- from each attachment's state (then its def's config), plus whatever a
+--- `calculate` asked with a repetition context answers. A debuffed card
+--- retriggers nothing.
+function SMODS.attachment_retrigger_count(node, held)
+    if type(node) ~= "table" then return 0 end
+    local view = refresh_card_view(node)
+    if view.debuff then return 0 end
+    local store = type(node.card_data) == "table" and node.card_data.attachments or nil
+    if type(store) ~= "table" then return 0 end
+    local n = 0
+    for _, entry in ipairs(SMODS.AttachmentList) do
+        local state = store[entry.id]
+        if state ~= nil then
+            local from = type(state) == "table" and state or entry.config
+            n = n + (tonumber(from[held and "retrigger_held" or "retrigger"]) or 0)
+            if type(entry.calculate) == "function" then
+                local ret = SMODS.call(entry.mod, entry.calculate, entry, view, {
+                    repetition = true, held = held == true,
+                    cardarea = held and (G and G.hand) or ((G and G.play) or SMODS.PLAY),
+                    other_card = view,
+                    attachment_key = entry.id, state = state, port = {},
+                })
+                if type(ret) == "table" then
+                    n = n + math.max(0, math.floor(tonumber(ret.repetitions) or 0))
+                end
+            end
         end
     end
     return math.max(0, math.floor(n))
@@ -4183,6 +4414,13 @@ function SMODS.rollback(mod)
         SMODS.Editions[id] = nil
     end
     mod.registered.editions = {}
+    for _, id in ipairs(mod.registered.attachments or {}) do
+        SMODS.Attachments[id] = nil
+        for i = #SMODS.AttachmentList, 1, -1 do
+            if SMODS.AttachmentList[i].id == id then table.remove(SMODS.AttachmentList, i) end
+        end
+    end
+    mod.registered.attachments = {}
     for _, name in ipairs(mod.registered.suits or {}) do SMODS.Suits[name] = nil end
     mod.registered.suits = {}
     for _, name in ipairs(mod.registered.poker_hands or {}) do

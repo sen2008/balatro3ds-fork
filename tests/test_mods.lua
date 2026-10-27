@@ -5457,4 +5457,139 @@ SMODS.Booster {
     wipe_mods()
 end)
 
+--------------------------------------------------------------------------------
+-- Card attachments and per-mod run state (Wave 7, §8.10)
+--------------------------------------------------------------------------------
+
+local ATTACH = [[
+SMODS.Attachment {
+    key = "badge",
+    loc_txt = { name = "Badge", text = { "test badge" } },
+    config = { chips = 3, retrigger = 1 },
+    calculate = function(self, card, context)
+        if context.after_scoring then
+            context.state.after = (context.state.after or 0) + 1
+        elseif context.card_played then
+            return { chips = context.state.chips }
+        end
+    end,
+}
+SMODS.Attachment {
+    key = "echo",
+    loc_txt = { name = "Echo", text = { "test echo" } },
+    config = {},
+    calculate = function(self, card, context)
+        if context.repetition then return { repetitions = 2 } end
+    end,
+}
+]]
+
+local function install_attach(seed)
+    wipe_mods()
+    write_mod("Attach", { id = "Attach", prefix = "ta", main_file = "main.lua", version = "1" }, ATTACH)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Attach.status, "loaded", tostring(ModLoader.by_id.Attach.error))
+    local game = bootstrap.new_game(seed or 4470)
+    G = game
+    G.play = G.play or SMODS.PLAY
+    _G.Top = _G.Top or { addPopup = function() end }
+    return game
+end
+
+suite.test("attachments: registration, storage and rollback", function()
+    local game = install_attach()
+    T.assert_true(SMODS.Attachments.ta_badge ~= nil, "the attachment registers by full key")
+    T.assert_eq(SMODS.Attachments.ta_badge.mod.id, "Attach")
+    T.assert_eq(#SMODS.AttachmentList, 2, "registration order is kept")
+
+    local node = hand_node(game, 9, "Hearts")
+    T.assert_eq(SMODS.get_attachment(node, "ta_badge"), nil, "nothing carried yet")
+    local state = SMODS.set_attachment(node, "badge")
+    T.assert_true(state ~= nil, "a bare key resolves when unique")
+    T.assert_eq(state.chips, 3, "state seeds from the def's config")
+    T.assert_eq(node.card_data.attachments.ta_badge, state, "state lives in the card data")
+    state.chips = 10
+    T.assert_eq(SMODS.set_attachment(node, "ta_badge"), state, "re-applying keeps the live state")
+    T.assert_eq(SMODS.get_attachment(node, "ta_badge").chips, 10)
+    local keys = SMODS.attachment_keys(node)
+    T.assert_eq(#keys, 1); T.assert_eq(keys[1], "ta_badge")
+    T.assert_true(SMODS.has_attachment(node, "ta_badge"))
+    T.assert_true(SMODS.remove_attachment(node, "ta_badge"))
+    T.assert_eq(SMODS.get_attachment(node, "ta_badge"), nil, "removed")
+
+    wipe_mods()
+    T.assert_eq(next(SMODS.Attachments), nil, "attachments unregister on rollback")
+    T.assert_eq(#SMODS.AttachmentList, 0)
+end)
+
+suite.test("attachments: dispatch, state writes, debuff gate, retriggers", function()
+    local game = install_attach()
+    game.hand = Hand(game)
+    local node = hand_node(game, 9, "Hearts")
+    local state = SMODS.set_attachment(node, "ta_badge")
+
+    local ctx = { chips = 0, mult = 1 }
+    T.assert_true(node:emit_hand_event("card_played", ctx), "the attachment fires")
+    T.assert_eq(ctx.chips, 3, "the return lands through the center rules")
+    state.chips = 7
+    local ctx2 = { chips = 0, mult = 1 }
+    node:emit_hand_event("card_played", ctx2)
+    T.assert_eq(ctx2.chips, 7, "state writes persist into the next dispatch")
+
+    node.debuffed = true
+    local ctx3 = { chips = 0, mult = 1 }
+    node:emit_hand_event("card_played", ctx3)
+    T.assert_eq(ctx3.chips, 0, "a debuffed card's attachments stay silent")
+    node.debuffed = false
+
+    SMODS.set_attachment(node, "ta_echo")
+    local out = game:collect_retrigger_sources(false, { card_node = node }, {})
+    T.assert_eq(#out, 3, "config retrigger (1) + calculate repetitions (2)")
+    wipe_mods()
+end)
+
+suite.test("attachments: after_scoring fires once per card at hand finalize", function()
+    local game = install_attach()
+    local hand = Hand(game)
+    game.hand = hand
+    -- Both nodes on the SAME hand (hand_node would give each its own).
+    hand:add_card({ rank = 9, suit = "Hearts" })
+    local played = hand.card_nodes[#hand.card_nodes]
+    hand:add_card({ rank = 4, suit = "Clubs" })
+    local held = hand.card_nodes[#hand.card_nodes]
+    local played_state = SMODS.set_attachment(played, "ta_badge")
+    local held_state = SMODS.set_attachment(held, "ta_badge")
+    hand._play_sequence = {
+        phase = "finalize", finalize_step = 5, timer = 0,
+        cards = { played }, name = "Pair",
+    }
+    hand:_update_play_sequence(0.1)
+    T.assert_eq(played_state.after, 1, "the played card hears after_scoring once")
+    T.assert_eq(held_state.after, 1, "a card still in hand hears it too")
+    wipe_mods()
+end)
+
+suite.test("mod run state: isolation and snapshot round-trip", function()
+    local game = install_attach()
+    local a = SMODS.mod_state("Attach")
+    local b = SMODS.mod_state("Other")
+    T.assert_true(a ~= b, "each mod gets its own table")
+    a.round = { scored = 4 }
+    local node = hand_node(game, 9, "Hearts")
+    SMODS.set_attachment(node, "ta_badge").chips = 42
+
+    local snap = game:build_run_snapshot()
+    a.round.scored = 99
+    SMODS.remove_attachment(node, "ta_badge")
+    T.assert_true(game:load_run_snapshot(snap))
+    T.assert_eq(SMODS.mod_state("Attach").round.scored, 4, "run state restores from the snapshot")
+    local restored = nil
+    for _, n in ipairs(game.hand.card_nodes) do
+        restored = restored or SMODS.get_attachment(n, "ta_badge")
+    end
+    T.assert_true(restored ~= nil and restored.chips == 42,
+        "attachment state rides the snapshot in the card data")
+    wipe_mods()
+end)
+
 return suite

@@ -5496,6 +5496,9 @@ function Game:build_run_snapshot()
         -- Sold-Joker run history (Steamodded's `jokers_sold`): def ids in sale
         -- order, recorded by `sell_owned_joker`; mods read `G.jokers_sold`.
         jokers_sold = copy_table(self.jokers_sold or {}),
+        -- Per-mod run state (`SMODS.mod_state`): plain data only, keyed by
+        -- mod id; a modless run snapshots an empty table.
+        mod_run_state = copy_table(self.mod_run_state or {}),
         hands = tonumber(self.hands) or 0,
         discards = tonumber(self.discards) or 0,
         round_score = Totals.encode(Totals.read(self.round_score, 0)),
@@ -5699,6 +5702,7 @@ function Game:load_run_snapshot(snapshot)
     self._victory_progress_recorded = snapshot._victory_progress_recorded == true
     self.money = tonumber(snapshot.money) or 0
     self.jokers_sold = copy_table(snapshot.jokers_sold or {})
+    self.mod_run_state = copy_table(snapshot.mod_run_state or {})
     self.hands = tonumber(snapshot.hands) or self:get_effective_hands_per_round()
     self.discards = tonumber(snapshot.discards) or self:get_effective_discards_per_round()
     self.round_score = Totals.revive(snapshot.round_score, 0)
@@ -9873,6 +9877,7 @@ function Game:_run_start_reset_objects()
     end
     self._clearing_run = nil
     self.jokers_sold = {}
+    self.mod_run_state = {}
     if type(self.consumables) == "table" then
         for i = #self.consumables, 1, -1 do
             self:remove_consumable_at(i)
@@ -11889,6 +11894,11 @@ function Game:collect_retrigger_sources(held, retrigger_ctx, out)
     -- one `false` source per extra pass, the same marker it uses.
     if card and SMODS and SMODS.seal_retrigger_count then
         local extra = SMODS.seal_retrigger_count(card, held)
+        for _ = 1, extra do out[#out + 1] = false end
+    end
+    -- A card attachment's retriggers (SMODS.Attachment) sit beside the seal's.
+    if card and SMODS and SMODS.attachment_retrigger_count then
+        local extra = SMODS.attachment_retrigger_count(card, held)
         for _ = 1, extra do out[#out + 1] = false end
     end
 

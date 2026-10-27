@@ -2119,6 +2119,29 @@ function Hand:_update_play_sequence(dt)
         end
 
         if seq.finalize_step == 5 then
+            -- Card attachments (SMODS.Attachment) get their after-scoring
+            -- moment here: the one finalize step that always runs (step 4
+            -- can end early into the Joker wait), after every Joker's own
+            -- after pass, over the played cards and then the hand. The
+            -- event name matches nothing vanilla, so a run with no
+            -- attachment registered never dispatches at all, and centers
+            -- that hear it answer nothing.
+            if SMODS and SMODS.AttachmentList and #SMODS.AttachmentList > 0 then
+                local actx = {
+                    event = "after_scoring", event_name = "after_scoring",
+                    cards = seq.cards, full_hand = seq.cards,
+                    scoring_name = seq.name,
+                }
+                local seen = {}
+                for _, list in ipairs({ seq.cards, self.card_nodes }) do
+                    for _, node in ipairs(list or {}) do
+                        if node and not seen[node] and node.emit_hand_event then
+                            seen[node] = true
+                            node:emit_hand_event("after_scoring", actx)
+                        end
+                    end
+                end
+            end
             seq.phase = "discard_wait"
             seq.timer = 0
         end
