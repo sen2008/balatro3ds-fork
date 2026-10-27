@@ -24,6 +24,15 @@
 --- Turning a mod ON loads it into the running session there and then (`load_mod`), as long as no
 --- run is in memory; turning it OFF only records the choice -- a loaded mod's content is never
 --- pulled out mid-session, so it stops loading from the next boot on. See `set_enabled`.
+---
+--- A build can also carry mods inside the game archive itself, under `mods_bundled/`
+--- (the "super" build does; the normal build has no such folder). Those are scanned
+--- exactly like card mods and marked `bundled`, with one identity rule across both
+--- roots: a manifest id found in `sdmc/mods` shadows the bundled mod of the same id,
+--- so a card install or update always wins over the copy in the archive. The archive
+--- is read-only, so nothing is ever written into a bundled folder: the selection and
+--- the log stay on the card, and a bundled mod's compiled cache redirects to
+--- `sdmc/mods/.cache/` (see the cache section below).
 
 local Json = require("json")
 require("smods")
@@ -31,17 +40,22 @@ require("smods")
 local ModLoader = {}
 
 ModLoader.DIR = "sdmc/mods"
+ModLoader.BUNDLED_DIR = "mods_bundled"
+ModLoader.CACHE_DIR = "sdmc/mods/.cache"
 ModLoader.LOG_PATH = "sdmc/mods/mods_log.txt"
 ModLoader.ENABLED_PATH = "sdmc/mods/enabled.txt"
 
 --- Every mod found, in load order. Each: `{ id, name, version, prefix, author, description,
---- path, main_file, dependencies, status = "loaded"|"error"|"disabled"|"pending", error,
+--- path, main_file, dependencies, bundled, status = "loaded"|"error"|"disabled"|"pending", error,
 --- runtime_errors, registered = { jokers, consumables, vouchers, sprites },
 --- timings = { manifest, compile, execute, sprites, refresh, cache } }` (phases in
 --- milliseconds, see "Load timing"). "pending" is
 --- a mod the player turned on during a run: queued, it loads at the next boot.
 ModLoader.mods = {}
 ModLoader.by_id = {}
+--- Scan notes for the log (a bundled mod shadowed by a card copy, today), rebuilt by
+--- every `load_all` and printed by `write_log` under the mod list.
+ModLoader.notes = {}
 --- The player's saved selection: the ids turned on in Options > Mods, as a set. Read from
 --- `ENABLED_PATH` by `load_all`; only these mods load at boot.
 ModLoader.enabled = {}
@@ -86,10 +100,11 @@ local function is_dir(path)
     return f and f.getInfo and f.getInfo(path, "directory") ~= nil
 end
 
-local function new_mod(folder)
+local function new_mod(root, folder)
     return {
         id = folder, name = folder, version = "0.0.0", prefix = folder,
-        folder = folder, path = ModLoader.DIR .. "/" .. folder,
+        folder = folder, path = root .. "/" .. folder,
+        bundled = root == ModLoader.BUNDLED_DIR,
         author = "", description = "", dependencies = {},
         status = "error", error = nil, runtime_errors = {}, timings = new_timings(),
         registered = { jokers = {}, sprites = {}, consumables = {}, vouchers = {}, deck_skins = {}, strings = {} },
@@ -103,8 +118,8 @@ local function fail(mod, msg)
 end
 
 --- Read a mod folder's manifest: the first `.json` in it that names a `main_file`.
-local function read_manifest(folder)
-    local mod = new_mod(folder)
+local function read_manifest(root, folder)
+    local mod = new_mod(root, folder)
     local f = fs()
     local items = f.getDirectoryItems(mod.path) or {}
     table.sort(items)
@@ -185,24 +200,52 @@ local LUAC_FORMAT = "balatro3ds-luac 1"
 local loadstring_ = loadstring or load
 local lua_version_tag = (tostring(_VERSION):gsub("%s+", "_"))
 
-local function luac_path(mod)
+--- The cache file that sits beside a main file. For a bundled mod this is the cache
+--- shipped inside the archive -- read-only, but readable.
+local function luac_beside(mod)
     return mod.path .. "/" .. mod.main_file .. ".luac"
 end
 
---- @return function|nil chunk, string how: "hit" when the cache supplied it, else "miss"
+--- Where a freshly compiled cache is written: beside the main file for a mod on the
+--- card. A bundled mod's folder is inside the game archive and cannot be written,
+--- so its cache redirects to a per-id file in the cache dir on the card.
+local function luac_write_path(mod)
+    if mod.bundled then return ModLoader.CACHE_DIR .. "/" .. mod.id .. ".luac" end
+    return luac_beside(mod)
+end
+
+--- The cache files a load tries, in order. A bundled mod tries the shipped cache
+--- beside its main file first (a build ships cache and source together, so it is
+--- the one to trust), then the redirected cache on the card.
+local function luac_read_paths(mod)
+    if mod.bundled then return { luac_beside(mod), luac_write_path(mod) } end
+    return { luac_beside(mod) }
+end
+
+--- Read and validate one cache file; returns the compiled chunk or nil.
+--- A card source must match the header's size AND modtime (that is what makes an
+--- edit invalidate). A bundled source is validated on size, format and Lua version
+--- only: its main file can change no other way than a new build, in which source
+--- and shipped cache travel together, and the archive filesystem may report no
+--- usable modtime for its files. Either way a cache that does not validate -- or
+--- whose bytes will not load -- is ignored, never an error.
+local function cache_chunk(mod, f, cache_path, main_path, info)
+    local raw = f.read(cache_path)
+    local nl = raw and raw:find("\n", 1, true)
+    if not nl then return nil end
+    local header, body = raw:sub(1, nl - 1), raw:sub(nl + 1)
+    local size, modtime, version = header:match("^" .. LUAC_FORMAT:gsub("%W", "%%%1") .. " (%d+) (%d+) (%S+)$")
+    if not size or tonumber(size) ~= info.size or version ~= lua_version_tag then return nil end
+    if not mod.bundled and tonumber(modtime) ~= (info.modtime or 0) then return nil end
+    return loadstring_(body, "@" .. main_path)
+end
+
+--- @return function|nil chunk, string how: "hit" when a cache supplied it, else "miss"
 local function compile_main(mod, f, main_path, info)
-    local cache_path = luac_path(mod)
     if loadstring_ and info.size and f.read then
-        local raw = f.read(cache_path)
-        local nl = raw and raw:find("\n", 1, true)
-        if nl then
-            local header, body = raw:sub(1, nl - 1), raw:sub(nl + 1)
-            local size, modtime, version = header:match("^" .. LUAC_FORMAT:gsub("%W", "%%%1") .. " (%d+) (%d+) (%S+)$")
-            if size and tonumber(size) == info.size and tonumber(modtime) == (info.modtime or 0)
-                and version == lua_version_tag then
-                local chunk = loadstring_(body, "@" .. main_path)
-                if chunk then return chunk, "hit" end
-            end
+        for _, cache_path in ipairs(luac_read_paths(mod)) do
+            local chunk = cache_chunk(mod, f, cache_path, main_path, info)
+            if chunk then return chunk, "hit" end
         end
     end
     local chunk, err = f.load(main_path)
@@ -210,7 +253,8 @@ local function compile_main(mod, f, main_path, info)
         local ok, dump = pcall(string.dump, chunk)
         if ok and dump then
             local header = ("%s %d %d %s\n"):format(LUAC_FORMAT, info.size, info.modtime or 0, lua_version_tag)
-            pcall(f.write, cache_path, header .. dump)
+            if mod.bundled and f.createDirectory then pcall(f.createDirectory, ModLoader.CACHE_DIR) end
+            pcall(f.write, luac_write_path(mod), header .. dump)
         end
     end
     if not chunk then return nil, err end
@@ -480,6 +524,7 @@ function ModLoader.reset()
     for _, mod in ipairs(ModLoader.mods) do SMODS.rollback(mod) end
     ModLoader.mods = {}
     ModLoader.by_id = {}
+    ModLoader.notes = {}
     ModLoader.refresh_ms = 0
     ModLoader.refresh_calls = 0
 end
@@ -493,19 +538,50 @@ function ModLoader.load_all()
     SMODS.install_card_methods()
     ModLoader.enabled = read_enabled()
 
-    local found = {}
-    for _, folder in ipairs(f.getDirectoryItems(ModLoader.DIR) or {}) do
-        if is_dir(ModLoader.DIR .. "/" .. folder) then
-            local t0 = clock_ms()
-            local mod = read_manifest(folder)
-            mod.timings.manifest = clock_ms() - t0
-            found[#found + 1] = mod
+    -- Scan the card first, then the bundled root, and merge by manifest id: a card
+    -- copy shadows the bundled mod of the same id (the shadowed copy is dropped
+    -- before it can register or reserve a prefix, and the log says so). Two mods
+    -- with the same id in the SAME root both survive the merge; the pass below
+    -- flags the second, as it always has. Dot-folders are not mods: the loader's
+    -- own cache dir lives under the card root and must not be scanned as one.
+    local found, notes = {}, {}
+    local function scan(root)
+        for _, folder in ipairs(f.getDirectoryItems(root) or {}) do
+            if folder:sub(1, 1) ~= "." and is_dir(root .. "/" .. folder) then
+                local t0 = clock_ms()
+                local mod = read_manifest(root, folder)
+                mod.timings.manifest = clock_ms() - t0
+                found[#found + 1] = mod
+            end
         end
     end
+    scan(ModLoader.DIR)
+    scan(ModLoader.BUNDLED_DIR)
+    local claimed, merged = {}, {}
+    for _, mod in ipairs(found) do
+        local prev = claimed[mod.id]
+        if prev and prev.bundled ~= mod.bundled then
+            notes[#notes + 1] = ("bundled %s %s (%s) is shadowed by the copy in %s -- not loaded")
+                :format(mod.id, mod.version, (mod.bundled and mod or prev).folder, ModLoader.DIR)
+            if mod.bundled then
+                -- The card copy is already in; the bundled one is simply dropped.
+            else
+                claimed[mod.id] = mod
+                for i, m in ipairs(merged) do if m == prev then merged[i] = mod break end end
+            end
+        else
+            if not prev then claimed[mod.id] = mod end
+            merged[#merged + 1] = mod
+        end
+    end
+    found = merged
+    ModLoader.notes = notes
+
     table.sort(found, function(a, b)
         local la, lb = a.id:lower(), b.id:lower()
         if la ~= lb then return la < lb end
-        return a.folder < b.folder
+        if a.folder ~= b.folder then return a.folder < b.folder end
+        return (a.bundled and 1 or 0) < (b.bundled and 1 or 0)
     end)
 
     -- The selection is by id, so a mod is off exactly when its id is not in it. (A manifest
@@ -646,7 +722,8 @@ local function log_lines()
     if #ModLoader.mods == 0 then lines[#lines + 1] = "No mods installed." end
     for _, mod in ipairs(ModLoader.mods) do
         local tag = ({ loaded = "OK", disabled = "OFF", pending = "PENDING" })[mod.status] or "ERROR"
-        lines[#lines + 1] = ("[%s] %s %s (%s)"):format(tag, mod.id, mod.version, mod.folder)
+        lines[#lines + 1] = ("[%s] %s %s (%s%s)"):format(tag, mod.id, mod.version, mod.folder,
+            mod.bundled and ", bundled" or "")
         if mod.status == "disabled" then
             lines[#lines + 1] = "    not in the enabled set (" .. ModLoader.ENABLED_PATH .. ")"
         elseif mod.status == "pending" then
@@ -669,6 +746,9 @@ local function log_lines()
         for _, err in ipairs(mod.runtime_errors or {}) do
             lines[#lines + 1] = "    runtime: " .. tostring(err)
         end
+    end
+    for _, note in ipairs(ModLoader.notes or {}) do
+        lines[#lines + 1] = note
     end
     -- Phase totals, so a slow boot reads straight off this file: which part of loading
     -- ate the time, summed over every pack scanned. Refresh is totalled apart from the

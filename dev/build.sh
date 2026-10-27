@@ -6,6 +6,13 @@
 #   ./dev/build.sh 3dsx       build the fused .3dsx for the Homebrew Launcher
 #   ./dev/build.sh all        build both
 #   ./dev/build.sh --release  strip dev tools and stamp a release build_info.lua
+#   ./dev/build.sh --super    bundle the mod packs into the game archive: the
+#                             10 packs from ../balatro3ds-mods (override with
+#                             $SUPER_MODS_DIR), with their precompiled .luac
+#                             caches, are staged under mods_bundled/ and the
+#                             CIA is written as Balatro-super.cia. The loader
+#                             scans that root read-only; a card copy of a pack
+#                             shadows the bundled one (see mod_loader.lua).
 #   ./dev/build.sh clean      drop staged files, converted assets and output
 #
 # Output goes to dev/dist. Run ./dev/setup.sh once first.
@@ -21,14 +28,24 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/config.sh"
 
 TARGET="cia"
 RELEASE=0
+SUPER=0
 for arg in "$@"; do
     case "$arg" in
         --release) RELEASE=1 ;;
+        --super) SUPER=1 ;;
         cia|3dsx|all|clean) TARGET="$arg" ;;
         "") ;;
-        *) die "unknown argument: $arg (expected cia, 3dsx, all, clean, or --release)" ;;
+        *) die "unknown argument: $arg (expected cia, 3dsx, all, clean, --release, or --super)" ;;
     esac
 done
+
+# The packs the super build bundles, and where they live. The list is explicit
+# (not a glob) so a stray folder in the mods repo never ships by accident.
+SUPER_MODS_DIR="${SUPER_MODS_DIR:-$REPO_ROOT/../balatro3ds-mods}"
+SUPER_PACKS=(
+    BuncoPack CryptidPack JestPack KCVanillaPack KCVanillaSwiss
+    MikasPack MoreFluffPack NeatoPack PaperbackPack PokermonPack
+)
 
 JOBS="$(getconf _NPROCESSORS_ONLN)"
 ASSET_CACHE="$CACHE_DIR/assets"
@@ -84,6 +101,27 @@ rsync -a --delete --delete-excluded \
 if [[ "$RELEASE" == "1" ]]; then
     rm -f "$STAGE_DIR/benchmark.lua"
     info "release build: omitted benchmark.lua"
+fi
+
+# --- stage bundled mods (super build only) ---------------------------------
+#
+# The packs go in exactly as they sit in the mods repo, .luac caches included,
+# minus what the game cannot load: the packs' own test suites and sprite
+# tooling. The staged copy then flows through the same asset conversion as the
+# game itself, which keeps each pack's checked-in .t3x and drops its .png.
+if [[ "$SUPER" == "1" ]]; then
+    [[ -d "$SUPER_MODS_DIR" ]] || die "--super: mods repo not found at $SUPER_MODS_DIR (set SUPER_MODS_DIR)"
+    info "staging bundled mods from $SUPER_MODS_DIR"
+    mkdir -p "$STAGE_DIR/mods_bundled"
+    for pack in "${SUPER_PACKS[@]}"; do
+        [[ -d "$SUPER_MODS_DIR/$pack" ]] || die "--super: pack folder missing: $SUPER_MODS_DIR/$pack"
+        rsync -a \
+            --exclude 'test_*.lua' \
+            --exclude '*.py' \
+            --exclude '*.zip' \
+            --exclude '__pycache__/' \
+            "$SUPER_MODS_DIR/$pack/" "$STAGE_DIR/mods_bundled/$pack/"
+    done
 fi
 
 # The soundtrack stays Vorbis: as PCM it would add roughly 23 MB to romfs, and only two
@@ -419,9 +457,12 @@ PY
     IFS='.' read -r major minor micro <<< "$APP_VERSION"
     major="${major:-0}"; minor="${minor:-0}"; micro="${micro:-0}"
 
+    local cia_out="$DIST_DIR/$APP_TITLE.cia"
+    if [[ "$SUPER" == "1" ]]; then cia_out="$DIST_DIR/$APP_TITLE-super.cia"; fi
+
     info "building .cia (makerom)"
     "$MAKEROM" -f cia \
-        -o "$DIST_DIR/$APP_TITLE.cia" \
+        -o "$cia_out" \
         -target t \
         -exefslogo \
         -elf "$ELF" \
@@ -435,7 +476,7 @@ PY
         -DAPP_ROMFS="$romfs" \
         -DAPP_VERSION_MAJOR="$major"
 
-    info "wrote $DIST_DIR/$APP_TITLE.cia ($(du -h "$DIST_DIR/$APP_TITLE.cia" | cut -f1))"
+    info "wrote $cia_out ($(du -h "$cia_out" | cut -f1))"
 }
 
 case "$TARGET" in

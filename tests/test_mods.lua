@@ -20,6 +20,7 @@ local function wipe_mods()
         end
     end
     if fs.getInfo(ModLoader.DIR) then rm(ModLoader.DIR) end
+    if fs.getInfo(ModLoader.BUNDLED_DIR) then rm(ModLoader.BUNDLED_DIR) end
     ModLoader.reset()
 end
 
@@ -46,9 +47,9 @@ local function fixture_enable(id)
     love.filesystem.write(ModLoader.ENABLED_PATH, table.concat(ids, "\n") .. "\n")
 end
 
---- Write a mod folder: a Steamodded manifest plus its main file.
-local function write_mod(folder, manifest, main)
-    local base = ModLoader.DIR .. "/" .. folder
+--- Write a mod folder under `root`: a Steamodded manifest plus its main file.
+local function write_mod_at(root, folder, manifest, main)
+    local base = root .. "/" .. folder
     love.filesystem.createDirectory(base)
     local parts = {}
     for k, v in pairs(manifest) do
@@ -70,6 +71,17 @@ local function write_mod(folder, manifest, main)
         love.filesystem.write(base .. "/assets/1x/" .. file, "png")
     end
     fixture_enable(manifest.id or folder)
+end
+
+--- Write a mod folder on the card.
+local function write_mod(folder, manifest, main)
+    write_mod_at(ModLoader.DIR, folder, manifest, main)
+end
+
+--- Write a mod folder into the bundled root, as the super build stages it: same
+--- layout, but inside the game archive instead of on the card.
+local function write_bundled_mod(folder, manifest, main)
+    write_mod_at(ModLoader.BUNDLED_DIR, folder, manifest, main)
 end
 
 local EXAMPLE = [[
@@ -799,6 +811,106 @@ suite.test("a saved enabled set boots exactly those mods", function()
     T.assert_true(ModLoader.by_id.Dep.error:find("turned off", 1, true) ~= nil, ModLoader.by_id.Dep.error)
     T.assert_eq(#ModLoader.fingerprint(), 1)
     T.assert_eq(ModLoader.fingerprint()[1].id, "Plain")
+    wipe_mods()
+end)
+
+--------------------------------------------------------------------------------
+-- Bundled mods (the second root, inside the game archive)
+--------------------------------------------------------------------------------
+
+suite.test("bundled mods are scanned and load like card mods, marked in the log", function()
+    wipe_mods()
+    write_bundled_mod("Bundled", { id = "BundledMod", prefix = "bun", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    write_mod("Card", { id = "CardMod", prefix = "crd", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    ModLoader.load_all()
+    local b = ModLoader.by_id.BundledMod
+    T.assert_eq(b.status, "loaded", tostring(b.error))
+    T.assert_eq(b.bundled, true)
+    T.assert_eq(b.path, ModLoader.BUNDLED_DIR .. "/Bundled")
+    T.assert_true(JOKER_DEFS.j_bun_j ~= nil, "a bundled mod's content registers")
+    T.assert_eq(ModLoader.by_id.CardMod.bundled, false)
+    local log = love.filesystem.read(ModLoader.LOG_PATH)
+    T.assert_true(log:find("[OK] BundledMod 1 (Bundled, bundled)", 1, true) ~= nil,
+        "the log line marks the bundled origin")
+    wipe_mods()
+end)
+
+suite.test("a card copy shadows the bundled mod with the same id", function()
+    wipe_mods()
+    write_bundled_mod("Shadow", { id = "ShadowMod", prefix = "shb", main_file = "main.lua", version = "1" },
+        'SMODS.Joker { key = "b", rarity = 1, sprite = "b.png" }')
+    write_mod("Shadow", { id = "ShadowMod", prefix = "shc", main_file = "main.lua", version = "2" },
+        'SMODS.Joker { key = "c", rarity = 1, sprite = "c.png" }')
+    ModLoader.load_all()
+    local mod = ModLoader.by_id.ShadowMod
+    T.assert_eq(mod.status, "loaded", tostring(mod.error))
+    T.assert_eq(mod.version, "2", "the card copy is the one that counts")
+    T.assert_eq(mod.bundled, false)
+    T.assert_true(JOKER_DEFS.j_shc_c ~= nil, "the card copy's content registers")
+    T.assert_eq(JOKER_DEFS.j_shb_b, nil, "the bundled copy never registers")
+    local n = 0
+    for _, m in ipairs(ModLoader.mods) do if m.id == "ShadowMod" then n = n + 1 end end
+    T.assert_eq(n, 1, "the shadowed copy is not double-listed")
+    T.assert_true(love.filesystem.read(ModLoader.LOG_PATH):find("shadowed", 1, true) ~= nil,
+        "the log says the bundled copy was shadowed")
+    wipe_mods()
+end)
+
+suite.test("loading a bundled mod writes nothing into its folder; its cache redirects to the card", function()
+    wipe_mods()
+    write_bundled_mod("Pure", { id = "PureMod", prefix = "pur", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    local fs = love.filesystem
+    local writes, real_write = {}, fs.write
+    fs.write = function(path, data)
+        writes[#writes + 1] = path
+        return real_write(path, data)
+    end
+    ModLoader.load_all()
+    fs.write = real_write
+    local mod = ModLoader.by_id.PureMod
+    T.assert_eq(mod.status, "loaded", tostring(mod.error))
+    T.assert_eq(mod.timings.cache, "miss", "first load compiles from source")
+    for _, p in ipairs(writes) do
+        T.assert_true(p:sub(1, #ModLoader.BUNDLED_DIR + 1) ~= ModLoader.BUNDLED_DIR .. "/",
+            "no write may land in the bundled root, got " .. p)
+    end
+    T.assert_true(fs.getInfo(ModLoader.CACHE_DIR .. "/PureMod.luac", "file") ~= nil,
+        "the compiled cache went to the cache dir on the card")
+    T.assert_eq(fs.getInfo(ModLoader.BUNDLED_DIR .. "/Pure/main.lua.luac", "file"), nil,
+        "nothing was written beside the bundled main file")
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.PureMod.timings.cache, "hit",
+        "the redirected cache serves the next load")
+    wipe_mods()
+end)
+
+suite.test("a bundled mod runs from the cache shipped beside its main file", function()
+    wipe_mods()
+    write_bundled_mod("Shipped", { id = "ShippedMod", prefix = "shp", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.ShippedMod.timings.cache, "miss")
+    -- Ship the compiled cache beside the bundled main file instead, as the super
+    -- build does, and take the card cache away: the next load must run off the
+    -- shipped bytes alone.
+    local bytes = love.filesystem.read(ModLoader.CACHE_DIR .. "/ShippedMod.luac")
+    T.assert_true(bytes ~= nil, "the first load produced a cache to ship")
+    love.filesystem.write(ModLoader.BUNDLED_DIR .. "/Shipped/main.lua.luac", bytes)
+    love.filesystem.remove(ModLoader.CACHE_DIR .. "/ShippedMod.luac")
+    ModLoader.load_all()
+    local mod = ModLoader.by_id.ShippedMod
+    T.assert_eq(mod.status, "loaded", tostring(mod.error))
+    T.assert_eq(mod.timings.cache, "hit", "the shipped cache is read before compiling")
+    T.assert_eq(#mod.registered.jokers, 1, "the shipped chunk registers the same content")
+    wipe_mods()
+end)
+
+suite.test("bundled mods are opt-in too: no selection, no load", function()
+    wipe_mods()
+    write_bundled_mod("Bundled", { id = "BundledMod", prefix = "bun", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    love.filesystem.remove(ModLoader.ENABLED_PATH) -- a fresh card: nothing was ever chosen
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.BundledMod.status, "disabled")
+    T.assert_eq(JOKER_DEFS.j_bun_j, nil, "a bundled mod registers nothing while it is off")
     wipe_mods()
 end)
 

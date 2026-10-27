@@ -32,6 +32,15 @@ mods/
 
 **Mod switches never load anything while a run is in progress.** The Mods page is reached from the main menu, but if a switch is flipped while a run is in memory, turning a mod on only queues the choice (its row reads "Loads at next boot") and the mod loads when the game next starts.
 
+### Bundled mods (the "super" build)
+
+One build variant — `dev/build.sh --super`, published as `Balatro-super.cia` — carries a set of packs inside the game archive itself, in a `mods_bundled/` folder with the same layout as above. They are part of the game install, not the card:
+
+- Bundled packs appear in **Options → Mods** and in `mods_log.txt` exactly like card mods; the log line marks them `(…, bundled)`. Everything else about them is the same too: they are **opt-in** (nothing loads until you turn it on), turning one on loads it in-session, and the selection still lives in `mods/enabled.txt` on the card.
+- **A card copy wins.** Identity is the manifest `id`: if the same id is also in `mods/`, the card copy is the one that loads and the bundled copy is skipped (the log says it was shadowed). To update a bundled pack, drop the newer version in `mods/` as usual; delete the card copy and the bundled one takes over again.
+- The archive is read-only, so nothing is ever written into a bundled pack's folder. A bundled pack's compiled cache (the `<main_file>.luac` the loader keeps to skip recompiling) is redirected to `mods/.cache/` on the card; the super build also ships a precompiled cache beside each bundled main file, so even a bundled pack's first load skips compiling.
+- **Bundled packs can only be removed by installing a different CIA** (the plain build has none). Turning a bundled pack off just stops it loading, like any other mod.
+
 ## Manifest
 
 Steamodded's format. `id`, `prefix` and `main_file` are required.

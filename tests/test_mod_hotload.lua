@@ -25,11 +25,36 @@ local function wipe_mods()
         end
     end
     if fs.getInfo(ModLoader.DIR) then rm(ModLoader.DIR) end
+    if fs.getInfo(ModLoader.BUNDLED_DIR) then rm(ModLoader.BUNDLED_DIR) end
     ModLoader.reset()
 end
 
 local function write_mod(folder, manifest, main)
     local base = ModLoader.DIR .. "/" .. folder
+    love.filesystem.createDirectory(base)
+    local parts = {}
+    for k, v in pairs(manifest) do
+        local value
+        if type(v) == "table" then
+            local items = {}
+            for _, x in ipairs(v) do items[#items + 1] = ("%q"):format(x) end
+            value = "[" .. table.concat(items, ", ") .. "]"
+        else
+            value = ("%q"):format(tostring(v))
+        end
+        parts[#parts + 1] = ("%q: %s"):format(k, value)
+    end
+    love.filesystem.write(base .. "/" .. folder .. ".json", "{" .. table.concat(parts, ",\n") .. "}")
+    love.filesystem.write(base .. "/" .. (manifest.main_file or "main.lua"), main)
+    for file in main:gmatch('sprite%s*=%s*"([^"]+)"') do
+        love.filesystem.write(base .. "/assets/1x/" .. file, "png")
+    end
+end
+
+--- Write a mod folder into the bundled root, as the super build stages it. The
+--- selection still comes from the card (write_enabled), as it does on hardware.
+local function write_bundled_mod(folder, manifest, main)
+    local base = ModLoader.BUNDLED_DIR .. "/" .. folder
     love.filesystem.createDirectory(base)
     local parts = {}
     for k, v in pairs(manifest) do
@@ -248,6 +273,34 @@ SMODS.Joker { key = "j", loc_txt = { name = "J", text = { "x" } }, rarity = 1, c
     T.assert_true(ModLoader.set_enabled("Sticky", true))
     T.assert_eq(sticky.status, "loaded")
     T.assert_eq(sticky._runs, 1, "re-enabling a live mod does not re-run it")
+    wipe_mods()
+end)
+
+suite.test("hot-load: a bundled mod loads when switched on, all writes on the card", function()
+    wipe_mods()
+    write_bundled_mod("BundledHot", { id = "BundledHot", prefix = "bht", main_file = "main.lua", version = "1" },
+        one_joker("j"))
+    ModLoader.load_all() -- not in the selection: off, as bundled mods are opt-in too
+    T.assert_eq(ModLoader.by_id.BundledHot.status, "disabled")
+    T.assert_eq(JOKER_DEFS.j_bht_j, nil)
+
+    local fs = love.filesystem
+    local writes, real_write = {}, fs.write
+    fs.write = function(path, data)
+        writes[#writes + 1] = path
+        return real_write(path, data)
+    end
+    T.assert_true(ModLoader.set_enabled("BundledHot", true))
+    fs.write = real_write
+    local mod = ModLoader.by_id.BundledHot
+    T.assert_eq(mod.status, "loaded", tostring(mod.error))
+    T.assert_true(JOKER_DEFS.j_bht_j ~= nil, "the bundled mod's content registers by the switch")
+    for _, p in ipairs(writes) do
+        T.assert_true(p:sub(1, #ModLoader.BUNDLED_DIR + 1) ~= ModLoader.BUNDLED_DIR .. "/",
+            "no write may land in the bundled root, got " .. p)
+    end
+    T.assert_true(fs.getInfo(ModLoader.CACHE_DIR .. "/BundledHot.luac", "file") ~= nil,
+        "its compiled cache landed on the card, not in the archive")
     wipe_mods()
 end)
 
