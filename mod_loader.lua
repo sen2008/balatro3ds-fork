@@ -36,7 +36,9 @@ ModLoader.ENABLED_PATH = "sdmc/mods/enabled.txt"
 
 --- Every mod found, in load order. Each: `{ id, name, version, prefix, author, description,
 --- path, main_file, dependencies, status = "loaded"|"error"|"disabled"|"pending", error,
---- runtime_errors, registered = { jokers, consumables, vouchers, sprites } }`. "pending" is
+--- runtime_errors, registered = { jokers, consumables, vouchers, sprites },
+--- timings = { manifest, compile, execute, sprites, refresh, cache } }` (phases in
+--- milliseconds, see "Load timing"). "pending" is
 --- a mod the player turned on during a run: queued, it loads at the next boot.
 ModLoader.mods = {}
 ModLoader.by_id = {}
@@ -47,6 +49,33 @@ ModLoader.enabled = {}
 --- complement of `enabled` among the mods on the card, computed by `load_all` and kept in
 --- step by `set_enabled`, because the load paths ask "is this one off?" a lot.
 ModLoader.disabled = {}
+
+--------------------------------------------------------------------------------
+-- Load timing
+--------------------------------------------------------------------------------
+
+--- Milliseconds on the CPU clock. `love.timer` is the frame clock (the test harness
+--- freezes it; hardware steps it per frame), while `os.clock` runs in both places, so
+--- phase timings are comparable between them. Only ever take the difference of two
+--- calls -- the absolute value means nothing.
+local function clock_ms()
+    return os.clock() * 1000
+end
+
+--- The phases of one mod's load, in milliseconds; every mod record carries one as
+--- `timings`. `sprites` is part of `execute` -- sprites register while the main file
+--- runs -- broken out because it is the part that stats files on the card. `refresh` is
+--- set only on the mod whose load triggered a post-load refresh (nil otherwise).
+--- `cache` says how the main file was compiled: "hit" (the precompiled cache beside
+--- it, see `compile_main`), "miss" (compiled from source), or nil (never compiled).
+local function new_timings()
+    return { manifest = 0, compile = 0, execute = 0, sprites = 0, refresh = nil, cache = nil }
+end
+
+--- Post-load refresh time across this session (see `refresh_after_load`), in
+--- milliseconds over `refresh_calls` calls. `reset` starts them over.
+ModLoader.refresh_ms = 0
+ModLoader.refresh_calls = 0
 
 local function fs()
     return love and love.filesystem
@@ -62,7 +91,7 @@ local function new_mod(folder)
         id = folder, name = folder, version = "0.0.0", prefix = folder,
         folder = folder, path = ModLoader.DIR .. "/" .. folder,
         author = "", description = "", dependencies = {},
-        status = "error", error = nil, runtime_errors = {},
+        status = "error", error = nil, runtime_errors = {}, timings = new_timings(),
         registered = { jokers = {}, sprites = {}, consumables = {}, vouchers = {}, deck_skins = {}, strings = {} },
     }
 end
@@ -138,17 +167,80 @@ local function check_dependencies(mod)
     return nil, waiting
 end
 
+--------------------------------------------------------------------------------
+-- Precompiled main files
+--------------------------------------------------------------------------------
+
+--- Compiling a pack's main file from source is about half its load time, so the loader
+--- keeps the compiled chunk beside it (`<main_file>.luac`) and runs that instead when
+--- it is provably the same source: the cache's first line records the source's size
+--- and modtime, the cache format and the Lua version, and anything that does not
+--- match -- or will not load -- falls back to compiling the source, which then
+--- rewrites the cache. The known soft spot of a size+modtime key: an edit that keeps
+--- the exact byte size and lands inside the filesystem's modtime tick (2s on FAT)
+--- would run stale until the next change; deleting the `.luac` file always forces a
+--- fresh compile. Semantics are the source's either way -- the dump keeps the
+--- original chunk name and line numbers, so errors read as they did from source.
+local LUAC_FORMAT = "balatro3ds-luac 1"
+local loadstring_ = loadstring or load
+local lua_version_tag = (tostring(_VERSION):gsub("%s+", "_"))
+
+local function luac_path(mod)
+    return mod.path .. "/" .. mod.main_file .. ".luac"
+end
+
+--- @return function|nil chunk, string how: "hit" when the cache supplied it, else "miss"
+local function compile_main(mod, f, main_path, info)
+    local cache_path = luac_path(mod)
+    if loadstring_ and info.size and f.read then
+        local raw = f.read(cache_path)
+        local nl = raw and raw:find("\n", 1, true)
+        if nl then
+            local header, body = raw:sub(1, nl - 1), raw:sub(nl + 1)
+            local size, modtime, version = header:match("^" .. LUAC_FORMAT:gsub("%W", "%%%1") .. " (%d+) (%d+) (%S+)$")
+            if size and tonumber(size) == info.size and tonumber(modtime) == (info.modtime or 0)
+                and version == lua_version_tag then
+                local chunk = loadstring_(body, "@" .. main_path)
+                if chunk then return chunk, "hit" end
+            end
+        end
+    end
+    local chunk, err = f.load(main_path)
+    if chunk and loadstring_ and string.dump and info.size and f.write then
+        local ok, dump = pcall(string.dump, chunk)
+        if ok and dump then
+            local header = ("%s %d %d %s\n"):format(LUAC_FORMAT, info.size, info.modtime or 0, lua_version_tag)
+            pcall(f.write, cache_path, header .. dump)
+        end
+    end
+    if not chunk then return nil, err end
+    return chunk, "miss"
+end
+
 local function run_mod(mod)
     local f = fs()
     local main_path = mod.path .. "/" .. mod.main_file
-    if not f.getInfo(main_path, "file") then
+    local info = f.getInfo(main_path)
+    if not (info and info.type == "file") then
         return fail(mod, "main_file '" .. mod.main_file .. "' not found")
     end
-    local chunk, err = f.load(main_path)
-    if not chunk then return fail(mod, err or "could not compile " .. mod.main_file) end
+    local tm = mod.timings or new_timings()
+    mod.timings = tm
+    local t0 = clock_ms()
+    local chunk, how = compile_main(mod, f, main_path, info)
+    tm.compile = tm.compile + (clock_ms() - t0)
+    if not chunk then return fail(mod, how or "could not compile " .. mod.main_file) end
+    tm.cache = how
     setfenv(chunk, SMODS.mod_environment(mod))
+    local sink = { ms = 0 }
+    local prev_sink = SMODS.sprite_time_sink
+    SMODS.sprite_time_sink = sink
     SMODS.current_mod = mod
+    t0 = clock_ms()
     local ok, run_err = pcall(chunk)
+    tm.execute = tm.execute + (clock_ms() - t0)
+    SMODS.sprite_time_sink = prev_sink
+    tm.sprites = tm.sprites + sink.ms
     SMODS.current_mod = nil
     if not ok then
         SMODS.rollback(mod)
@@ -217,13 +309,19 @@ end
 --- need nothing at all -- they read the registries as they roll, behind caches keyed by
 --- the registered ids themselves. At boot no game exists yet, so only the collection
 --- step runs, exactly as before.
+--- @return number milliseconds the refresh took (also folded into `ModLoader.refresh_ms`)
 function ModLoader.refresh_after_load()
+    local t0 = clock_ms()
     local ok, catalog = pcall(require, "collection_catalog")
     if ok and type(catalog) == "table" and catalog.invalidate_cache then catalog.invalidate_cache() end
     local game = G
     if type(game) == "table" and SMODS and SMODS.install_into_game then
         SMODS.install_into_game(game)
     end
+    local ms = clock_ms() - t0
+    ModLoader.refresh_ms = ModLoader.refresh_ms + ms
+    ModLoader.refresh_calls = ModLoader.refresh_calls + 1
+    return ms
 end
 
 --- Whether a mod may be loaded into the running session. Loading registers content and
@@ -298,6 +396,7 @@ end
 function ModLoader.load_mod(target)
     local mod = type(target) == "table" and target or ModLoader.by_id[target]
     if type(mod) ~= "table" then return false, "no such mod" end
+    mod.timings = mod.timings or new_timings()
     if mod.status == "loaded" then return true end
     if ModLoader.disabled[mod.id] then
         return false, "mod '" .. mod.id .. "' is not turned on"
@@ -310,14 +409,14 @@ function ModLoader.load_mod(target)
     end
     if mod._live then
         mod.status, mod.error = "loaded", nil
-        ModLoader.refresh_after_load()
+        mod.timings.refresh = ModLoader.refresh_after_load()
         ModLoader.write_log()
         return true
     end
     selection_grew = false
     local ok = load_with_dependencies(mod, {})
     if selection_grew then write_enabled() end
-    if ok then ModLoader.refresh_after_load() end
+    if ok then mod.timings.refresh = ModLoader.refresh_after_load() end
     ModLoader.write_log()
     return ok, ok and nil or mod.error
 end
@@ -381,6 +480,8 @@ function ModLoader.reset()
     for _, mod in ipairs(ModLoader.mods) do SMODS.rollback(mod) end
     ModLoader.mods = {}
     ModLoader.by_id = {}
+    ModLoader.refresh_ms = 0
+    ModLoader.refresh_calls = 0
 end
 
 --- Discover and load every mod. Safe to call without a filesystem (does nothing).
@@ -395,7 +496,10 @@ function ModLoader.load_all()
     local found = {}
     for _, folder in ipairs(f.getDirectoryItems(ModLoader.DIR) or {}) do
         if is_dir(ModLoader.DIR .. "/" .. folder) then
-            found[#found + 1] = read_manifest(folder)
+            local t0 = clock_ms()
+            local mod = read_manifest(folder)
+            mod.timings.manifest = clock_ms() - t0
+            found[#found + 1] = mod
         end
     end
     table.sort(found, function(a, b)
@@ -554,9 +658,36 @@ local function log_lines()
         else
             lines[#lines + 1] = "    " .. tostring(mod.error)
         end
+        local tm = mod.timings
+        if tm and (tm.compile + tm.execute) > 0 then
+            local line = ("    timings: manifest %.2f ms, lua %.2f ms (compile %.2f, execute %.2f, sprites %.2f of execute)"):format(
+                tm.manifest, tm.compile + tm.execute, tm.compile, tm.execute, tm.sprites)
+            if tm.cache then line = line .. ", luac " .. tm.cache end
+            if tm.refresh then line = line .. (", refresh %.2f ms"):format(tm.refresh) end
+            lines[#lines + 1] = line
+        end
         for _, err in ipairs(mod.runtime_errors or {}) do
             lines[#lines + 1] = "    runtime: " .. tostring(err)
         end
+    end
+    -- Phase totals, so a slow boot reads straight off this file: which part of loading
+    -- ate the time, summed over every pack scanned. Refresh is totalled apart from the
+    -- per-mod phases: it runs once per load pass (and once per hot-load), not per mod.
+    local tman, tcomp, texec, tspr, timed = 0, 0, 0, 0, false
+    for _, mod in ipairs(ModLoader.mods) do
+        local tm = mod.timings
+        if tm then
+            timed = true
+            tman = tman + tm.manifest
+            tcomp = tcomp + tm.compile
+            texec = texec + tm.execute
+            tspr = tspr + tm.sprites
+        end
+    end
+    if timed then
+        lines[#lines + 1] = ""
+        lines[#lines + 1] = ("Load timings (ms): manifest %.2f, lua %.2f (compile %.2f, execute %.2f, sprites %.2f of execute), refresh %.2f over %d call(s)"):format(
+            tman, tcomp + texec, tcomp, texec, tspr, ModLoader.refresh_ms or 0, ModLoader.refresh_calls or 0)
     end
     return lines
 end

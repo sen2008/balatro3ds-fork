@@ -98,23 +98,56 @@ end
 --- sprite warming) resolves a mod card without knowing anything about mods.
 SMODS.MOD_ATLAS = "@mod"
 
+--- Phase timing for the loader: while a mod's main file runs, `mod_loader` points this at
+--- the running mod's sink (`{ ms = 0 }`) and sprite registration adds the milliseconds it
+--- spends, so the loader can say how much of a mod's load was sprite bookkeeping (each
+--- registration stats the image's files on the card). Nil outside a mod load.
+SMODS.sprite_time_sink = nil
+
 --- Register one of a mod's images and return its sprite key. The file has to exist -- as the
 --- `.png` it is named by, or as the `.t3x` the 3DS loads in its place -- so a typo is a load error
 --- naming the file, not an invisible card.
-local function register_sprite(mod, file, what, key, field)
+--- Image files present in each mod's assets/1x, by directory: one listing per folder,
+--- taken lazily at its first registration, instead of a `getInfo` stat per sprite (on
+--- the card each stat is an SD call, and a pack registers hundreds of sprites). Only a
+--- listing HIT is trusted; a miss falls back to the `getInfo` check below, which stays
+--- authoritative -- a file written after its folder was listed, or a folder that will
+--- not list, is still found (or still correctly reported missing). The one asymmetry:
+--- a file deleted after its folder was listed still reads as present until the next
+--- boot; packs only change between boots, so that cannot bite in play.
+local sprite_dir_sets = {}
+
+local function sprite_file_exists(f, dir, path, file)
+    local set = sprite_dir_sets[dir]
+    if set == nil and f.getDirectoryItems then
+        local items = f.getDirectoryItems(dir)
+        if items then
+            set = {}
+            for _, name in ipairs(items) do set[name] = true end
+            sprite_dir_sets[dir] = set
+        end
+    end
+    if set and set[file] then return true end
+    local t3x = path:gsub("%.[^./]+$", "") .. ".t3x"
+    if f.getInfo(path, "file") or f.getInfo(t3x, "file") then return true end
+    if set and set[file:gsub("%.[^./]+$", "") .. ".t3x"] then return true end
+    return false
+end
+
+local function register_sprite_impl(mod, file, what, key, field)
     if type(file) ~= "string" or not file:match("%S") then
         error(("%s '%s' needs %s = \"Name.png\" (an image in assets/1x)"):format(what, key, field), 0)
     end
     if file:find("..", 1, true) or file:sub(1, 1) == "/" then
         error(("%s '%s': %s must be a file inside assets/1x"):format(what, key, field), 0)
     end
-    local path = mod.path .. "/assets/1x/" .. file
+    local dir = mod.path .. "/assets/1x"
+    local path = dir .. "/" .. file
     local f = love and love.filesystem
     if f and f.getInfo then
-        local t3x = path:gsub("%.[^./]+$", "") .. ".t3x"
-        if not (f.getInfo(path, "file") or f.getInfo(t3x, "file")) then
+        if not sprite_file_exists(f, dir, path, file) then
             error(("%s '%s': %s '%s' not found in assets/1x (the 3DS loads %s)"):format(
-                what, key, field, file, t3x:match("[^/]+$")), 0)
+                what, key, field, file, file:gsub("%.[^./]+$", "") .. ".t3x"), 0)
         end
     end
     local sprite_key = "mod:" .. mod.prefix .. ":" .. file
@@ -123,6 +156,16 @@ local function register_sprite(mod, file, what, key, field)
         mod.registered.sprites[#mod.registered.sprites + 1] = sprite_key
     end
     return sprite_key
+end
+
+local function register_sprite(mod, file, what, key, field)
+    local sink = SMODS.sprite_time_sink
+    if not sink then return register_sprite_impl(mod, file, what, key, field) end
+    local t0 = os.clock()
+    local ok, result = pcall(register_sprite_impl, mod, file, what, key, field)
+    sink.ms = sink.ms + (os.clock() - t0) * 1000
+    if not ok then error(result, 0) end
+    return result
 end
 
 --- The file behind a sprite key, or nil when the key is not a mod's.

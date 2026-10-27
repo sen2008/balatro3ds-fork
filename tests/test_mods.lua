@@ -606,6 +606,58 @@ suite.test("atlases, missing images and stray atlas/pos are load errors that say
     wipe_mods()
 end)
 
+suite.test("a mod's main file is cached compiled and reused while it is unchanged", function()
+    write_mod("Cache", { id = "Cache", prefix = "cache", main_file = "main.lua", version = "1" },
+        'SMODS.Joker { key = "a", rarity = 1, sprite = "a.png" }')
+    ModLoader.load_all()
+    local mod = ModLoader.by_id.Cache
+    T.assert_eq(mod.status, "loaded", mod.error)
+    T.assert_eq(mod.timings.cache, "miss", "the first boot compiles from source")
+    T.assert_true(love.filesystem.getInfo(ModLoader.DIR .. "/Cache/main.lua.luac", "file") ~= nil,
+        "the compiled chunk is cached beside the main file")
+    ModLoader.load_all()
+    mod = ModLoader.by_id.Cache
+    T.assert_eq(mod.status, "loaded", mod.error)
+    T.assert_eq(mod.timings.cache, "hit", "an unchanged main file runs from the cache")
+    T.assert_eq(#mod.registered.jokers, 1, "the cached chunk registers the same content")
+    love.filesystem.write(ModLoader.DIR .. "/Cache/main.lua",
+        'SMODS.Joker { key = "a", rarity = 1, sprite = "a.png" }\n' ..
+        'SMODS.Joker { key = "b", rarity = 1, sprite = "b.png" }')
+    love.filesystem.write(ModLoader.DIR .. "/Cache/assets/1x/b.png", "png")
+    ModLoader.load_all()
+    mod = ModLoader.by_id.Cache
+    T.assert_eq(mod.timings.cache, "miss", "a changed main file compiles from source again")
+    T.assert_eq(#mod.registered.jokers, 2, "the new content is what loaded")
+    wipe_mods()
+end)
+
+suite.test("sprite registration lists the assets folder instead of statting every sprite", function()
+    local main = {}
+    for _, k in ipairs({ "a", "b", "c", "d", "e", "f" }) do
+        main[#main + 1] = ('SMODS.Joker { key = "%s", rarity = 1, sprite = "%s.png" }'):format(k, k)
+    end
+    write_mod("ManySprites", { id = "ManySprites", prefix = "many", main_file = "main.lua", version = "1" },
+        table.concat(main, "\n"))
+    -- f ships only the compiled texture, like a real pack: its check must still pass.
+    love.filesystem.remove(ModLoader.DIR .. "/ManySprites/assets/1x/f.png")
+    love.filesystem.write(ModLoader.DIR .. "/ManySprites/assets/1x/f.t3x", "t3x")
+    local asset_stats = 0
+    local fs = love.filesystem
+    local real_get_info = fs.getInfo
+    fs.getInfo = function(path, ...)
+        if tostring(path):find("/assets/", 1, true) then asset_stats = asset_stats + 1 end
+        return real_get_info(path, ...)
+    end
+    ModLoader.load_all()
+    fs.getInfo = real_get_info
+    local mod = ModLoader.by_id.ManySprites
+    T.assert_eq(mod.status, "loaded", mod.error)
+    T.assert_eq(#mod.registered.jokers, 6)
+    T.assert_eq(asset_stats, 2,
+        "only the .t3x-only sprite falls back to stat checks; the rest come from one folder listing")
+    wipe_mods()
+end)
+
 --------------------------------------------------------------------------------
 -- Saves
 --------------------------------------------------------------------------------
