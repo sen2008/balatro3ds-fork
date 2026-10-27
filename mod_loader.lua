@@ -15,8 +15,11 @@
 --- Every boot writes `mods/mods_log.txt` beside the mods, so a modder on hardware, with no
 --- console, can read why something did not load.
 ---
---- The player turns mods off and on in Options > Mods. The ids of the ones turned off are kept in
---- `mods/disabled.txt`, one per line, so the list survives a reboot and can be edited off the card.
+--- Mods are opt-in: the game starts with none of them loaded. The player turns mods on in
+--- Options > Mods, and the ids of the ones turned on are kept in `mods/enabled.txt`, one per
+--- line, so the selection survives a reboot and can be edited off the card. A card with no
+--- `enabled.txt` loads no mods at all. (`mods/disabled.txt`, written by older builds, is not
+--- read any more -- the enabled list is the only selection there is.)
 ---
 --- Turning a mod ON loads it into the running session there and then (`load_mod`), as long as no
 --- run is in memory; turning it OFF only records the choice -- a loaded mod's content is never
@@ -29,7 +32,7 @@ local ModLoader = {}
 
 ModLoader.DIR = "sdmc/mods"
 ModLoader.LOG_PATH = "sdmc/mods/mods_log.txt"
-ModLoader.DISABLED_PATH = "sdmc/mods/disabled.txt"
+ModLoader.ENABLED_PATH = "sdmc/mods/enabled.txt"
 
 --- Every mod found, in load order. Each: `{ id, name, version, prefix, author, description,
 --- path, main_file, dependencies, status = "loaded"|"error"|"disabled"|"pending", error,
@@ -37,7 +40,12 @@ ModLoader.DISABLED_PATH = "sdmc/mods/disabled.txt"
 --- a mod the player turned on during a run: queued, it loads at the next boot.
 ModLoader.mods = {}
 ModLoader.by_id = {}
---- The ids the player has turned off, as a set. Read from `DISABLED_PATH` by `load_all`.
+--- The player's saved selection: the ids turned on in Options > Mods, as a set. Read from
+--- `ENABLED_PATH` by `load_all`; only these mods load at boot.
+ModLoader.enabled = {}
+--- The scanned mods that are NOT in the selection, as a set: what will not load. The
+--- complement of `enabled` among the mods on the card, computed by `load_all` and kept in
+--- step by `set_enabled`, because the load paths ask "is this one off?" a lot.
 ModLoader.disabled = {}
 
 local function fs()
@@ -155,29 +163,40 @@ local function run_mod(mod)
     return mod
 end
 
-local function read_disabled()
+local function read_enabled()
     local set = {}
     local f = fs()
-    if not (f and f.getInfo and f.getInfo(ModLoader.DISABLED_PATH, "file")) then return set end
-    for line in tostring(f.read(ModLoader.DISABLED_PATH) or ""):gmatch("[^\r\n]+") do
+    if not (f and f.getInfo and f.getInfo(ModLoader.ENABLED_PATH, "file")) then return set end
+    for line in tostring(f.read(ModLoader.ENABLED_PATH) or ""):gmatch("[^\r\n]+") do
         local id = line:match("^%s*(.-)%s*$")
         if id ~= "" and id:sub(1, 1) ~= "#" then set[id] = true end
     end
     return set
 end
 
-local function write_disabled()
+local function write_enabled()
     local f = fs()
     if not (f and f.write) then return false end
     local ids = {}
-    for id in pairs(ModLoader.disabled) do ids[#ids + 1] = id end
+    for id in pairs(ModLoader.enabled) do ids[#ids + 1] = id end
     table.sort(ids)
-    if #ids == 0 and f.remove then
-        if f.getInfo(ModLoader.DISABLED_PATH, "file") then pcall(f.remove, ModLoader.DISABLED_PATH) end
-        return true
+    -- The file is written even when the selection is empty: its presence on the card is
+    -- the player's saved state, not an absence of one.
+    local text = "# Mods turned on in Options > Mods, one id per line.\n"
+    if #ids > 0 then text = text .. table.concat(ids, "\n") .. "\n" end
+    return (pcall(f.write, ModLoader.ENABLED_PATH, text))
+end
+
+--- Record `id` as part of the player's selection, or remove it, keeping the in-memory
+--- complement (`disabled`) in step. Saving is `write_enabled`'s job; callers choose when.
+local function select(id, on)
+    if on then
+        ModLoader.enabled[id] = true
+        ModLoader.disabled[id] = nil
+    else
+        ModLoader.enabled[id] = nil
+        ModLoader.disabled[id] = true
     end
-    local text = "# Mods turned off in Options > Mods, one id per line.\n" .. table.concat(ids, "\n") .. "\n"
-    return (pcall(f.write, ModLoader.DISABLED_PATH, text))
 end
 
 --- Whether the player can turn this mod off and on: it needs a manifest, which is where its id
@@ -222,10 +241,16 @@ function ModLoader.hot_load_allowed()
     return game.STAGE == game.STAGES.MAIN_MENU
 end
 
---- Run one mod and everything it depends on, dependencies first. The failure messages are
---- the boot pass's (`check_dependencies` says the same words there): a dependency that is
---- turned off or not installed refuses the load, one that will not run is retried here
---- and, if it still fails, refuses with "failed to load".
+--- Set by `load_with_dependencies` when it pulls a dependency into the selection;
+--- `load_mod` saves the selection again when it is set.
+local selection_grew = false
+
+--- Run one mod and everything it depends on, dependencies first. A dependency that is
+--- not installed refuses the load; one that will not run is retried here and, if it
+--- still fails, refuses with "failed to load" -- the boot pass's words. A dependency
+--- that simply was not in the player's selection is no refusal in a session: it is
+--- loaded on the way and joins the selection, because the boot pass pulls nothing in,
+--- so the selection has to name it for the set that works here to survive a reboot.
 --- @return boolean loaded
 local function load_with_dependencies(mod, visiting)
     if mod.status == "loaded" then return true end
@@ -243,14 +268,16 @@ local function load_with_dependencies(mod, visiting)
                 visiting[mod.id] = nil
                 fail(mod, "needs mod '" .. id .. "', which is not installed")
                 return false
-            elseif other.status == "disabled" or ModLoader.disabled[id] then
-                visiting[mod.id] = nil
-                fail(mod, "needs mod '" .. id .. "', which is turned off")
-                return false
-            elseif other.status ~= "loaded" and not load_with_dependencies(other, visiting) then
-                visiting[mod.id] = nil
-                fail(mod, "needs mod '" .. id .. "', which failed to load")
-                return false
+            elseif other.status ~= "loaded" then
+                if not load_with_dependencies(other, visiting) then
+                    visiting[mod.id] = nil
+                    fail(mod, "needs mod '" .. id .. "', which failed to load")
+                    return false
+                end
+                if not ModLoader.enabled[id] then
+                    select(id, true)
+                    selection_grew = true
+                end
             end
         end
     end
@@ -273,7 +300,7 @@ function ModLoader.load_mod(target)
     if type(mod) ~= "table" then return false, "no such mod" end
     if mod.status == "loaded" then return true end
     if ModLoader.disabled[mod.id] then
-        return false, "mod '" .. mod.id .. "' is turned off"
+        return false, "mod '" .. mod.id .. "' is not turned on"
     end
     if ModLoader.by_id[mod.id] ~= mod then
         return false, mod.error or ("another mod already uses the id '" .. mod.id .. "'")
@@ -287,7 +314,9 @@ function ModLoader.load_mod(target)
         ModLoader.write_log()
         return true
     end
+    selection_grew = false
     local ok = load_with_dependencies(mod, {})
+    if selection_grew then write_enabled() end
     if ok then ModLoader.refresh_after_load() end
     ModLoader.write_log()
     return ok, ok and nil or mod.error
@@ -306,13 +335,15 @@ local function retry_dependants()
     end
 end
 
---- Turn a mod on or off and save the choice.
+--- Turn a mod on or off and save the choice: the selection in `ENABLED_PATH` is the
+--- whole of it, for this session and every boot after.
 ---
---- ON loads the mod into the session at once (`load_mod`: the mod, after anything it
---- depends on), as long as no run is in memory (`hot_load_allowed`); inside a run the
---- choice is queued instead -- the mod's status becomes "pending" and it loads at the
---- next boot. A mod whose content never left the session (turned off earlier, see
---- below) is marked loaded again without being re-run.
+--- ON adds the mod to the selection and loads it into the session at once (`load_mod`:
+--- the mod, after anything it depends on -- a dependency outside the selection is
+--- loaded on the way and joins the selection too), as long as no run is in memory
+--- (`hot_load_allowed`); inside a run the choice is queued instead -- the mod's status
+--- becomes "pending" and it loads at the next boot. A mod whose content never left the
+--- session (turned off earlier, see below) is marked loaded again without being re-run.
 ---
 --- OFF only records the choice. A loaded mod is never unloaded mid-session -- its cards
 --- may sit in a collection, a save's history, anywhere -- so its status becomes
@@ -321,8 +352,8 @@ end
 --- @return boolean ok (the choice was saved)
 function ModLoader.set_enabled(id, enabled)
     if type(id) ~= "string" then return false end
-    ModLoader.disabled[id] = (not enabled) or nil
-    local saved = write_disabled()
+    select(id, enabled)
+    local saved = write_enabled()
     local mod = ModLoader.by_id[id]
     if mod then
         if enabled then
@@ -359,7 +390,7 @@ function ModLoader.load_all()
     if not (f and f.getDirectoryItems and f.load and f.read and f.getInfo) then return ModLoader.mods end
     if f.createDirectory then f.createDirectory(ModLoader.DIR) end
     SMODS.install_card_methods()
-    ModLoader.disabled = read_disabled()
+    ModLoader.enabled = read_enabled()
 
     local found = {}
     for _, folder in ipairs(f.getDirectoryItems(ModLoader.DIR) or {}) do
@@ -373,10 +404,19 @@ function ModLoader.load_all()
         return a.folder < b.folder
     end)
 
+    -- The selection is by id, so a mod is off exactly when its id is not in it. (A manifest
+    -- that did not read has no trustworthy id to select by; it can never be turned on.)
+    ModLoader.disabled = {}
+    for _, mod in ipairs(found) do
+        if ModLoader.can_toggle(mod) and not ModLoader.enabled[mod.id] then
+            ModLoader.disabled[mod.id] = true
+        end
+    end
+
     local prefixes = {}
     for _, mod in ipairs(found) do
         ModLoader.mods[#ModLoader.mods + 1] = mod
-        -- A mod that is turned off never runs, so whatever was wrong with it does not apply. It
+        -- A mod that is not turned on never runs, so whatever was wrong with it does not apply. It
         -- keeps its id, so dependants and the saved-run check can say it is off, not missing,
         -- but not its prefix: that is only reserved by what actually registers under it.
         if ModLoader.can_toggle(mod) and ModLoader.disabled[mod.id] then
@@ -504,7 +544,7 @@ local function log_lines()
         local tag = ({ loaded = "OK", disabled = "OFF", pending = "PENDING" })[mod.status] or "ERROR"
         lines[#lines + 1] = ("[%s] %s %s (%s)"):format(tag, mod.id, mod.version, mod.folder)
         if mod.status == "disabled" then
-            lines[#lines + 1] = "    turned off in Options > Mods (" .. ModLoader.DISABLED_PATH .. ")"
+            lines[#lines + 1] = "    not in the enabled set (" .. ModLoader.ENABLED_PATH .. ")"
         elseif mod.status == "pending" then
             lines[#lines + 1] = "    turned on during a run; loads at the next boot"
         elseif mod.status == "loaded" then

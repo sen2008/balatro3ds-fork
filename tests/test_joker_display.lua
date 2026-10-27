@@ -430,6 +430,8 @@ SMODS.Joker {
     for _, file in ipairs({ "counter.png", "flat.png", "fallback_x.png", "fallback_cash.png", "opaque.png" }) do
         fs.write(base .. "/assets/1x/" .. file, "png")
     end
+    -- Mods are opt-in: the fixture mod is the player's selection for these tests.
+    fs.write(ModLoader.ENABLED_PATH, "DispFix\n")
     ModLoader.load_all()
 end
 

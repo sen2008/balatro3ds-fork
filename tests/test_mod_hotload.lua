@@ -1,7 +1,8 @@
---- In-game mod loading: a mod turned off at boot loads into the running session when it
---- is switched on (`ModLoader.set_enabled` -> `ModLoader.load_mod`), dependencies first,
---- with the boot pass's rollback and error reporting; switching off never unloads, and
---- inside a run the switch only queues the choice for the next boot.
+--- In-game mod loading: a mod that is off at boot (mods are opt-in, so that is any mod
+--- outside the saved selection) loads into the running session when it is switched on
+--- (`ModLoader.set_enabled` -> `ModLoader.load_mod`), dependencies first, with the boot
+--- pass's rollback and error reporting; switching off never unloads, and inside a run
+--- the switch only queues the choice for the next boot.
 local T = require("tests.testlib")
 local bootstrap = require("tests.bootstrap")
 
@@ -49,9 +50,11 @@ local function write_mod(folder, manifest, main)
     end
 end
 
-local function write_disabled(ids)
+--- The player's saved selection, as a file on the card. A mod not listed here is off
+--- at boot; listing nothing (or not calling this at all) is the fresh-card state.
+local function write_enabled(ids)
     love.filesystem.createDirectory(ModLoader.DIR)
-    love.filesystem.write(ModLoader.DISABLED_PATH, table.concat(ids, "\n") .. "\n")
+    love.filesystem.write(ModLoader.ENABLED_PATH, table.concat(ids, "\n") .. "\n")
 end
 
 local function one_joker(key, sprite)
@@ -83,7 +86,7 @@ SMODS.Joker {
     end,
 }
 ]])
-    write_disabled({ "HotMod" })
+    -- No saved selection names HotMod, so the boot leaves it off (opt-in default).
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.HotMod.status, "disabled")
     T.assert_eq(JOKER_DEFS.j_hot_alpha, nil, "not registered while off")
@@ -117,7 +120,7 @@ suite.test("hot-load: a failing mod rolls back and leaves the loaded set untouch
 SMODS.Joker { key = "half", loc_txt = { name = "Half", text = { "x" } }, rarity = 1, cost = 1, sprite = "half.png" }
 error("boom")
 ]])
-    write_disabled({ "BrokenMod" })
+    write_enabled({ "GoodMod" }) -- BrokenMod stays out of the selection: off at boot.
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.GoodMod.status, "loaded")
     T.assert_eq(ModLoader.by_id.BrokenMod.status, "disabled")
@@ -136,7 +139,7 @@ error("boom")
     wipe_mods()
 end)
 
-suite.test("hot-load: dependencies load first in order; a turned-off dependency refuses", function()
+suite.test("hot-load: dependencies load first in order; an unselected dependency is pulled in", function()
     wipe_mods()
     -- A <- B <- C by dependency; C is broken, so the whole chain fails at boot.
     write_mod("ChainC", { id = "ChainC", prefix = "cc", main_file = "main.lua", version = "1" },
@@ -145,6 +148,7 @@ suite.test("hot-load: dependencies load first in order; a turned-off dependency 
         dependencies = { "ChainC (>=1)" } }, one_joker("j"))
     write_mod("ChainA", { id = "ChainA", prefix = "ca", main_file = "main.lua", version = "1",
         dependencies = { "ChainB (>=1)" } }, one_joker("j"))
+    write_enabled({ "ChainA", "ChainB", "ChainC" })
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.ChainC.status, "error")
     T.assert_eq(ModLoader.by_id.ChainB.status, "error")
@@ -162,24 +166,43 @@ suite.test("hot-load: dependencies load first in order; a turned-off dependency 
         and JOKER_DEFS.j_cb_j.order < JOKER_DEFS.j_ca_j.order,
         "dependencies registered before their dependants")
 
-    -- A dependency the player turned off refuses the load, with the boot pass's words.
+    -- At boot the chain rule is the strict one: Needy is in the selection but its
+    -- dependency is not, so Needy does not boot -- the reason is in its error.
     wipe_mods()
     write_mod("OffDep", { id = "OffDep", prefix = "od", main_file = "main.lua", version = "1" },
         one_joker("j"))
     write_mod("Needy", { id = "Needy", prefix = "nd", main_file = "main.lua", version = "1",
         dependencies = { "OffDep (>=1)" } }, one_joker("j"))
-    write_disabled({ "OffDep" })
+    write_enabled({ "Needy" })
     ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.OffDep.status, "disabled")
     T.assert_eq(ModLoader.by_id.Needy.status, "error")
-    T.assert_true(ModLoader.set_enabled("Needy", true))
-    T.assert_eq(ModLoader.by_id.Needy.status, "error", "still refused while the dependency is off")
     T.assert_true(ModLoader.by_id.Needy.error:find("turned off", 1, true) ~= nil,
         tostring(ModLoader.by_id.Needy.error))
     T.assert_eq(JOKER_DEFS.j_nd_j, nil)
-    -- Turning the dependency on heals the dependant without touching it.
-    T.assert_true(ModLoader.set_enabled("OffDep", true))
+    -- In a session, though, switching the dependant on pulls the dependency in: it
+    -- loads on the way, and joins the selection, so the set that works is the set
+    -- that boots next time.
+    T.assert_true(ModLoader.set_enabled("Needy", true))
     T.assert_eq(ModLoader.by_id.Needy.status, "loaded", tostring(ModLoader.by_id.Needy.error))
+    T.assert_eq(ModLoader.by_id.OffDep.status, "loaded", tostring(ModLoader.by_id.OffDep.error))
     T.assert_true(JOKER_DEFS.j_nd_j ~= nil)
+    T.assert_true(JOKER_DEFS.j_od_j ~= nil)
+    T.assert_true(love.filesystem.read(ModLoader.ENABLED_PATH):find("OffDep", 1, true) ~= nil,
+        "the pulled-in dependency is in the saved selection")
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Needy.status, "loaded", "the healed set survives a reboot")
+    T.assert_eq(ModLoader.by_id.OffDep.status, "loaded")
+
+    -- What still refuses: a dependency that is not on the card at all.
+    write_mod("Orphan", { id = "Orphan", prefix = "orp", main_file = "main.lua", version = "1",
+        dependencies = { "GhostMod (>=1)" } }, one_joker("j"))
+    ModLoader.load_all() -- a fresh scan, so the new folder is known to the loader
+    T.assert_true(ModLoader.set_enabled("Orphan", true))
+    T.assert_eq(ModLoader.by_id.Orphan.status, "error")
+    T.assert_true(ModLoader.by_id.Orphan.error:find("not installed", 1, true) ~= nil,
+        tostring(ModLoader.by_id.Orphan.error))
+    T.assert_eq(JOKER_DEFS.j_orp_j, nil)
     wipe_mods()
 end)
 
@@ -187,8 +210,7 @@ suite.test("hot-load: inside a run the switch only queues; off never unloads", f
     wipe_mods()
     write_mod("Fenced", { id = "Fenced", prefix = "fen", main_file = "main.lua", version = "1" },
         one_joker("j"))
-    write_disabled({ "Fenced" })
-    ModLoader.load_all()
+    ModLoader.load_all() -- not in the selection: off
     T.assert_eq(ModLoader.by_id.Fenced.status, "disabled")
 
     local game = bootstrap.new_game(7702)
@@ -198,7 +220,7 @@ suite.test("hot-load: inside a run the switch only queues; off never unloads", f
     T.assert_true(ModLoader.set_enabled("Fenced", true))
     T.assert_eq(ModLoader.by_id.Fenced.status, "pending", "queued, not loaded")
     T.assert_eq(JOKER_DEFS.j_fen_j, nil, "nothing registers mid-run")
-    T.assert_eq(ModLoader.disabled.Fenced, nil, "but the choice is recorded")
+    T.assert_eq(ModLoader.enabled.Fenced, true, "but the choice is recorded in the selection")
 
     -- Back at the menu the queued choice is still just a queue: the next boot loads it.
     game.STAGE = game.STAGES.MAIN_MENU
@@ -215,6 +237,7 @@ suite.test("hot-load: inside a run the switch only queues; off never unloads", f
 _MOD._runs = (_MOD._runs or 0) + 1
 SMODS.Joker { key = "j", loc_txt = { name = "J", text = { "x" } }, rarity = 1, cost = 1, sprite = "j.png" }
 ]])
+    write_enabled({ "Sticky" })
     ModLoader.load_all()
     local sticky = ModLoader.by_id.Sticky
     T.assert_eq(sticky.status, "loaded")
@@ -238,8 +261,7 @@ SMODS.PokerHand {
     evaluate = function(self, hand) return {} end,
 }
 ]])
-    write_disabled({ "Handsy" })
-    ModLoader.load_all()
+    ModLoader.load_all() -- not in the selection: off
 
     local game = bootstrap.new_game(7703)
     G = game

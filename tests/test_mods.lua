@@ -23,6 +23,29 @@ local function wipe_mods()
     ModLoader.reset()
 end
 
+--- Mods are opt-in: a folder on the card loads nothing until its id is in enabled.txt.
+--- The content tests in this file are about what a mod does once it is on, so writing a
+--- mod here also turns it on (adds its id to the selection file, never removes one --
+--- a test that turns a mod off keeps that choice). The selection itself is exercised
+--- by the tests at "Turning mods off and on", which rewrite or delete the file by hand.
+local function fixture_enable(id)
+    local ids, seen = {}, {}
+    local text = love.filesystem.read(ModLoader.ENABLED_PATH)
+    if text then
+        for line in text:gmatch("[^\r\n]+") do
+            local v = line:match("^%s*(.-)%s*$")
+            if v ~= "" and v:sub(1, 1) ~= "#" and not seen[v] then
+                seen[v] = true
+                ids[#ids + 1] = v
+            end
+        end
+    end
+    if id and not seen[id] then ids[#ids + 1] = id end
+    table.sort(ids)
+    love.filesystem.createDirectory(ModLoader.DIR)
+    love.filesystem.write(ModLoader.ENABLED_PATH, table.concat(ids, "\n") .. "\n")
+end
+
 --- Write a mod folder: a Steamodded manifest plus its main file.
 local function write_mod(folder, manifest, main)
     local base = ModLoader.DIR .. "/" .. folder
@@ -46,6 +69,7 @@ local function write_mod(folder, manifest, main)
     for file in main:gmatch('sprite%s*=%s*"([^"]+)"') do
         love.filesystem.write(base .. "/assets/1x/" .. file, "png")
     end
+    fixture_enable(manifest.id or folder)
 end
 
 local EXAMPLE = [[
@@ -661,11 +685,12 @@ suite.test("a mod turned off does not load, stays off across boots, and comes ba
     T.assert_eq(ModLoader.by_id.Addon.status, "loaded")
     T.assert_eq(#ModLoader.fingerprint(), 1, "only the dependant is part of a run now")
     T.assert_eq(ModLoader.fingerprint()[1].id, "Addon")
-    T.assert_true(love.filesystem.read(ModLoader.DISABLED_PATH):find("Base", 1, true) ~= nil)
+    T.assert_true(love.filesystem.read(ModLoader.ENABLED_PATH):find("Base", 1, true) == nil,
+        "the choice is the selection file: Base is out of it")
+    T.assert_true(love.filesystem.read(ModLoader.ENABLED_PATH):find("Addon", 1, true) ~= nil)
 
     -- A reboot reads the choice back: the mod does not load, and now its dependant
     -- cannot either.
-    ModLoader.disabled = {}
     ModLoader.load_all()
     T.assert_eq(ModLoader.by_id.Base.status, "disabled")
     T.assert_eq(JOKER_DEFS.j_base_j, nil, "after a reboot the turned-off mod is gone")
@@ -681,7 +706,47 @@ suite.test("a mod turned off does not load, stays off across boots, and comes ba
     T.assert_eq(ModLoader.by_id.Base.status, "loaded")
     T.assert_eq(ModLoader.by_id.Addon.status, "loaded", tostring(ModLoader.by_id.Addon.error))
     T.assert_true(JOKER_DEFS.j_base_j ~= nil)
-    T.assert_eq(love.filesystem.getInfo(ModLoader.DISABLED_PATH, "file"), nil, "nothing off, no file")
+    T.assert_true(love.filesystem.read(ModLoader.ENABLED_PATH):find("Base", 1, true) ~= nil,
+        "and Base is in the selection again, so the next boot loads it too")
+    wipe_mods()
+end)
+
+suite.test("with no saved selection, boot loads no mods at all", function()
+    wipe_mods()
+    write_mod("Base", { id = "Base", prefix = "base", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    write_mod("Addon", { id = "Addon", prefix = "add", main_file = "main.lua", version = "1",
+        dependencies = { "Base (>=1)" } }, SIMPLE_JOKER)
+    -- A fresh card: packs are on it, but the player has never chosen any.
+    love.filesystem.remove(ModLoader.ENABLED_PATH)
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Base.status, "disabled")
+    T.assert_eq(ModLoader.by_id.Addon.status, "disabled")
+    T.assert_eq(JOKER_DEFS.j_base_j, nil, "nothing registers without a selection")
+    T.assert_eq(#ModLoader.fingerprint(), 0)
+    T.assert_true(love.filesystem.read(ModLoader.LOG_PATH):find("[OFF] Base", 1, true) ~= nil,
+        "the log says the mods are there, just not turned on")
+    wipe_mods()
+end)
+
+suite.test("a saved enabled set boots exactly those mods", function()
+    wipe_mods()
+    write_mod("Solo", { id = "Solo", prefix = "solo", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    write_mod("Plain", { id = "Plain", prefix = "pln", main_file = "main.lua", version = "1" }, SIMPLE_JOKER)
+    write_mod("Dep", { id = "Dep", prefix = "dep", main_file = "main.lua", version = "1",
+        dependencies = { "Solo (>=1)" } }, SIMPLE_JOKER)
+    -- The player's saved selection, written by hand like a card edit: Plain and Dep,
+    -- but not the Solo that Dep needs. Boot pulls nothing extra in.
+    love.filesystem.write(ModLoader.ENABLED_PATH, "# my picks\nDep\nPlain\n")
+    ModLoader.load_all()
+    T.assert_eq(ModLoader.by_id.Plain.status, "loaded")
+    T.assert_true(JOKER_DEFS.j_pln_j ~= nil)
+    T.assert_eq(ModLoader.by_id.Solo.status, "disabled")
+    T.assert_eq(JOKER_DEFS.j_solo_j, nil)
+    T.assert_eq(ModLoader.by_id.Dep.status, "error",
+        "an enabled mod whose dependency is not in the set does not boot")
+    T.assert_true(ModLoader.by_id.Dep.error:find("turned off", 1, true) ~= nil, ModLoader.by_id.Dep.error)
+    T.assert_eq(#ModLoader.fingerprint(), 1)
+    T.assert_eq(ModLoader.fingerprint()[1].id, "Plain")
     wipe_mods()
 end)
 
@@ -749,6 +814,7 @@ suite.test("the example mod in dev/example_mods loads and scores", function()
             love.filesystem.write(ModLoader.DIR .. "/ExampleJokers/assets/1x/" .. file, "png")
         end
     end
+    fixture_enable("ExampleJokers") -- copied by hand above, so turn it on by hand too
     ModLoader.load_all()
     local mod = ModLoader.by_id.ExampleJokers
     T.assert_eq(mod.status, "loaded", tostring(mod.error))

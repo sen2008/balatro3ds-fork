@@ -11,7 +11,7 @@ Mods live in a `mods` folder in the game's save directory on the SD card, next t
 ```
 mods/
 ├── mods_log.txt                 written every boot: what loaded, and why anything didn't
-├── disabled.txt                 the mods turned off in Options → Mods (only while any are)
+├── enabled.txt                  the mods turned on in Options → Mods: the only ones that load
 └── ExampleJokers/
     ├── ExampleJokers.json       manifest
     ├── ExampleJokers.lua        main file
@@ -22,9 +22,11 @@ mods/
         └── ...
 ```
 
-**Options → Mods** in the game lists every mod, whether it loaded, and any errors. Each mod has an **ON/OFF** switch: tap its row, or pick it with Up/Down and press A. The ids of the mods that are off are kept in `mods/disabled.txt`, one per line, which you can also edit by hand.
+**Options → Mods** in the game lists every mod, whether it loaded, and any errors. Each mod has an **ON/OFF** switch: tap its row, or pick it with Up/Down and press A. **Mods are opt-in: the game starts with none of them loaded.** The ids of the mods that are on are kept in `mods/enabled.txt`, one per line, which you can also edit by hand; that file is the whole selection, so a card with no `mods/enabled.txt` loads no mods at all. (`mods/disabled.txt`, written by older builds, is ignored by this one — the enabled list is the only selection there is. Delete the old file or leave it; it has no effect.)
 
-**Turning a mod ON loads it into the running session at once, with no restart.** Its main file runs exactly as it does at boot (same environment, same rollback if it fails, the error on its row and in `mods_log.txt`), then the collection and the game's hand/rarity/suit tables are refreshed, so its cards can roll and be browsed straight away. Anything it depends on loads first, in dependency order; a dependency that is turned off or not installed refuses the load with that reason, the same as at boot. Turning a mod on also retries mods that failed only because it was missing. A mod that failed to load can be retried the same way: fix its files, then switch it off and on.
+**Turning a mod ON loads it into the running session at once, with no restart.** Its main file runs exactly as it does at boot (same environment, same rollback if it fails, the error on its row and in `mods_log.txt`), then the collection and the game's hand/rarity/suit tables are refreshed, so its cards can roll and be browsed straight away. Anything it depends on loads first, in dependency order; a dependency that is not installed refuses the load with that reason. A dependency that was not turned on is loaded on the way **and added to `mods/enabled.txt`**, so the set that works in the session is the set that boots next time. Turning a mod on also retries mods that failed only because it was missing. A mod that failed to load can be retried the same way: fix its files, then switch it off and on.
+
+**At boot, only the mods in `mods/enabled.txt` load — dependencies are not pulled in.** An enabled mod whose dependencies are not enabled does not load; its row and `mods_log.txt` give the reason ("needs mod '…', which is turned off"). Turn the dependency on (in the menu, which loads the mod there and then) or add its id to `mods/enabled.txt` by hand.
 
 **Turning a mod OFF only records the choice.** A loaded mod is never unloaded mid-session (its cards may be anywhere), so its content keeps working until the end of the session and it stops loading from the next boot on; its row says "applies next boot". From that next boot it doesn't run at all, and mods that depend on it don't load either.
 
