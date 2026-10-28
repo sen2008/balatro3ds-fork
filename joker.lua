@@ -1167,6 +1167,22 @@ end
 function Joker:draw()
     if not self.states.visible then return end
 
+    -- A mod sprite whose texture failed to build when this node was constructed
+    -- (a transient read/allocator failure on console) would otherwise stay blank
+    -- for the node's whole life: the constructor is the only refresh_quads caller
+    -- a node ever gets, and the booster warm pass counts a failed load as done.
+    -- Retry here, throttled per node. Mod sprites only -- SMODS.sprite_path is
+    -- nil for vanilla keys, so vanilla nodes take exactly the path they always
+    -- took, and a node whose image is present pays one nil check.
+    if self.front_sprite_key and not (self.front_sprite and self.front_sprite.image)
+        and SMODS and SMODS.sprite_path and SMODS.sprite_path(self.front_sprite_key) then
+        local now = (love.timer and love.timer.getTime and love.timer.getTime()) or 0
+        if now - (self._sprite_retry_at or -1) >= 0.5 then
+            self._sprite_retry_at = now
+            self:refresh_quads()
+        end
+    end
+
     local prev_draw_r, prev_draw_g, prev_draw_b, prev_draw_a = love.graphics.getColor()
     love.graphics.setColor(1, 1, 1, 1)
 
